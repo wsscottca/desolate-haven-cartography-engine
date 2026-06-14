@@ -69,3 +69,26 @@ fn relax_is_stable_and_never_raises_the_global_surface() {
         prev = cur;
     }
 }
+
+#[test]
+fn liquid_surface_is_reproducible_and_above_the_bed() {
+    // The render-side smoothing must be deterministic and must never push the water
+    // sheet below its own terrain bed (which would punch the surface through the land).
+    let (mesh, terrain, nb) = setup();
+    let mut f = LiquidField::new(mesh.num_regions());
+    fluid::add_rain(&mut f, &terrain, -2.0, 0.1);
+    for _ in 0..10 {
+        fluid::relax_step(&mut f, &terrain, &nb, 0.3, 0.0);
+    }
+    let exag = 120.0;
+    let s1 = fluid::liquid_surface(&mesh, &terrain, &f, &nb, exag);
+    let s2 = fluid::liquid_surface(&mesh, &terrain, &f, &nb, exag);
+    assert_eq!(s1.positions.len(), s2.positions.len());
+    for i in 0..s1.positions.len() {
+        assert_eq!(s1.positions[i].to_bits(), s2.positions[i].to_bits(), "surface must be reproducible");
+    }
+    for r in 0..mesh.num_regions() {
+        let z = s1.positions[3 * r + 2] as f64;
+        assert!(z + 1e-4 >= terrain[r] * exag, "liquid sank below the bed at {r}");
+    }
+}

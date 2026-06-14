@@ -19,6 +19,7 @@ pub mod mesh;
 pub mod elevation;
 pub mod rainfall;
 pub mod fluid;
+pub mod streams;
 pub mod liquids;
 pub mod geometry;
 pub mod biomes;

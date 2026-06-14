@@ -23,6 +23,9 @@ be handed to a Godot/C# (or DeepSeek-in-Rider) consumer without reading the sour
   use trig; that is per-front-end and not part of the shared contract.)
 - Float math is `f64`, narrowed to `f32` only at storage/output boundaries.
 - The fluid solver is fixed-step and mass-conserving.
+- Order-sensitive passes (the stream priority-flood + flow accumulation) use a **total
+  order** keyed on `(f64::total_cmp, region index)`, so ties resolve identically on
+  wasm32 and native.
 
 ## Core modules (Rust API)
 
@@ -61,7 +64,18 @@ fluid::sea_fill(&mut LiquidField, terrain: &[f64], level: f64)
 fluid::add_rain(&mut LiquidField, terrain: &[f64], level: f64, amount: f64)
 fluid::relax_step(&mut LiquidField, terrain: &[f64], neighbors: &[Vec<u32>],
                   flow_rate: f64 /*≤0.5*/, evaporation: f64)
-fluid::liquid_surface(&Mesh, terrain, &LiquidField, exaggeration) -> LiquidSurface
+fluid::liquid_surface(&Mesh, terrain, &LiquidField, neighbors: &[Vec<u32>],
+                      exaggeration) -> LiquidSurface
+//   `neighbors` drives a render-only Laplacian smoothing of the wet surface (the sim
+//   is untouched / still mass-conserving) so settling water reads level, not spiky.
+
+// streams.rs — procedural tributaries via flow accumulation on the dual mesh
+streams::accumulate(terrain: &[f64], neighbors: &[Vec<u32>], num_boundary: usize,
+                    seed_mask: &[bool], threshold: f64, depth_gain: f64) -> StreamResult
+//   StreamResult { flow: Vec<f64>, is_stream: Vec<bool>, carve_delta: Vec<f64> }
+//   Priority-flood pit fill → steepest-descent receivers → flow accumulation, gated to
+//   the catchment that drains into seed_mask (the painted main rivers). Carves channels
+//   ∝ sqrt(flow); seed cells always stream.
 
 // geometry.rs — render-ready surface (a TIN over the dual mesh)
 geometry::build_surface(&Mesh, elevation: &[f64], exaggeration: f64,
@@ -86,6 +100,33 @@ scatter::scatter(seed: u64, &Mesh, elevation, biome, exaggeration, density) -> V
 
 Brushes (interactive edits) mutate `terrain`/`biome`/`LiquidField` in place over a
 radial falloff, then re-run steps 4–6 for the affected output.
+
+## Authoring operations (front-end engine)
+
+The browser tool (`dhce-wasm`) layers these authored-edit operations over the core. A
+native front-end must reproduce them to stay map-compatible; all are deterministic.
+
+- **Sculpt** `paint_terrain(cx, cy, radius, strength, mode)` — mode 0 raise / 1 carve /
+  2 level / 3 crest, smoothstep radial falloff. Auto-biome cells under the brush are
+  re-classified from their new elevation (manual paint is locked, so color tracks edits).
+- **Course (rivers)** `paint_course(cx, cy, radius, intensity, kind)` — carves a
+  U-channel *toward* a bed (idempotent under a dragged stroke), lays thin water, and
+  tags the cells in a persistent course (main-river) seed mask.
+- **Streams** `generate_streams(threshold, depth_gain)` — restores any prior stream
+  carving, runs `streams::accumulate`, then carves the returned channels + thin water.
+  Idempotent (restore-then-recarve); no-op until a Course stroke is painted.
+- **Flood** `paint_liquid(cx, cy, radius, amount, kind)` — pour liquid (kind 0/1) into a basin.
+- **Biome paint** `paint_biome(cx, cy, radius, id)` — assign + lock a biome over the brush.
+- **Select** `region_at(x, y) -> i32`, `biome_at(region)`, `select_contiguous(region) ->
+  Vec<u32>` (flood same-biome), `set_biome_of(region, id)` (reassign + lock),
+  `selection_indices(regions) -> Vec<u32>` (highlight fill geometry).
+- **Boundary / territory** `regions_in_polygon(xs, ys) -> Vec<u32>` (ray-cast PIP over
+  region centroids, frame excluded).
+- **Biome profiles** `biome_color_of/biome_landform_of/biome_water_of(id)` +
+  `set_biome_color/set_biome_landform(id, idx, v)/set_biome_water(id, idx, v)` — the
+  per-biome editable characteristics (color; landform peak/hill/valley/roughness; water
+  raininess/rain_shadow/evaporation/flow/ocean_depth), seeded from `roster()`.
+- **Save/load** exports: elevation, biome, liquid depth+kind, biome colors, course mask.
 
 ## GDExtension adapter (`dhce-godot`) — Godot/C# surface
 

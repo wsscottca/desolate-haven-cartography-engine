@@ -15,6 +15,18 @@ use crate::mesh::Mesh;
 
 const WET: f64 = 1.0e-4; // a region with at least this much liquid renders as wet
 
+/// A region needs at least this much liquid to contribute render geometry. Slightly
+/// above [`WET`] so the very thinnest films (which read as jagged shards on slopes)
+/// drop out of the surface mesh.
+const MIN_RENDER_DEPTH: f64 = 5.0e-4;
+
+/// Rendering-only smoothing of the liquid surface (passes + blend toward the wet
+/// neighbour mean). The sim itself is untouched and still mass-conserving; this only
+/// calms the *rendered* surface so pooled water reads as a level sheet instead of a
+/// field of per-cell spikes during the settle.
+const RENDER_SMOOTH_ITERS: usize = 3;
+const RENDER_SMOOTH_W: f64 = 0.5;
+
 /// Per-region liquid state.
 pub struct LiquidField {
     /// Liquid column height per region (normalized elevation units).
@@ -144,22 +156,65 @@ pub struct LiquidSurface {
     pub indices: Vec<u32>,   // 3 per wet triangle
 }
 
-/// Build the liquid surface mesh at a vertical `exaggeration`.
+/// Build the liquid surface mesh at a vertical `exaggeration`. `neighbors` is the
+/// region adjacency (from [`Mesh::region_neighbors`]); it drives a rendering-only
+/// smoothing pass so settling water reads level instead of spiky.
 pub fn liquid_surface(
     mesh: &Mesh,
     terrain: &[f64],
     field: &LiquidField,
+    neighbors: &[Vec<u32>],
     exaggeration: f64,
 ) -> LiquidSurface {
     let nr = mesh.num_regions();
+
+    // Wet mask + per-region liquid-surface height (terrain + depth), then a few
+    // Laplacian passes over wet cells only — dry cells anchor the shoreline. This is
+    // a render-side calm only; `field` is never mutated, so mass is still conserved.
+    let mut wet = vec![false; nr];
+    let mut surf = vec![0.0f64; nr];
+    for r in 0..nr {
+        surf[r] = terrain[r] + field.depth[r];
+        wet[r] = field.depth[r] > MIN_RENDER_DEPTH;
+    }
+    if neighbors.len() == nr {
+        for _ in 0..RENDER_SMOOTH_ITERS {
+            let mut next = surf.clone();
+            for r in 0..nr {
+                if !wet[r] {
+                    continue;
+                }
+                let mut sum = 0.0;
+                let mut cnt = 0.0;
+                for &nb in &neighbors[r] {
+                    let nb = nb as usize;
+                    if wet[nb] {
+                        sum += surf[nb];
+                        cnt += 1.0;
+                    }
+                }
+                if cnt > 0.0 {
+                    let mean = sum / cnt;
+                    next[r] = surf[r] + (mean - surf[r]) * RENDER_SMOOTH_W;
+                }
+            }
+            surf = next;
+        }
+    }
+    // The smoothed sheet must never sink below its own bed.
+    for r in 0..nr {
+        if surf[r] < terrain[r] {
+            surf[r] = terrain[r];
+        }
+    }
+
     let mut positions = vec![0.0f32; nr * 3];
     let mut types = vec![0.0f32; nr];
     for r in 0..nr {
         let p = mesh.pos_of_r(r);
-        let surf = terrain[r] + field.depth[r];
         positions[3 * r] = p[0] as f32;
         positions[3 * r + 1] = p[1] as f32;
-        positions[3 * r + 2] = (surf * exaggeration) as f32;
+        positions[3 * r + 2] = (surf[r] * exaggeration) as f32;
         types[r] = field.kind[r] as f32;
     }
 
@@ -171,14 +226,14 @@ pub fn liquid_surface(
         let a = mesh.r_begin_s(3 * t);
         let b = mesh.r_begin_s(3 * t + 1);
         let c = mesh.r_begin_s(3 * t + 2);
-        if field.depth[a] <= WET || field.depth[b] <= WET || field.depth[c] <= WET {
+        if !wet[a] || !wet[b] || !wet[c] {
             continue;
         }
 
         let (pa, pb, pc) = (mesh.pos_of_r(a), mesh.pos_of_r(b), mesh.pos_of_r(c));
-        let za = (terrain[a] + field.depth[a]) * exaggeration;
-        let zb = (terrain[b] + field.depth[b]) * exaggeration;
-        let zc = (terrain[c] + field.depth[c]) * exaggeration;
+        let za = surf[a] * exaggeration;
+        let zb = surf[b] * exaggeration;
+        let zc = surf[c] * exaggeration;
         let (ux, uy, uz) = (pb[0] - pa[0], pb[1] - pa[1], zb - za);
         let (vx, vy, vz) = (pc[0] - pa[0], pc[1] - pa[1], zc - za);
         let mut nx = uy * vz - uz * vy;
