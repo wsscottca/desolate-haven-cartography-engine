@@ -29,9 +29,10 @@ const COLOR_VAR: f32 = 0.04;
 /// Elevation clamp shared by every sculpt/carve op (normalized terrain stays in range).
 const ELEV_MIN: f64 = -1.5;
 const ELEV_MAX: f64 = 1.5;
-/// Target chunk count along the longest axis — the rendering partition that lets an edit
-/// re-tessellate only the tiles it touches instead of the whole mesh.
-const CHUNK_AXIS: f64 = 12.0;
+/// Target regions per rendering chunk. The chunk grid is sized from the region count so
+/// each tile holds roughly this many regions regardless of world size or density — that
+/// keeps edit cost flat (a dab re-tessellates a fixed amount) as the world scales up.
+const TARGET_REGIONS_PER_CHUNK: usize = 12_000;
 
 /// The authored world: generation output plus every interactive edit applied on top.
 pub struct World {
@@ -763,11 +764,14 @@ impl World {
             Some(m) => m,
             None => return,
         };
-        let size = (self.width.max(self.height) / CHUNK_AXIS).max(1.0);
-        let cols = (self.width / size).ceil() as usize + 1;
-        let rows = (self.height / size).ceil() as usize + 1;
         let nr = mesh.num_regions();
         let nt = mesh.num_triangles();
+        // Square grid sized so each tile holds ~TARGET_REGIONS_PER_CHUNK regions.
+        let axis = ((nr as f64 / TARGET_REGIONS_PER_CHUNK as f64).sqrt().ceil() as usize).max(1);
+        let cols = axis;
+        let rows = axis;
+        let sx = (self.width / cols as f64).max(1.0);
+        let sy = (self.height / rows as f64).max(1.0);
         let mut chunk_tris: Vec<Vec<u32>> = vec![Vec::new(); cols * rows];
         let mut region_chunks: Vec<Vec<u32>> = vec![Vec::new(); nr];
         for t in 0..nt {
@@ -777,8 +781,8 @@ impl World {
             let (pa, pb, pc) = (mesh.pos_of_r(a), mesh.pos_of_r(b), mesh.pos_of_r(c));
             let cxw = (pa[0] + pb[0] + pc[0]) / 3.0;
             let cyw = (pa[1] + pb[1] + pc[1]) / 3.0;
-            let gx = ((cxw / size) as usize).min(cols - 1);
-            let gy = ((cyw / size) as usize).min(rows - 1);
+            let gx = ((cxw / sx) as usize).min(cols - 1);
+            let gy = ((cyw / sy) as usize).min(rows - 1);
             let ci = (gy * cols + gx) as u32;
             chunk_tris[ci as usize].push(t as u32);
             for &r in &[a, b, c] {

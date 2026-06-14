@@ -72,7 +72,8 @@ fn region_at_finds_an_interior_region_and_selects_its_biome() {
 
 #[test]
 fn chunks_partition_all_triangles_and_track_edits() {
-    let mut w = built();
+    let mut w = World::new();
+    w.build(3000.0, 3000.0, 12.0, 7, 5); // dense enough to need several chunks
     assert!(w.chunk_count() > 1, "should partition into several chunks");
 
     // Each triangle is assigned to exactly one chunk → chunk triangle counts sum to total.
