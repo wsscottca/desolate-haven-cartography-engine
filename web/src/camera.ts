@@ -37,8 +37,19 @@ export class OrbitCamera {
     let lastX = 0;
     let lastY = 0;
 
+    // Suppress the browser context menu so right-drag can orbit.
+    canvas.addEventListener("contextmenu", (e) => e.preventDefault());
+
     canvas.addEventListener("pointerdown", (e) => {
-      mode = e.button === 1 || e.shiftKey ? "pan" : "orbit";
+      // Right-drag orbits; middle (or shift+right) pans; left is reserved for the
+      // active tool (sculpt/liquid) and never moves the camera.
+      if (e.button === 2) {
+        mode = e.shiftKey ? "pan" : "orbit";
+      } else if (e.button === 1) {
+        mode = "pan";
+      } else {
+        return;
+      }
       lastX = e.clientX;
       lastY = e.clientY;
       canvas.setPointerCapture(e.pointerId);
