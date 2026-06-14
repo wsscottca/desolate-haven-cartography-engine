@@ -8,8 +8,9 @@ import { WORLD } from "./config";
 import { buildSettingsPanel, DEFAULTS, type Settings, type Group } from "./settings";
 import { Engine } from "./engine";
 import { LiquidRenderer } from "./render/liquid";
+import { SpriteRenderer } from "./render/sprites";
 import { invert, transformPoint } from "./math/mat4";
-import { sub } from "./math/vec3";
+import { sub, cross, normalize } from "./math/vec3";
 
 const canvas = document.getElementById("view") as HTMLCanvasElement;
 const gl = canvas.getContext("webgl2", { antialias: true });
@@ -23,6 +24,7 @@ if (!gl) {
 
 const terrain = new TerrainRenderer(gl);
 const liquid = new LiquidRenderer(gl);
+const sprites = new SpriteRenderer(gl);
 const settings: Settings = structuredClone(DEFAULTS);
 let engine: Engine | null = null;
 
@@ -57,6 +59,20 @@ function pushLiquid(): void {
   liquid.setMesh(l.positions, l.normals, l.types, l.indices);
 }
 
+function pushScatter(): void {
+  if (!engine) return;
+  const s = engine.scatter(settings.engine.exaggeration, settings.decoration.spriteDensity, settings.engine.seed);
+  sprites.setInstances(s.data, s.count);
+}
+
+const SKY: [number, number, number] = [0.078, 0.067, 0.055];
+function applyFog(): void {
+  const density = settings.decoration.fog * 0.0006;
+  terrain.setFog(density, SKY);
+  liquid.setFog(density, SKY);
+  sprites.setFog(density, SKY);
+}
+
 // Full rebuild: mesh + elevation (seed / detail / octaves), re-apply sea level.
 function regenerate(): void {
   if (engine) {
@@ -70,6 +86,7 @@ function regenerate(): void {
     engine.setSeaLevel(settings.liquids.seaLevel);
     pushSurface();
     pushLiquid();
+    pushScatter();
   } else {
     const n = settings.engine.detail;
     const heights = generateHeightfield(n, settings.engine.seed, settings.engine.octaves);
@@ -83,6 +100,7 @@ function retessellate(): void {
   if (engine) {
     pushSurface();
     pushLiquid();
+    pushScatter();
     requestDraw();
   } else {
     regenerate();
@@ -105,6 +123,10 @@ function onSettingChange(group: Group, key: string): void {
   } else if (group === "liquids" && engine) {
     engine.setSeaLevel(settings.liquids.seaLevel);
     pushLiquid();
+    requestDraw();
+  } else if (group === "decoration") {
+    if (key === "spriteDensity") pushScatter();
+    else if (key === "fog") applyFog();
     requestDraw();
   }
   // tools/physics: read on demand (brush, settle)
@@ -183,6 +205,7 @@ fileLoad?.addEventListener("change", async () => {
     if (settingsRoot) buildSettingsPanel(settingsRoot, settings, onSettingChange);
     pushSurface();
     pushLiquid();
+    pushScatter();
     syncBiomeColorInput();
     requestDraw();
   } catch (err) {
@@ -192,6 +215,7 @@ fileLoad?.addEventListener("change", async () => {
 });
 
 applyLighting();
+applyFog();
 regenerate(); // immediate render on the TS placeholder
 
 // Upgrade to the Rust/WASM engine once it loads (falls back to the placeholder).
@@ -241,8 +265,12 @@ function frame(): void {
     gl!.clear(gl!.COLOR_BUFFER_BIT | gl!.DEPTH_BUFFER_BIT);
     const aspect = canvas.width / Math.max(1, canvas.height);
     const vp = camera.viewProj(aspect);
-    terrain.draw(vp);
-    liquid.draw(vp);
+    const camPos = camera.eye();
+    const fwd = normalize(sub(camera.target, camPos));
+    const camRight = normalize(cross(fwd, [0, 0, 1]));
+    terrain.draw(vp, camPos);
+    sprites.draw(vp, camRight, camPos);
+    liquid.draw(vp, camPos);
   }
   requestAnimationFrame(frame);
 }

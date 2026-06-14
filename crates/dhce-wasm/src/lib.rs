@@ -38,6 +38,8 @@ pub struct WasmEngine {
     grid_cols: usize,
     grid_rows: usize,
     grid: Vec<Vec<u32>>,
+    scatter_buf: Vec<f32>,
+    scatter_n: usize,
     surface: Option<geometry::Surface>,
     liquid: Option<LiquidSurface>,
 }
@@ -71,6 +73,8 @@ impl WasmEngine {
             grid_cols: 0,
             grid_rows: 0,
             grid: Vec::new(),
+            scatter_buf: Vec::new(),
+            scatter_n: 0,
             surface: None,
             liquid: None,
         }
@@ -338,6 +342,29 @@ impl WasmEngine {
             }
             self.field.kind.copy_from_slice(kind);
         }
+    }
+
+    // --- decoration scatter (Phase 7) ---
+    /// Place decoration instances (rocks/trees) deterministically; `density` 0..1.
+    pub fn tessellate_scatter(&mut self, exaggeration: f64, density: f64, seed: f64) {
+        let inst = if let Some(mesh) = &self.mesh {
+            dhce_core::scatter::scatter(seed as u64, mesh, &self.elevation_r, &self.biome_r, exaggeration, density)
+        } else {
+            Vec::new()
+        };
+        let mut data = Vec::with_capacity(inst.len() * 5);
+        for i in &inst {
+            data.extend_from_slice(&[i.x, i.y, i.z, i.scale, i.species]);
+        }
+        self.scatter_n = inst.len();
+        self.scatter_buf = data;
+    }
+    /// Flat instance buffer: 5 floats per instance (x, y, z, scale, species).
+    pub fn scatter_data(&self) -> Vec<f32> {
+        self.scatter_buf.clone()
+    }
+    pub fn scatter_count(&self) -> usize {
+        self.scatter_n
     }
 }
 

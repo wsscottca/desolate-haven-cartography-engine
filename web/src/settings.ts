@@ -32,12 +32,18 @@ export interface PhysicsSettings {
   solverIters: number;
 }
 
+export interface DecorationSettings {
+  spriteDensity: number; // 0 = no sprites
+  fog: number; // 0 = no fog
+}
+
 export interface Settings {
   engine: EngineSettings;
   tools: ToolSettings;
   render: RenderSettings;
   liquids: LiquidSettings;
   physics: PhysicsSettings;
+  decoration: DecorationSettings;
 }
 
 export type Group = keyof Settings;
@@ -48,6 +54,7 @@ export const DEFAULTS: Settings = {
   render: { lightAzimuth: 51, lightElevation: 50, ambient: 0.38 },
   liquids: { seaLevel: 0.0 },
   physics: { gravity: 9.8, viscosity: 1.0, flowRate: 0.5, evaporation: 0.002, solverIters: 40 },
+  decoration: { spriteDensity: 0.4, fog: 0.2 },
 };
 
 interface Spec {
@@ -77,6 +84,8 @@ const SPECS: Spec[] = [
   { group: "physics", key: "flowRate", label: "Flow rate", min: 0, max: 1, step: 0.05 },
   { group: "physics", key: "evaporation", label: "Evaporation", min: 0, max: 0.02, step: 0.001 },
   { group: "physics", key: "solverIters", label: "Solver steps", min: 5, max: 120, step: 5, integer: true },
+  { group: "decoration", key: "spriteDensity", label: "Sprites", min: 0, max: 1, step: 0.05 },
+  { group: "decoration", key: "fog", label: "Fog", min: 0, max: 1, step: 0.05 },
 ];
 
 const fmt = (v: number, spec: Spec): string =>
@@ -89,8 +98,8 @@ export function buildSettingsPanel(
   onChange: (group: Group, key: string) => void,
 ): void {
   root.replaceChildren();
-  const labels: Record<Group, string> = { engine: "Engine", tools: "Tools", render: "Lighting", liquids: "Liquids", physics: "Physics" };
-  for (const group of ["engine", "tools", "render", "liquids", "physics"] as Group[]) {
+  const labels: Record<Group, string> = { engine: "Engine", tools: "Tools", render: "Lighting", liquids: "Liquids", physics: "Physics", decoration: "Decoration" };
+  for (const group of ["engine", "tools", "render", "liquids", "physics", "decoration"] as Group[]) {
     const header = document.createElement("div");
     header.className = "group-label";
     header.textContent = labels[group];

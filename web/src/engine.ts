@@ -57,6 +57,10 @@ interface WasmEngineHandle {
   set_elevation(e: Float32Array): void;
   set_biome(b: Uint8Array): void;
   set_liquid(depth: Float32Array, kind: Uint8Array): void;
+  // scatter
+  tessellate_scatter(exaggeration: number, density: number, seed: number): void;
+  scatter_data(): Float32Array;
+  scatter_count(): number;
 }
 
 export class Engine {
@@ -171,5 +175,11 @@ export class Engine {
   }
   importLiquid(depth: Float32Array, kind: Uint8Array): void {
     this.handle.set_liquid(depth, kind);
+  }
+
+  // --- decoration scatter ---
+  scatter(exaggeration: number, density: number, seed: number): { data: Float32Array; count: number } {
+    this.handle.tessellate_scatter(exaggeration, density, seed);
+    return { data: this.handle.scatter_data(), count: this.handle.scatter_count() };
   }
 }

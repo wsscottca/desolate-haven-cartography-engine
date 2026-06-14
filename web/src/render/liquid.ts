@@ -11,9 +11,11 @@ layout(location=2) in float a_type;
 uniform mat4 u_viewProj;
 out vec3 v_normal;
 out float v_type;
+out vec3 v_world;
 void main() {
   v_normal = a_normal;
   v_type = a_type;
+  v_world = a_pos;
   gl_Position = u_viewProj * vec4(a_pos, 1.0);
 }`;
 
@@ -21,26 +23,35 @@ const FRAG = `#version 300 es
 precision highp float;
 in vec3 v_normal;
 in float v_type;
+in vec3 v_world;
 out vec4 fragColor;
 
 uniform vec3 u_lightDir;
 uniform float u_ambient;
+uniform vec3 u_camPos;
+uniform float u_fog;
+uniform vec3 u_fogColor;
 
 void main() {
   vec3 n = normalize(v_normal);
   float diff = clamp(dot(n, normalize(u_lightDir)), 0.0, 1.0);
   bool isLava = v_type > 0.5;
+  vec3 col;
+  float alpha;
   if (isLava) {
     // Emissive: glows regardless of shadow, faint flow shading.
-    vec3 lava = vec3(0.95, 0.30, 0.08);
-    fragColor = vec4(lava * (0.85 + 0.15 * diff), 0.96);
+    col = vec3(0.95, 0.30, 0.08) * (0.85 + 0.15 * diff);
+    alpha = 0.96;
   } else {
     // Translucent water: lit, with a soft sky tint on up-facing surfaces.
     vec3 water = vec3(0.10, 0.28, 0.42);
-    vec3 c = water * (u_ambient + (1.0 - u_ambient) * diff);
-    c += vec3(0.04, 0.06, 0.09) * pow(clamp(n.z, 0.0, 1.0), 2.0);
-    fragColor = vec4(c, 0.62);
+    col = water * (u_ambient + (1.0 - u_ambient) * diff);
+    col += vec3(0.04, 0.06, 0.09) * pow(clamp(n.z, 0.0, 1.0), 2.0);
+    alpha = 0.62;
   }
+  float d = distance(v_world, u_camPos);
+  col = mix(col, u_fogColor, clamp(1.0 - exp(-d * u_fog), 0.0, 1.0));
+  fragColor = vec4(col, alpha);
 }`;
 
 export class LiquidRenderer {
@@ -49,9 +60,13 @@ export class LiquidRenderer {
   private uViewProj: WebGLUniformLocation | null;
   private uLightDir: WebGLUniformLocation | null;
   private uAmbient: WebGLUniformLocation | null;
+  private uCamPos: WebGLUniformLocation | null;
+  private uFog: WebGLUniformLocation | null;
+  private uFogColor: WebGLUniformLocation | null;
   private vao: WebGLVertexArrayObject | null = null;
   private indexCount = 0;
   private light = { dir: [0.404, 0.5, 0.766] as [number, number, number], ambient: 0.38 };
+  private fog = { density: 0, color: [0.078, 0.067, 0.055] as [number, number, number] };
 
   constructor(gl: WebGL2RenderingContext) {
     this.gl = gl;
@@ -59,6 +74,14 @@ export class LiquidRenderer {
     this.uViewProj = gl.getUniformLocation(this.prog, "u_viewProj");
     this.uLightDir = gl.getUniformLocation(this.prog, "u_lightDir");
     this.uAmbient = gl.getUniformLocation(this.prog, "u_ambient");
+    this.uCamPos = gl.getUniformLocation(this.prog, "u_camPos");
+    this.uFog = gl.getUniformLocation(this.prog, "u_fog");
+    this.uFogColor = gl.getUniformLocation(this.prog, "u_fogColor");
+  }
+
+  setFog(density: number, color: [number, number, number]): void {
+    this.fog.density = density;
+    this.fog.color = color;
   }
 
   setLighting(azimuthDeg: number, elevationDeg: number, ambient: number): void {
@@ -90,7 +113,7 @@ export class LiquidRenderer {
   }
 
   /** Draw blended over the terrain. Depth test on; depth writes off (translucent). */
-  draw(viewProj: Mat4): void {
+  draw(viewProj: Mat4, camPos: [number, number, number]): void {
     const gl = this.gl;
     if (!this.vao || !this.indexCount) return;
     gl.enable(gl.BLEND);
@@ -101,6 +124,9 @@ export class LiquidRenderer {
     gl.uniformMatrix4fv(this.uViewProj, false, viewProj);
     gl.uniform3fv(this.uLightDir, this.light.dir);
     gl.uniform1f(this.uAmbient, this.light.ambient);
+    gl.uniform3fv(this.uCamPos, camPos);
+    gl.uniform1f(this.uFog, this.fog.density);
+    gl.uniform3fv(this.uFogColor, this.fog.color);
     gl.bindVertexArray(this.vao);
     gl.drawElements(gl.TRIANGLES, this.indexCount, gl.UNSIGNED_INT, 0);
     gl.bindVertexArray(null);
