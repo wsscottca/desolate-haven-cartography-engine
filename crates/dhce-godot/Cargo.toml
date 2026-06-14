@@ -1,7 +1,7 @@
-# Godot GDExtension adapter (Phase 8). Excluded from the default workspace — built on
-# its own and the resulting cdylib + dhce.gdextension copied into the Godot project's
-# addons/. `godot` (godot-rust/gdext) is dual MIT/Apache → used under the MIT election;
-# pin its version to match the project's Godot 4.x build.
+# Godot GDExtension adapter. Excluded from the default workspace — built on its own and
+# the resulting cdylib + dhce.gdextension copied into the Godot project's addons/.
+# `godot` (godot-rust/gdext) is MPL-2.0 (weak copyleft, confined to gdext's own files);
+# pin its version to the project's Godot build (desolate-haven targets 4.6 → gdext 0.5).
 [package]
 name = "dhce-godot"
 version = "0.1.0"
@@ -15,4 +15,4 @@ crate-type = ["cdylib"]
 
 [dependencies]
 dhce-core = { path = "../dhce-core" }
-godot = "0.2"
+godot = "0.5"
