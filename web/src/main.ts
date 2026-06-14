@@ -37,12 +37,19 @@ function regenerate(): void {
   terrain.setHeightfield(heights, n, WORLD.size, settings.engine.exaggeration);
   requestDraw();
 }
+function applyLighting(): void {
+  terrain.setLighting(settings.render.lightAzimuth, settings.render.lightElevation, settings.render.ambient);
+  requestDraw();
+}
+
 const settingsRoot = document.getElementById("settings-body");
 if (settingsRoot) {
   buildSettingsPanel(settingsRoot, settings, (group) => {
     if (group === "engine") regenerate();
+    else if (group === "render") applyLighting();
   });
 }
+applyLighting();
 regenerate();
 
 gl.enable(gl.DEPTH_TEST);

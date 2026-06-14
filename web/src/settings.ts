@@ -9,6 +9,12 @@ export interface EngineSettings {
   exaggeration: number; // vertical scale
 }
 
+export interface RenderSettings {
+  lightAzimuth: number; // degrees
+  lightElevation: number; // degrees above the ground plane
+  ambient: number; // 0..1
+}
+
 export interface PhysicsSettings {
   gravity: number;
   viscosity: number; // water ≈ 1; lava is low
@@ -19,6 +25,7 @@ export interface PhysicsSettings {
 
 export interface Settings {
   engine: EngineSettings;
+  render: RenderSettings;
   physics: PhysicsSettings;
 }
 
@@ -26,6 +33,7 @@ export type Group = keyof Settings;
 
 export const DEFAULTS: Settings = {
   engine: { seed: 12345, detail: 256, octaves: 6, exaggeration: 120 },
+  render: { lightAzimuth: 51, lightElevation: 50, ambient: 0.38 },
   physics: { gravity: 9.8, viscosity: 1.0, flowRate: 0.5, evaporation: 0.002, solverIters: 40 },
 };
 
@@ -45,6 +53,9 @@ const SPECS: Spec[] = [
   { group: "engine", key: "detail", label: "Detail", min: 64, max: 512, step: 32, integer: true },
   { group: "engine", key: "octaves", label: "Noise octaves", min: 1, max: 8, step: 1, integer: true },
   { group: "engine", key: "exaggeration", label: "Vertical scale", min: 0, max: 300, step: 5, integer: true },
+  { group: "render", key: "lightAzimuth", label: "Light azimuth", min: 0, max: 360, step: 1, integer: true },
+  { group: "render", key: "lightElevation", label: "Light elevation", min: 0, max: 90, step: 1, integer: true },
+  { group: "render", key: "ambient", label: "Ambient", min: 0, max: 1, step: 0.02 },
   { group: "physics", key: "gravity", label: "Gravity", min: 0, max: 20, step: 0.1 },
   { group: "physics", key: "viscosity", label: "Viscosity", min: 0.05, max: 2, step: 0.05 },
   { group: "physics", key: "flowRate", label: "Flow rate", min: 0, max: 1, step: 0.05 },
@@ -62,10 +73,11 @@ export function buildSettingsPanel(
   onChange: (group: Group, key: string) => void,
 ): void {
   root.replaceChildren();
-  for (const group of ["engine", "physics"] as Group[]) {
+  const labels: Record<Group, string> = { engine: "Engine", render: "Lighting", physics: "Physics" };
+  for (const group of ["engine", "render", "physics"] as Group[]) {
     const header = document.createElement("div");
     header.className = "group-label";
-    header.textContent = group === "engine" ? "Engine" : "Physics";
+    header.textContent = labels[group];
     root.appendChild(header);
 
     if (group === "physics") {

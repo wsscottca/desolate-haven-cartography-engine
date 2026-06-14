@@ -23,7 +23,11 @@ in vec3 v_normal;
 in float v_h;
 out vec4 fragColor;
 
+uniform vec3 u_lightDir;  // sun direction (engine-level lighting)
+uniform float u_ambient;  // ambient floor 0..1
+
 // Procedural altitude colormap (our palette), h in roughly [-1, 1].
+// Colors are hardcoded for now; biomes own the palette from Phase 5.
 vec3 ramp(float h) {
   vec3 deep    = vec3(0.06, 0.10, 0.20);
   vec3 shallow = vec3(0.12, 0.28, 0.34);
@@ -40,10 +44,8 @@ vec3 ramp(float h) {
 
 void main() {
   vec3 n = normalize(v_normal);
-  vec3 L = normalize(vec3(0.4, 0.5, 0.75));
-  float diff = clamp(dot(n, L), 0.0, 1.0);
-  float amb = 0.38;
-  vec3 col = ramp(v_h) * (amb + (1.0 - amb) * diff);
+  float diff = clamp(dot(n, normalize(u_lightDir)), 0.0, 1.0);
+  vec3 col = ramp(v_h) * (u_ambient + (1.0 - u_ambient) * diff);
   fragColor = vec4(col, 1.0);
 }`;
 
@@ -51,13 +53,27 @@ export class TerrainRenderer {
   private gl: WebGL2RenderingContext;
   private prog: WebGLProgram;
   private uViewProj: WebGLUniformLocation | null;
+  private uLightDir: WebGLUniformLocation | null;
+  private uAmbient: WebGLUniformLocation | null;
   private vao: WebGLVertexArrayObject | null = null;
   private indexCount = 0;
+  // Engine-level lighting; defaults match the original hardcoded look.
+  private light = { dir: [0.404, 0.5, 0.766] as [number, number, number], ambient: 0.38 };
 
   constructor(gl: WebGL2RenderingContext) {
     this.gl = gl;
     this.prog = link(gl, VERT, FRAG);
     this.uViewProj = gl.getUniformLocation(this.prog, "u_viewProj");
+    this.uLightDir = gl.getUniformLocation(this.prog, "u_lightDir");
+    this.uAmbient = gl.getUniformLocation(this.prog, "u_ambient");
+  }
+
+  /** Engine-level lighting from azimuth/elevation degrees + ambient (0..1). */
+  setLighting(azimuthDeg: number, elevationDeg: number, ambient: number): void {
+    const az = (azimuthDeg * Math.PI) / 180;
+    const el = (elevationDeg * Math.PI) / 180;
+    this.light.dir = [Math.cos(el) * Math.cos(az), Math.cos(el) * Math.sin(az), Math.sin(el)];
+    this.light.ambient = ambient;
   }
 
   /** Build the surface mesh from an `n`×`n` height field (values ~[-1,1]). */
@@ -132,6 +148,8 @@ export class TerrainRenderer {
     if (!this.vao || !this.indexCount) return;
     gl.useProgram(this.prog);
     gl.uniformMatrix4fv(this.uViewProj, false, viewProj);
+    gl.uniform3fv(this.uLightDir, this.light.dir);
+    gl.uniform1f(this.uAmbient, this.light.ambient);
     gl.bindVertexArray(this.vao);
     gl.drawElements(gl.TRIANGLES, this.indexCount, gl.UNSIGNED_INT, 0);
     gl.bindVertexArray(null);
