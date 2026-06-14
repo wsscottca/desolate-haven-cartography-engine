@@ -40,14 +40,14 @@ function fbm(x: number, y: number, seed: number, octaves = 6): number {
 }
 
 /** An island-ish `n`×`n` height field in roughly [-1, 1]. */
-export function generateHeightfield(n: number, seed: number): Float32Array {
+export function generateHeightfield(n: number, seed: number, octaves = 6): Float32Array {
   const h = new Float32Array(n * n);
   const DOMAIN = 4; // noise repeats across the world this many times
   for (let j = 0; j < n; j++) {
     for (let i = 0; i < n; i++) {
       const u = (i / (n - 1)) * DOMAIN;
       const v = (j / (n - 1)) * DOMAIN;
-      let e = fbm(u, v, seed);
+      let e = fbm(u, v, seed, octaves);
       // Radial falloff so the land sits in water with a coastline.
       const cx = i / (n - 1) - 0.5;
       const cy = j / (n - 1) - 0.5;

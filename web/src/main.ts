@@ -5,6 +5,7 @@ import { OrbitCamera } from "./camera";
 import { TerrainRenderer } from "./render/terrain";
 import { generateHeightfield } from "./placeholder";
 import { WORLD } from "./config";
+import { buildSettingsPanel, DEFAULTS, type Settings } from "./settings";
 
 const canvas = document.getElementById("view") as HTMLCanvasElement;
 const gl = canvas.getContext("webgl2", { antialias: true });
@@ -16,9 +17,8 @@ if (!gl) {
   throw new Error("WebGL2 unavailable");
 }
 
-const GRID = 256;
 const terrain = new TerrainRenderer(gl);
-terrain.setHeightfield(generateHeightfield(GRID, WORLD.seed), GRID, WORLD.size, WORLD.heightScale);
+const settings: Settings = structuredClone(DEFAULTS);
 
 const camera = new OrbitCamera([WORLD.size / 2, WORLD.size / 2, 0], WORLD.size * 1.15);
 
@@ -28,6 +28,22 @@ const requestDraw = () => {
 };
 camera.attach(canvas, requestDraw);
 window.addEventListener("resize", requestDraw);
+
+// Engine settings regenerate the world live; physics settings are stored on
+// `settings.physics` for the liquid sim (consumed from the fluid phase onward).
+function regenerate(): void {
+  const n = settings.engine.detail;
+  const heights = generateHeightfield(n, settings.engine.seed, settings.engine.octaves);
+  terrain.setHeightfield(heights, n, WORLD.size, settings.engine.exaggeration);
+  requestDraw();
+}
+const settingsRoot = document.getElementById("settings-body");
+if (settingsRoot) {
+  buildSettingsPanel(settingsRoot, settings, (group) => {
+    if (group === "engine") regenerate();
+  });
+}
+regenerate();
 
 gl.enable(gl.DEPTH_TEST);
 

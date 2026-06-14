@@ -46,7 +46,22 @@
   .liquid-row label { font-family: var(--label); font-size: 11px; color: var(--ink-dim); display: flex; align-items: center; gap: 6px; }
   select { background: var(--bg); color: var(--ink); border: 1px solid var(--rule); border-radius: 5px; padding: 3px 6px; font-family: var(--body); }
   #engine-status { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--rule); font-size: 10.5px; color: var(--ink-dim); }
-  .hint { position: absolute; right: 16px; bottom: 12px; z-index: 10; color: var(--ink-dim); font-size: 11px; opacity: 0.8; }
+  .hint { position: absolute; left: 50%; transform: translateX(-50%); bottom: 12px; z-index: 10; color: var(--ink-dim); font-size: 11px; opacity: 0.8; }
+
+  #settings {
+    position: absolute; top: 16px; right: 16px; width: 232px; z-index: 10;
+    background: linear-gradient(var(--bg-2), var(--bg-3));
+    border: 1px solid var(--rule); border-radius: 8px; padding: 14px;
+    box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
+    max-height: calc(100vh - 32px); overflow: auto;
+  }
+  .panel-title { font-family: var(--display); color: var(--gold); font-size: 17px; margin: 0 0 8px; letter-spacing: 0.4px; }
+  .panel-note { font-family: var(--body); color: var(--ink-dim); font-size: 10.5px; font-style: italic; margin: 2px 0 8px; }
+  .setting { display: block; margin: 0 0 9px; }
+  .setting-row { display: flex; justify-content: space-between; font-family: var(--label); font-size: 11px; color: var(--ink-dim); margin-bottom: 3px; }
+  .setting-val { color: var(--ink); }
+  .setting input[type="range"] { width: 100%; accent-color: var(--gold); cursor: pointer; }
+  .setting-number { width: 100%; background: var(--bg); color: var(--ink); border: 1px solid var(--rule); border-radius: 5px; padding: 3px 6px; font-family: var(--body); }
 </style>
 </head>
 <body>
@@ -97,6 +112,11 @@
     </div>
 
     <div id="engine-status">engine: …</div>
+  </aside>
+
+  <aside id="settings">
+    <h2 class="panel-title">Settings</h2>
+    <div id="settings-body"></div>
   </aside>
 
   <div class="hint">drag — orbit · wheel — zoom · shift-drag — pan</div>

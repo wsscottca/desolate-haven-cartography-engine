@@ -6,6 +6,7 @@
   "description": "Desolate Haven Cartography Engine — 3D WebGL2 front-end.",
   "scripts": {
     "build": "sh build.sh",
+    "typecheck": "npx -y -p typescript tsc --noEmit -p tsconfig.json",
     "serve": "python -m http.server 8000"
   }
 }
