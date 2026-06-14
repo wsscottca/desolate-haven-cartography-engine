@@ -32,17 +32,17 @@ public partial class ToolUi : CanvasLayer
         panel.AddChild(col);
 
         Section(col, "TOOLS");
-        AddToolButton(col, "Raise", Tool.Raise);
-        AddToolButton(col, "Carve", Tool.Carve);
-        AddToolButton(col, "Level", Tool.Level);
-        AddToolButton(col, "Crest", Tool.Crest);
-        AddToolButton(col, "River", Tool.River);
-        AddToolButton(col, "Flood", Tool.Flood);
-        AddToolButton(col, "Biome", Tool.Biome);
+        AddToolButton(col, "Raise", ToolKind.Raise);
+        AddToolButton(col, "Carve", ToolKind.Carve);
+        AddToolButton(col, "Level", ToolKind.Level);
+        AddToolButton(col, "Crest", ToolKind.Crest);
+        AddToolButton(col, "River", ToolKind.River);
+        AddToolButton(col, "Flood", ToolKind.Flood);
+        AddToolButton(col, "Biome", ToolKind.Biome);
 
         Section(col, "BRUSH");
         Slider(col, "Radius (m)", 10, 2000, 5, Root.Tool.RadiusM, v => Root.Tool.RadiusM = (float)v);
-        Slider(col, "Strength", 0.005, 0.3, 0.005, Root.Tool.Strength, v => Root.Tool.Strength = (float)v);
+        Slider(col, "Strength (m)", 1, 400, 1, Root.Tool.StrengthM, v => Root.Tool.StrengthM = (float)v);
 
         _biome = new OptionButton();
         for (int i = 0; i < BiomeNames.Length; i++) _biome.AddItem($"{i + 1}. {BiomeNames[i]}", i + 1);
@@ -72,7 +72,7 @@ public partial class ToolUi : CanvasLayer
         parent.AddChild(new Label { Text = title });
     }
 
-    private void AddToolButton(Container parent, string text, Tool tool)
+    private void AddToolButton(Container parent, string text, ToolKind tool)
     {
         var b = new Button { Text = text, ToggleMode = true, ButtonGroup = _toolGroup };
         b.Pressed += () => Root.Tool.Active = tool;

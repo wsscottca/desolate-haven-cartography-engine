@@ -249,6 +249,28 @@ impl DhceEngine {
     fn region_at(&self, x: f64, y: f64) -> i64 {
         self.world.region_at(x, y).map(|r| r as i64).unwrap_or(-1)
     }
+    /// Surface hit point (Godot Y-up) of a ray, or an empty array on a miss. C#: read
+    /// `.As<Vector3[]>()` — length 1 = hit, length 0 = no terrain under the cursor. Lets the
+    /// brush land on the actual surface under the cursor from any view angle.
+    #[func]
+    fn raycast_terrain(&self, origin: Vector3, dir: Vector3, exaggeration: f64) -> PackedVector3Array {
+        match self.world.raycast_terrain(
+            origin.x as f64, origin.y as f64, origin.z as f64,
+            dir.x as f64, dir.y as f64, dir.z as f64,
+            exaggeration,
+        ) {
+            Some(h) => {
+                let v = Vector3::new(h[0] as f32, h[1] as f32, h[2] as f32);
+                PackedVector3Array::from(&[v][..])
+            }
+            None => PackedVector3Array::new(),
+        }
+    }
+    /// Normalized terrain elevation at world ground `(x, y)` (Godot XZ); NaN outside the map.
+    #[func]
+    fn height_at(&self, x: f64, y: f64) -> f64 {
+        self.world.height_at(x, y).unwrap_or(f64::NAN)
+    }
     #[func]
     fn biome_at(&self, region: i64) -> i64 {
         self.world.biome_at(region.max(0) as usize) as i64

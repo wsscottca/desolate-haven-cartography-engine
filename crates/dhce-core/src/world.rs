@@ -517,6 +517,73 @@ impl World {
         None
     }
 
+    /// Normalized terrain elevation at world ground point `(x, y)` (the nearest region's
+    /// elevation), or `None` outside the map. Cheap (one grid-accelerated nearest lookup).
+    pub fn height_at(&self, x: f64, y: f64) -> Option<f64> {
+        self.region_at(x, y).map(|r| self.elevation_r[r])
+    }
+
+    /// March a ray (Godot space, Y-up) against the rendered heightfield and return the
+    /// surface hit `[x, y, z]` (Godot space), or `None` on a miss. The terrain surface is
+    /// `Y = height_at(x, z) * exaggeration` (core ground = Godot XZ). Used by the brush so a
+    /// stroke lands under the cursor on the actual surface, not the `Y = 0` plane. Coarse
+    /// fixed-step march to the first crossing, then a binary refine — deterministic, and
+    /// cheap because each height sample is a single nearest-region lookup.
+    pub fn raycast_terrain(
+        &self,
+        ox: f64, oy: f64, oz: f64,
+        dx: f64, dy: f64, dz: f64,
+        exaggeration: f64,
+    ) -> Option<[f64; 3]> {
+        if self.mesh.is_none() {
+            return None;
+        }
+        // Surface height (Godot Y) at a ground point; off-map ⇒ unreachable (never a hit).
+        let surf = |x: f64, z: f64| -> f64 {
+            if x < 0.0 || z < 0.0 || x > self.width || z > self.height {
+                return f64::NEG_INFINITY;
+            }
+            match self.region_at(x, z) {
+                Some(r) => self.elevation_r[r] * exaggeration,
+                None => f64::NEG_INFINITY,
+            }
+        };
+
+        // Bound the march so it always reaches terrain even when the camera is far away:
+        // distance from the origin to the world centre, plus the world's full diagonal.
+        let cx = self.width * 0.5;
+        let cz = self.height * 0.5;
+        let to_center = ((ox - cx).powi(2) + oy.powi(2) + (oz - cz).powi(2)).sqrt();
+        let diag = (self.width.powi(2) + self.height.powi(2) + (3.0 * exaggeration).powi(2)).sqrt();
+        let max_t = to_center + diag + 1.0;
+        let step = self.grid_cell.max(1.0).min(max_t / 8.0);
+
+        let mut t = 0.0;
+        let mut prev_above = oy > surf(ox, oz);
+        while t < max_t {
+            let nt = t + step;
+            let py = oy + dy * nt;
+            let above = py > surf(ox + dx * nt, oz + dz * nt);
+            if prev_above && !above {
+                // Crossed between t and nt — binary refine for a clean hit point.
+                let (mut lo, mut hi) = (t, nt);
+                for _ in 0..24 {
+                    let mid = 0.5 * (lo + hi);
+                    if oy + dy * mid > surf(ox + dx * mid, oz + dz * mid) {
+                        lo = mid;
+                    } else {
+                        hi = mid;
+                    }
+                }
+                let ht = 0.5 * (lo + hi);
+                return Some([ox + dx * ht, oy + dy * ht, oz + dz * ht]);
+            }
+            prev_above = above;
+            t = nt;
+        }
+        None
+    }
+
     /// Biome id (1..=14, 0 = none) at a region.
     pub fn biome_at(&self, region: usize) -> u8 {
         self.biome_r.get(region).copied().unwrap_or(0)

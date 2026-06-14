@@ -46,6 +46,31 @@ fn paint_terrain_reports_and_raises_its_footprint() {
 }
 
 #[test]
+fn height_at_resolves_inside_the_map_only() {
+    let w = built();
+    assert!(w.height_at(500.0, 500.0).is_some(), "center should resolve a region");
+    assert!(w.height_at(-1000.0, -1000.0).is_none(), "far outside the map has no region");
+}
+
+#[test]
+fn raycast_terrain_hits_the_surface_under_the_ray() {
+    let w = built();
+    let exag = 100.0;
+    let h = w.height_at(500.0, 500.0).expect("center height") * exag;
+    // Straight-down ray over the center, from well above the surface.
+    let hit = w
+        .raycast_terrain(500.0, 10_000.0, 500.0, 0.0, -1.0, 0.0, exag)
+        .expect("a downward ray over the map should hit terrain");
+    assert!((hit[0] - 500.0).abs() < 1e-6 && (hit[2] - 500.0).abs() < 1e-6, "hit stays on the ray XZ");
+    assert!((hit[1] - h).abs() < 1.0, "hit Y ≈ terrain height {h}, got {}", hit[1]);
+    // A ray pointing up into empty sky misses.
+    assert!(
+        w.raycast_terrain(500.0, 10_000.0, 500.0, 0.0, 1.0, 0.0, exag).is_none(),
+        "an upward ray hits nothing"
+    );
+}
+
+#[test]
 fn streams_are_idempotent_after_a_course() {
     let mut w = built();
     // Paint a short main-river stroke so streams have a catchment to drain into.

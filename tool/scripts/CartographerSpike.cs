@@ -87,6 +87,19 @@ public partial class CartographerSpike : Node3D
     public GodotObject Engine => _engine;
     public float Exaggeration => _exaggeration;
 
+    // Brush stroke state: spacing (don't pile dabs on one spot) + liquid settle on release.
+    private const float BrushSpacingFrac = 0.25f;
+    private const int SettleSubsteps = 12;
+    private Vector3 _lastPaintPos;
+    private bool _hasLastPaint;
+    private bool _painting;
+    private bool _strokeTouchedLiquid;
+
+    // Brush preview gizmo (ring + translucent disc; green additive / red subtractive).
+    private Node3D _brush;
+    private MeshInstance3D _brushFill, _brushRim;
+    private StandardMaterial3D _brushFillMat, _brushRimMat;
+
     public override void _Ready()
     {
         _engine = ClassDB.Instantiate("DhceEngine").AsGodotObject();
@@ -100,7 +113,7 @@ public partial class CartographerSpike : Node3D
         _exaggeration = TerrainHeightKm * 1000f / ElevSpan;
         _widthM = _heightM = WorldSizeKm * 1000f; // km → metres (1 Godot unit = 1 m)
         Tool.RadiusM = BrushRadiusM;
-        Tool.Strength = BrushStrength;
+        Tool.StrengthM = BrushStrength * _exaggeration; // export is normalized; the tool works in metres
 
         // Scene dressing + camera are mesh-independent, so set them up first — the window is
         // live the instant `_Ready` returns, showing the splash while gen is pending.
@@ -158,6 +171,10 @@ public partial class CartographerSpike : Node3D
             for (int k = 0; k < budget; k++)
                 BuildChunk(_pending[k].ci);
         }
+
+        // A stroke released over a UI panel won't reach _UnhandledInput — settle here too.
+        if (_painting && !Input.IsMouseButtonPressed(MouseButton.Left)) { _painting = false; EndStroke(); }
+        UpdateBrushGizmo();
     }
 
     /// Build the world on the main thread, then arm streaming. Heavy (~seconds for a 20 km
@@ -242,6 +259,8 @@ public partial class CartographerSpike : Node3D
         AddChild(_cam);
         _cam.FrameOverhead(new Vector3(_widthM * 0.5f, 0f, _heightM * 0.5f), Mathf.Max(_widthM, _heightM) * 0.9f);
         _cam.Current = true;
+
+        BuildBrushGizmo();
     }
 
     private void AddSun(Vector3 rotationDegrees, float energy)
@@ -342,31 +361,130 @@ public partial class CartographerSpike : Node3D
         _liquidMesh.AddSurfaceFromArrays(Mesh.PrimitiveType.Triangles, arrays);
     }
 
+    // --- brush preview gizmo (ring + translucent disc on the terrain under the cursor) ---
+
+    private void BuildBrushGizmo()
+    {
+        _brush = new Node3D { Visible = false };
+        AddChild(_brush);
+        _brushFillMat = UnshadedMat(new Color(0.2f, 1f, 0.3f, 0.18f));
+        _brushRimMat = UnshadedMat(new Color(0.2f, 1f, 0.3f, 0.85f));
+        _brushFill = new MeshInstance3D { Mesh = MakeDisc(1f, 48), MaterialOverride = _brushFillMat };
+        _brushRim = new MeshInstance3D { Mesh = MakeRing(0.93f, 1f, 64), MaterialOverride = _brushRimMat };
+        _brush.AddChild(_brushFill);
+        _brush.AddChild(_brushRim);
+    }
+
+    /// Position/scale/colour the brush gizmo under the cursor each frame: green = additive
+    /// (raise/crest), red = subtractive (carve), blue = water, yellow = level, neutral = biome.
+    private void UpdateBrushGizmo()
+    {
+        if (_brush == null) return;
+        Vector3? maybeHit = TerrainHit(GetViewport().GetMousePosition());
+        if (maybeHit is not Vector3 p) { _brush.Visible = false; return; }
+        _brush.Visible = true;
+        _brush.GlobalPosition = p + new Vector3(0f, _exaggeration * 0.003f, 0f); // lift to dodge z-fight
+        _brush.Scale = new Vector3(Tool.RadiusM, 1f, Tool.RadiusM);
+        Color c = BrushColor(Tool.Active, Tool.LiquidKind);
+        _brushFillMat.AlbedoColor = new Color(c.R, c.G, c.B, 0.18f);
+        _brushRimMat.AlbedoColor = new Color(c.R, c.G, c.B, 0.85f);
+    }
+
+    private static Color BrushColor(ToolKind active, int liquidKind) => active switch
+    {
+        ToolKind.Raise or ToolKind.Crest => new Color(0.2f, 1f, 0.3f), // additive — green
+        ToolKind.Carve => new Color(1f, 0.25f, 0.2f),                  // subtractive — red
+        ToolKind.Level => new Color(0.85f, 0.85f, 0.3f),              // neutral — yellow
+        ToolKind.River => new Color(0.3f, 0.6f, 1f),                  // water — blue
+        ToolKind.Flood => liquidKind == 1 ? new Color(1f, 0.5f, 0.15f) : new Color(0.3f, 0.6f, 1f),
+        _ => new Color(0.9f, 0.9f, 0.95f),                            // biome — neutral
+    };
+
+    private static StandardMaterial3D UnshadedMat(Color c)
+    {
+        var m = new StandardMaterial3D { AlbedoColor = c };
+        m.Set("shading_mode", 0);      // SHADING_MODE_UNSHADED
+        m.Set("transparency", 1);      // ALPHA
+        m.Set("cull_mode", 2);         // CULL_DISABLED
+        m.Set("no_depth_test", true);  // draw on top so the brush is always visible
+        return m;
+    }
+
+    private static ArrayMesh MakeDisc(float radius, int seg)
+    {
+        var verts = new Vector3[seg + 2];
+        verts[0] = Vector3.Zero;
+        for (int i = 0; i <= seg; i++)
+        {
+            float a = Mathf.Tau * i / seg;
+            verts[i + 1] = new Vector3(Mathf.Cos(a) * radius, 0f, Mathf.Sin(a) * radius);
+        }
+        var idx = new int[seg * 3];
+        for (int i = 0; i < seg; i++) { idx[i * 3] = 0; idx[i * 3 + 1] = i + 1; idx[i * 3 + 2] = i + 2; }
+        return MeshFrom(verts, idx);
+    }
+
+    private static ArrayMesh MakeRing(float inner, float outer, int seg)
+    {
+        var verts = new Vector3[(seg + 1) * 2];
+        for (int i = 0; i <= seg; i++)
+        {
+            float a = Mathf.Tau * i / seg;
+            float cs = Mathf.Cos(a), sn = Mathf.Sin(a);
+            verts[i * 2] = new Vector3(cs * inner, 0f, sn * inner);
+            verts[i * 2 + 1] = new Vector3(cs * outer, 0f, sn * outer);
+        }
+        var idx = new int[seg * 6];
+        for (int i = 0; i < seg; i++)
+        {
+            int a = i * 2, b = i * 2 + 1, c = i * 2 + 2, d = i * 2 + 3;
+            idx[i * 6] = a; idx[i * 6 + 1] = b; idx[i * 6 + 2] = c;
+            idx[i * 6 + 3] = b; idx[i * 6 + 4] = d; idx[i * 6 + 5] = c;
+        }
+        return MeshFrom(verts, idx);
+    }
+
+    private static ArrayMesh MeshFrom(Vector3[] verts, int[] idx)
+    {
+        var arr = new Godot.Collections.Array();
+        arr.Resize((int)Mesh.ArrayType.Max);
+        arr[(int)Mesh.ArrayType.Vertex] = verts;
+        arr[(int)Mesh.ArrayType.Index] = idx;
+        var m = new ArrayMesh();
+        m.AddSurfaceFromArrays(Mesh.PrimitiveType.Triangles, arr);
+        return m;
+    }
+
     public override void _UnhandledInput(InputEvent e)
     {
-        bool down = e is InputEventMouseButton { ButtonIndex: MouseButton.Left, Pressed: true };
-        bool drag = e is InputEventMouseMotion mm && (mm.ButtonMask & MouseButtonMask.Left) != 0;
-        if (down) PaintAt(((InputEventMouseButton)e).Position);
-        else if (drag) PaintAt(((InputEventMouseMotion)e).Position);
+        if (e is InputEventMouseButton mb && mb.ButtonIndex == MouseButton.Left)
+        {
+            if (mb.Pressed) { _painting = true; _strokeTouchedLiquid = false; _hasLastPaint = false; PaintAt(mb.Position); }
+            else { _painting = false; EndStroke(); }
+            return;
+        }
+        if (e is InputEventMouseMotion mm && (mm.ButtonMask & MouseButtonMask.Left) != 0)
+            PaintAt(mm.Position);
     }
 
     private void PaintAt(Vector2 screen)
     {
         if (!_genDone) return;
-        var cam = GetViewport().GetCamera3D();
-        if (cam == null) return;
-        Vector3 from = cam.ProjectRayOrigin(screen);
-        Vector3 dir = cam.ProjectRayNormal(screen);
-        if (Mathf.IsZeroApprox(dir.Y)) return;
-        float t = -from.Y / dir.Y;            // intersect the ground plane Y = 0
-        if (t < 0f) return;
-        Vector3 hit = from + dir * t;         // core (x, y) = (hit.X, hit.Z)
+        Vector3? maybeHit = TerrainHit(screen);
+        if (maybeHit is not Vector3 hit) return; // cursor not over terrain
+        // core (x, y) = (hit.X, hit.Z)
+
+        // Brush spacing: skip dabs that haven't moved far enough, so a slow drag doesn't pile
+        // many dabs on one spot (which produced spikes / water pillars).
+        if (_hasLastPaint && hit.DistanceTo(_lastPaintPos) < Tool.RadiusM * BrushSpacingFrac) return;
+        _lastPaintPos = hit;
+        _hasLastPaint = true;
 
         ulong t0 = Time.GetTicksUsec();
-        EditResult res = Tool.Apply(_engine, hit);
+        EditResult res = Tool.Apply(_engine, hit, _exaggeration);
         int dirtyCount = 0;
         if (res.HasFlag(EditResult.Terrain)) dirtyCount = RepaintDirtyTerrain();
-        if (res.HasFlag(EditResult.Liquid)) RebuildLiquid();
+        if (res.HasFlag(EditResult.Liquid)) { _strokeTouchedLiquid = true; RebuildLiquid(); }
         double ms = (Time.GetTicksUsec() - t0) / 1000.0;
 
         _totalMs += ms;
@@ -377,5 +495,28 @@ public partial class CartographerSpike : Node3D
             GD.Print($"[DHCE] {line}");
             _ui?.SetStatus(line);
         }
+    }
+
+    /// Ray from the camera through `screen` to the terrain surface (via the core's analytic
+    /// raycast — lands on the actual surface under the cursor from any view angle, not the
+    /// Y = 0 plane). Null if the cursor isn't over terrain.
+    private Vector3? TerrainHit(Vector2 screen)
+    {
+        var cam = GetViewport().GetCamera3D();
+        if (cam == null) return null;
+        Vector3 from = cam.ProjectRayOrigin(screen);
+        Vector3 dir = cam.ProjectRayNormal(screen);
+        var hits = _engine.Call("raycast_terrain", from, dir, (double)_exaggeration).As<Vector3[]>();
+        return hits.Length > 0 ? hits[0] : null;
+    }
+
+    /// Settle the fluid a few steps when a liquid stroke ends, so water flows downhill and levels
+    /// into basins instead of standing in columns where it was poured.
+    private void EndStroke()
+    {
+        if (!_strokeTouchedLiquid) return;
+        _strokeTouchedLiquid = false;
+        _engine.Call("step_fluid", 0.4, 0.0, SettleSubsteps);
+        RebuildLiquid();
     }
 }
