@@ -34,6 +34,10 @@ pub struct WasmEngine {
     sea_level: f64,
     biome_r: Vec<u8>,
     biome_color: Vec<[f32; 3]>,
+    grid_cell: f64,
+    grid_cols: usize,
+    grid_rows: usize,
+    grid: Vec<Vec<u32>>,
     surface: Option<geometry::Surface>,
     liquid: Option<LiquidSurface>,
 }
@@ -63,6 +67,10 @@ impl WasmEngine {
             sea_level: 0.0,
             biome_r: Vec::new(),
             biome_color,
+            grid_cell: 0.0,
+            grid_cols: 0,
+            grid_rows: 0,
+            grid: Vec::new(),
             surface: None,
             liquid: None,
         }
@@ -91,6 +99,22 @@ impl WasmEngine {
             biome_r[r] = biomes::classify(self.elevation_r[r], moist, dist);
         }
         self.biome_r = biome_r;
+
+        // Spatial grid for O(brush) brush queries (keeps painting fast at high detail).
+        let grid_cell = (width.max(height) / 64.0).max(1.0);
+        let cols = (width / grid_cell).ceil() as usize + 1;
+        let rows = (height / grid_cell).ceil() as usize + 1;
+        let mut grid: Vec<Vec<u32>> = vec![Vec::new(); cols * rows];
+        for r in 0..nr {
+            let p = mesh.pos_of_r(r);
+            let gx = ((p[0] / grid_cell) as usize).min(cols - 1);
+            let gy = ((p[1] / grid_cell) as usize).min(rows - 1);
+            grid[gy * cols + gx].push(r as u32);
+        }
+        self.grid_cell = grid_cell;
+        self.grid_cols = cols;
+        self.grid_rows = rows;
+        self.grid = grid;
 
         self.width = width;
         self.height = height;
@@ -160,27 +184,30 @@ impl WasmEngine {
     /// 2 level (toward the height at the brush center), 3 crest (sharp peak).
     /// `strength` is the per-application elevation delta. JS re-tessellates after.
     pub fn paint_terrain(&mut self, cx: f64, cy: f64, radius: f64, strength: f64, mode: u32) {
-        let mesh = match &self.mesh {
-            Some(m) => m,
-            None => return,
-        };
+        if self.mesh.is_none() {
+            return;
+        }
         let r2 = radius * radius;
+        let candidates = self.brush_candidates(cx, cy, radius);
 
-        // Center height for the level tool (nearest region to the cursor).
+        // Center height for the level tool (nearest candidate to the cursor).
         let mut center_e = 0.0;
         if mode == 2 {
+            let mesh = self.mesh.as_ref().unwrap();
             let mut best = f64::INFINITY;
-            for ri in 0..mesh.num_regions() {
-                let p = mesh.pos_of_r(ri);
+            for &ri in &candidates {
+                let p = mesh.pos_of_r(ri as usize);
                 let d2 = (p[0] - cx).powi(2) + (p[1] - cy).powi(2);
                 if d2 < best {
                     best = d2;
-                    center_e = self.elevation_r[ri];
+                    center_e = self.elevation_r[ri as usize];
                 }
             }
         }
 
-        for ri in 0..mesh.num_regions() {
+        let mesh = self.mesh.as_ref().unwrap();
+        for &rid in &candidates {
+            let ri = rid as usize;
             let p = mesh.pos_of_r(ri);
             let d2 = (p[0] - cx).powi(2) + (p[1] - cy).powi(2);
             if d2 >= r2 {
@@ -203,12 +230,14 @@ impl WasmEngine {
     /// Place `amount` of liquid `kind` (0 water, 1 lava) under `(cx, cy)` within
     /// `radius`. Used by the Course (trickle) and Flood (pour) tools.
     pub fn paint_liquid(&mut self, cx: f64, cy: f64, radius: f64, amount: f64, kind: u32) {
-        let mesh = match &self.mesh {
-            Some(m) => m,
-            None => return,
-        };
+        if self.mesh.is_none() {
+            return;
+        }
         let r2 = radius * radius;
-        for ri in 0..mesh.num_regions() {
+        let candidates = self.brush_candidates(cx, cy, radius);
+        let mesh = self.mesh.as_ref().unwrap();
+        for &rid in &candidates {
+            let ri = rid as usize;
             let p = mesh.pos_of_r(ri);
             let d2 = (p[0] - cx).powi(2) + (p[1] - cy).powi(2);
             if d2 >= r2 {
@@ -247,12 +276,14 @@ impl WasmEngine {
     // --- biomes (Phase 5) ---
     /// Assign `biome_id` (1..=14) to every region under `(cx, cy)` within `radius`.
     pub fn paint_biome(&mut self, cx: f64, cy: f64, radius: f64, biome_id: u32) {
-        let mesh = match &self.mesh {
-            Some(m) => m,
-            None => return,
-        };
+        if self.mesh.is_none() {
+            return;
+        }
         let r2 = radius * radius;
-        for ri in 0..mesh.num_regions() {
+        let candidates = self.brush_candidates(cx, cy, radius);
+        let mesh = self.mesh.as_ref().unwrap();
+        for &rid in &candidates {
+            let ri = rid as usize;
             let p = mesh.pos_of_r(ri);
             if (p[0] - cx).powi(2) + (p[1] - cy).powi(2) < r2 {
                 self.biome_r[ri] = biome_id as u8;
@@ -311,6 +342,27 @@ impl WasmEngine {
 }
 
 impl WasmEngine {
+    /// Candidate region ids whose grid cells overlap the brush's bounding box.
+    fn brush_candidates(&self, cx: f64, cy: f64, radius: f64) -> Vec<u32> {
+        if self.grid.is_empty() || self.grid_cols == 0 {
+            return (0..self.elevation_r.len() as u32).collect();
+        }
+        let c = self.grid_cell;
+        let clampx = |v: f64| (v.max(0.0) as usize).min(self.grid_cols - 1);
+        let clampy = |v: f64| (v.max(0.0) as usize).min(self.grid_rows - 1);
+        let gx0 = clampx(((cx - radius) / c).floor());
+        let gx1 = clampx(((cx + radius) / c).floor());
+        let gy0 = clampy(((cy - radius) / c).floor());
+        let gy1 = clampy(((cy + radius) / c).floor());
+        let mut out = Vec::new();
+        for gy in gy0..=gy1 {
+            for gx in gx0..=gx1 {
+                out.extend_from_slice(&self.grid[gy * self.grid_cols + gx]);
+            }
+        }
+        out
+    }
+
     /// Per-region RGB color (3 floats per region) from each region's biome.
     fn region_color(&self) -> Vec<f32> {
         let nr = self.elevation_r.len();

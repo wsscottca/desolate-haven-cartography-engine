@@ -63,7 +63,7 @@ interface Spec {
 
 const SPECS: Spec[] = [
   { group: "engine", key: "seed", label: "Seed", min: 0, max: 9_999_999, step: 1, integer: true, number: true },
-  { group: "engine", key: "detail", label: "Detail", min: 64, max: 512, step: 32, integer: true },
+  { group: "engine", key: "detail", label: "Detail", min: 64, max: 800, step: 32, integer: true },
   { group: "engine", key: "octaves", label: "Noise octaves", min: 1, max: 8, step: 1, integer: true },
   { group: "engine", key: "exaggeration", label: "Vertical scale", min: 0, max: 300, step: 5, integer: true },
   { group: "tools", key: "brushRadius", label: "Brush size", min: 10, max: 250, step: 5, integer: true },
