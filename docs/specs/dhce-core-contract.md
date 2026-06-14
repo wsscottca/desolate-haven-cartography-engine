@@ -151,13 +151,13 @@ build(width, height, spacing, seed: float, octaves: int) -> void
 region_count() / triangle_count() -> int        version() -> String
 
 tessellate(exaggeration: float) -> void          // pack terrain surface into cache
-surface_positions() -> PackedFloat32Array         // x,y,z per vertex
-surface_normals()   -> PackedFloat32Array         // 3 per vertex
-surface_colors()    -> PackedFloat32Array         // rgb per vertex (smoothed biome color)
-surface_heights()   -> PackedFloat32Array         // normalized elevation per vertex
-surface_indices()   -> PackedInt32Array           // 3 per triangle
-tessellate_liquid(exaggeration) -> void           // liquid_positions/normals/types() ->
-                                                  //   PackedFloat32Array; liquid_indices() -> PackedInt32Array
+surface_positions() -> PackedVector3Array         // Godot Vector3, Y-up (core z-up height -> +Y)
+surface_normals()   -> PackedVector3Array         // Y-up, ready for ARRAY_NORMAL
+surface_colors()    -> PackedColorArray            // opaque, smoothed biome color
+surface_heights()   -> PackedFloat32Array          // normalized elevation per vertex
+surface_indices()   -> PackedInt32Array            // 3 per triangle
+tessellate_liquid(exaggeration) -> void            // liquid_positions/normals() -> PackedVector3Array;
+                                                   //   liquid_types() -> PackedFloat32Array; liquid_indices() -> PackedInt32Array
 
 // authoring (forward to World) — brush ops return PackedInt32Array of touched regions
 paint_terrain(cx, cy, radius, strength, mode: int) -> PackedInt32Array  // 0 raise/1 carve/2 level/3 crest
@@ -184,9 +184,10 @@ tessellate_scatter(exaggeration, density, seed) -> void; scatter_data() -> Packe
 ```
 
 Build a Godot mesh by feeding `surface_positions`/`surface_normals`/`surface_colors`
-into an `ArrayMesh` (`ARRAY_VERTEX`/`ARRAY_NORMAL`/`ARRAY_COLOR`) with `surface_indices`
-as `ARRAY_INDEX`. Because the core is deterministic, a `(seed, spacing, exaggeration)`
-that looks right anywhere reproduces here.
+straight into an `ArrayMesh` (`ARRAY_VERTEX`/`ARRAY_NORMAL`/`ARRAY_COLOR`) with
+`surface_indices` as `ARRAY_INDEX` — the adapter packs the Godot vector/color types and
+applies the Y-up remap in Rust, so C# never iterates the vertex buffer. Because the core
+is deterministic, a `(seed, spacing, exaggeration)` that looks right anywhere reproduces here.
 
 **Toolchain note:** `dhce-godot` depends on `godot` (godot-rust/gdext, **MPL-2.0** —
 weak copyleft confined to gdext's own files). gdext is pinned to a Godot 4.x API; align

@@ -1,0 +1,16 @@
+; Godot GDExtension manifest for the Desolate Haven Cartography Engine core.
+; The built library sits beside this file. Rebuild with:
+;   cargo build -p dhce-godot --release  (DLL at crates/dhce-godot/target/release/)
+; then copy it here.
+[configuration]
+entry_symbol = "gdext_rust_init"
+compatibility_minimum = 4.2
+reloadable = true
+
+[libraries]
+windows.debug.x86_64   = "res://addons/dhce/dhce_godot.dll"
+windows.release.x86_64 = "res://addons/dhce/dhce_godot.dll"
+linux.debug.x86_64     = "res://addons/dhce/libdhce_godot.so"
+linux.release.x86_64   = "res://addons/dhce/libdhce_godot.so"
+macos.debug            = "res://addons/dhce/libdhce_godot.dylib"
+macos.release          = "res://addons/dhce/libdhce_godot.dylib"

@@ -1,0 +1,9 @@
+# Godot editor cache (regenerated on open)
+.godot/
+*.import
+
+# Built GDExtension libraries — rebuild with `cargo build -p dhce-godot --release`
+# then copy from crates/dhce-godot/target/release/ into addons/dhce/
+addons/dhce/*.dll
+addons/dhce/*.so
+addons/dhce/*.dylib

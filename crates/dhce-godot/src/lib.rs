@@ -76,17 +76,19 @@ impl DhceEngine {
     fn tessellate(&mut self, exaggeration: f64) {
         self.surface = self.world.surface(exaggeration);
     }
+    /// Vertex positions as Godot `Vector3`, remapped to Y-up (core is z-up): the terrain
+    /// lies in Godot's XZ plane with elevation on +Y. Feed straight into `ARRAY_VERTEX`.
     #[func]
-    fn surface_positions(&self) -> PackedFloat32Array {
-        self.surface.as_ref().map(|s| PackedFloat32Array::from(s.positions.as_slice())).unwrap_or_default()
+    fn surface_positions(&self) -> PackedVector3Array {
+        self.surface.as_ref().map(|s| to_vec3_yup(&s.positions)).unwrap_or_default()
     }
     #[func]
-    fn surface_normals(&self) -> PackedFloat32Array {
-        self.surface.as_ref().map(|s| PackedFloat32Array::from(s.normals.as_slice())).unwrap_or_default()
+    fn surface_normals(&self) -> PackedVector3Array {
+        self.surface.as_ref().map(|s| to_vec3_yup(&s.normals)).unwrap_or_default()
     }
     #[func]
-    fn surface_colors(&self) -> PackedFloat32Array {
-        self.surface.as_ref().map(|s| PackedFloat32Array::from(s.colors.as_slice())).unwrap_or_default()
+    fn surface_colors(&self) -> PackedColorArray {
+        self.surface.as_ref().map(|s| to_colors(&s.colors)).unwrap_or_default()
     }
     #[func]
     fn surface_heights(&self) -> PackedFloat32Array {
@@ -120,12 +122,12 @@ impl DhceEngine {
         self.liquid = self.world.liquid_surface(exaggeration);
     }
     #[func]
-    fn liquid_positions(&self) -> PackedFloat32Array {
-        self.liquid.as_ref().map(|s| PackedFloat32Array::from(s.positions.as_slice())).unwrap_or_default()
+    fn liquid_positions(&self) -> PackedVector3Array {
+        self.liquid.as_ref().map(|s| to_vec3_yup(&s.positions)).unwrap_or_default()
     }
     #[func]
-    fn liquid_normals(&self) -> PackedFloat32Array {
-        self.liquid.as_ref().map(|s| PackedFloat32Array::from(s.normals.as_slice())).unwrap_or_default()
+    fn liquid_normals(&self) -> PackedVector3Array {
+        self.liquid.as_ref().map(|s| to_vec3_yup(&s.normals)).unwrap_or_default()
     }
     #[func]
     fn liquid_types(&self) -> PackedFloat32Array {
@@ -282,4 +284,26 @@ impl DhceEngine {
 fn u32_to_packed(v: &[u32]) -> PackedInt32Array {
     let s: Vec<i32> = v.iter().map(|&i| i as i32).collect();
     PackedInt32Array::from(s.as_slice())
+}
+
+/// Pack a flat `[x, y, z, ...]` f32 buffer (core z-up) into Godot `Vector3`s, remapped
+/// to Y-up: Godot `(X, Y, Z)` = core `(x, z=height, y)`. The remap runs here (Rust), so
+/// C# never iterates the vertex array.
+fn to_vec3_yup(flat: &[f32]) -> PackedVector3Array {
+    let n = flat.len() / 3;
+    let mut v = Vec::with_capacity(n);
+    for i in 0..n {
+        v.push(Vector3::new(flat[3 * i], flat[3 * i + 2], flat[3 * i + 1]));
+    }
+    PackedVector3Array::from(v.as_slice())
+}
+
+/// Pack a flat `[r, g, b, ...]` f32 buffer into opaque Godot `Color`s.
+fn to_colors(flat: &[f32]) -> PackedColorArray {
+    let n = flat.len() / 3;
+    let mut v = Vec::with_capacity(n);
+    for i in 0..n {
+        v.push(Color::from_rgba(flat[3 * i], flat[3 * i + 1], flat[3 * i + 2], 1.0));
+    }
+    PackedColorArray::from(v.as_slice())
 }
