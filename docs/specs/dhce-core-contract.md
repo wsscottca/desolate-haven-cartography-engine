@@ -58,6 +58,8 @@ elevation::assign_region_elevation(&Mesh, width, height, seed: u64, octaves: u32
 // biomes.rs
 biomes::BIOME_COUNT: usize = 14
 biomes::roster() -> [BiomeDef; 14]       // label, color [f32;3], landform, water
+//   labels + base colors mirror canon — keep in sync with
+//   ../../web/desolate-haven-guide/lore/biome-features.md (catalog) + lore/biomes/ (region docs)
 biomes::moisture_at(x, y, width, height, seed: u64) -> f64  // [0,1] proxy
 biomes::classify(elevation: f64, moisture: f64, dist_center: f64) -> u8  // 1..=14
 
