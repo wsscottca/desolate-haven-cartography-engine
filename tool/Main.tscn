@@ -1,0 +1,12 @@
+[gd_scene format=3 uid="uid://cdvhtjcrwjcdj"]
+
+[ext_resource type="Script" uid="uid://cciqift31mdg4" path="res://scripts/CartographerSpike.cs" id="1_glv2v"]
+
+[node name="CartographerSpike" type="Node3D" unique_id=1143501762]
+script = ExtResource("1_glv2v")
+Width = 10000.0
+Height = 10000.0
+Spacing = 6.0
+Octaves = 8
+Exaggeration = 450.0
+metadata/_custom_type_script = "uid://cciqift31mdg4"
