@@ -361,6 +361,35 @@ public partial class CartographerSpike : Node3D
         _liquidMesh.AddSurfaceFromArrays(Mesh.PrimitiveType.Triangles, arrays);
     }
 
+    /// Rebuild the world from the current Seed/Octaves/WorldSizeKm/SpacingM (set by the UI).
+    /// Discards edits; reuses the splash-deferred main-thread gen path (_Process warmup).
+    public void Regenerate()
+    {
+        if (_chunks != null) foreach (var mi in _chunks) mi?.QueueFree();
+        _chunks = null; _chunkMeshes = null; _built = null;
+        _liquid?.QueueFree(); _liquid = null; _liquidMesh = null;
+        _genDone = false;
+
+        _widthM = _heightM = WorldSizeKm * 1000f;
+        _exaggeration = TerrainHeightKm * 1000f / ElevSpan;
+        _cam?.FrameOverhead(new Vector3(_widthM * 0.5f, 0f, _heightM * 0.5f), Mathf.Max(_widthM, _heightM) * 0.9f);
+
+        ShowSplash("Regenerating world…");
+        _warmupFrames = 0;
+        _pendingGen = true;
+    }
+
+    /// Live vertical-relief change (no rebuild): recompute exaggeration, re-tessellate every meshed
+    /// chunk + the liquid. `km` is world-height in km.
+    public void SetTerrainHeight(float km)
+    {
+        TerrainHeightKm = km;
+        _exaggeration = km * 1000f / ElevSpan;
+        if (!_genDone) return;
+        for (int i = 0; i < _built.Length; i++) if (_built[i]) BuildChunk(i);
+        RebuildLiquid();
+    }
+
     // --- brush preview gizmo (ring + translucent disc on the terrain under the cursor) ---
 
     private void BuildBrushGizmo()
