@@ -7,9 +7,12 @@ owner: wsscottca
 # dhce-core contract (self-contained)
 
 The shared generation + simulation core of the Desolate Haven Cartography Engine.
-One Rust crate, two adapters: `dhce-wasm` (browser tool) and `dhce-godot`
-(GDExtension for the Godot `desolate-haven` game). **Same seed + inputs ⇒ identical
-output on every target** — this is what keeps the authoring tool and the game in sync.
+One Rust crate, two adapters: `dhce-godot` (GDExtension — drives the **native Godot 4
++ C# authoring tool** and the `desolate-haven` game) and `dhce-wasm` (the frozen browser
+build, kept as a native↔web determinism cross-check). **Same seed + inputs + authored
+edits ⇒ identical output on every target** — this keeps the tool and the game in sync.
+All authoring state and compute live in `dhce_core::world::World`; the adapters are thin
+marshalling shells (see ADR 0002).
 
 This document is self-contained: all types and call sequences are inlined so it can
 be handed to a Godot/C# (or DeepSeek-in-Rider) consumer without reading the source.
@@ -86,6 +89,13 @@ geometry::build_surface(&Mesh, elevation: &[f64], exaggeration: f64,
 // scatter.rs — deterministic decoration placement (rocks/trees)
 scatter::scatter(seed: u64, &Mesh, elevation, biome, exaggeration, density) -> Vec<Instance>
 //   Instance { x, y, z, scale, species /*0 tree, 1 rock*/ : f32 }
+
+// world.rs — resident authoring world-state: the source of truth for an edit session
+world::World::new() -> World
+World::build(width, height, spacing, seed: u64, octaves: u32)
+//   Owns mesh + elevation + biome + liquid + per-biome profiles + spatial grid, plus
+//   every authoring op (see below). surface()/liquid_surface()/scatter_instances() pack
+//   the render buffers. Both adapters wrap a single World.
 ```
 
 ## Typical call sequence (any front-end)
@@ -101,10 +111,12 @@ scatter::scatter(seed: u64, &Mesh, elevation, biome, exaggeration, density) -> V
 Brushes (interactive edits) mutate `terrain`/`biome`/`LiquidField` in place over a
 radial falloff, then re-run steps 4–6 for the affected output.
 
-## Authoring operations (front-end engine)
+## Authoring operations (`dhce_core::world::World`)
 
-The browser tool (`dhce-wasm`) layers these authored-edit operations over the core. A
-native front-end must reproduce them to stay map-compatible; all are deterministic.
+These authored-edit operations live in the core `World`, so both adapters expose the
+identical surface by forwarding to it (no per-region compute in the adapters); all are
+deterministic. Brush ops return the touched region ids so a front-end can patch just
+those vertices instead of re-uploading the whole mesh.
 
 - **Sculpt** `paint_terrain(cx, cy, radius, strength, mode)` — mode 0 raise / 1 carve /
   2 level / 3 crest, smoothstep radial falloff. Auto-biome cells under the brush are
@@ -130,25 +142,54 @@ native front-end must reproduce them to stay map-compatible; all are determinist
 
 ## GDExtension adapter (`dhce-godot`) — Godot/C# surface
 
-Class `DhceEngine` (extends `RefCounted`). Methods callable from GDScript/C#:
+Class `DhceEngine` (extends `RefCounted`); every method forwards to the core `World`.
+Render surfaces use a **pack-once, read-each-array** pattern: call `tessellate(exag)`
+(or `tessellate_liquid`) once, then read the per-array getters.
 
 ```
-build(width: float, height: float, spacing: float, seed: float, octaves: int) -> void
-region_count() -> int
-version() -> String
-surface_positions(exaggeration: float) -> PackedFloat32Array   // x,y,z per vertex
-surface_normals(exaggeration: float)   -> PackedFloat32Array   // 3 per vertex
-surface_indices(exaggeration: float)   -> PackedInt32Array     // 3 per triangle
-biome_at(region: int) -> int                                   // 1..=14, 0 = none
+build(width, height, spacing, seed: float, octaves: int) -> void
+region_count() / triangle_count() -> int        version() -> String
+
+tessellate(exaggeration: float) -> void          // pack terrain surface into cache
+surface_positions() -> PackedFloat32Array         // x,y,z per vertex
+surface_normals()   -> PackedFloat32Array         // 3 per vertex
+surface_colors()    -> PackedFloat32Array         // rgb per vertex (smoothed biome color)
+surface_heights()   -> PackedFloat32Array         // normalized elevation per vertex
+surface_indices()   -> PackedInt32Array           // 3 per triangle
+tessellate_liquid(exaggeration) -> void           // liquid_positions/normals/types() ->
+                                                  //   PackedFloat32Array; liquid_indices() -> PackedInt32Array
+
+// authoring (forward to World) — brush ops return PackedInt32Array of touched regions
+paint_terrain(cx, cy, radius, strength, mode: int) -> PackedInt32Array  // 0 raise/1 carve/2 level/3 crest
+paint_course(cx, cy, radius, intensity, kind: int) -> PackedInt32Array
+paint_liquid(cx, cy, radius, amount, kind: int)    -> void
+paint_biome(cx, cy, radius, biome_id: int)         -> PackedInt32Array
+generate_streams(threshold, depth_gain) -> void
+set_sea_level(level) / rain(amount) / step_fluid(flow, evap, substeps: int) / clear_liquid()
+
+// selection / boundary / biome profiles
+region_at(x, y) -> int (-1 none)   biome_at(region: int) -> int   set_biome_of(region, id: int)
+select_contiguous(region: int) -> PackedInt32Array
+selection_indices(PackedInt32Array) -> PackedInt32Array
+regions_in_polygon(xs, ys: PackedFloat32Array) -> PackedInt32Array
+biome_color_of / biome_landform_of / biome_water_of(id: int) -> PackedFloat32Array
+set_biome_color(id, r, g, b)   set_biome_landform(id, idx, v)   set_biome_water(id, idx, v)
+
+// save / load + decoration
+elevation_export() -> PackedFloat32Array     biome_export() -> PackedByteArray
+liquid_depth_export() -> PackedFloat32Array  liquid_kind_export() -> PackedByteArray
+course_mask_export() -> PackedByteArray
+set_elevation / set_biome / set_liquid / set_course_mask
+tessellate_scatter(exaggeration, density, seed) -> void; scatter_data() -> PackedFloat32Array; scatter_count() -> int
 ```
 
-Build a Godot mesh by feeding `surface_positions`/`surface_normals` into an
-`ArrayMesh` (Mesh.ARRAY_VERTEX / ARRAY_NORMAL) with `surface_indices` as
-`ARRAY_INDEX`. Because the core is deterministic, a `(seed, spacing, exaggeration)`
-that looks right in the browser tool produces the same mesh here.
+Build a Godot mesh by feeding `surface_positions`/`surface_normals`/`surface_colors`
+into an `ArrayMesh` (`ARRAY_VERTEX`/`ARRAY_NORMAL`/`ARRAY_COLOR`) with `surface_indices`
+as `ARRAY_INDEX`. Because the core is deterministic, a `(seed, spacing, exaggeration)`
+that looks right anywhere reproduces here.
 
-**Toolchain note:** `dhce-godot` depends on `godot` (godot-rust/gdext, MIT-elected).
-gdext is pinned to a Godot 4.x API; align the `godot` crate version with the project's
-Godot build (or set `GODOT4_BIN`). The crate is excluded from the default Cargo
-workspace and built on its own; the resulting `.dll`/`.so` + `dhce.gdextension`
-manifest are copied into the Godot project's `addons/`.
+**Toolchain note:** `dhce-godot` depends on `godot` (godot-rust/gdext, **MPL-2.0** —
+weak copyleft confined to gdext's own files). gdext is pinned to a Godot 4.x API; align
+the `godot` crate version with the project's Godot build (or set `GODOT4_BIN`). The crate
+is excluded from the default Cargo workspace and built on its own; the resulting
+`.dll`/`.so` + `dhce.gdextension` manifest are copied into the Godot project's `addons/`.
