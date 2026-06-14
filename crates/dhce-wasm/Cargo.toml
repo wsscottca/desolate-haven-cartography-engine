@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 description = "WASM (wasm-bindgen) adapter exposing dhce-core to the browser front-end."
+publish = false
 
 [lib]
 crate-type = ["cdylib"]

@@ -14,6 +14,7 @@
 
 pub mod prng;
 pub mod noise;
+pub mod points;
 pub mod mesh;
 pub mod elevation;
 pub mod rainfall;

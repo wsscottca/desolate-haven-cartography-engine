@@ -17,16 +17,22 @@ build if any dependency uses a non-permissive license.
 
 ## Runtime — Rust core (`crates/dhce-core`)
 
+PRNG, simplex noise, and Poisson-disk sampling are our own. The only dependency is
+the Delaunay triangulation:
+
 | Crate | License | Notes |
 |---|---|---|
-| *(none yet)* | — | Phase 1 adds a permissive Delaunay crate (MIT-elect). PRNG + noise are our own. |
+| `delaunator` 1.x | ISC | Delaunay triangulation. We own the dual half-edge wrapper. |
+| `robust` 1.x | MIT OR Apache-2.0 | Robust geo predicates (via `delaunator`); MIT election. |
 
 ## Runtime — WASM adapter (`crates/dhce-wasm`)
 
 | Crate | License | Notes |
 |---|---|---|
-| `wasm-bindgen` | MIT OR Apache-2.0 | Used under MIT election. |
-| `console_error_panic_hook` (dev) | MIT OR Apache-2.0 | Dev diagnostics only. |
+| `wasm-bindgen` (+ macro/shared) | MIT OR Apache-2.0 | MIT election. |
+| `console_error_panic_hook` (dev) | Apache-2.0/MIT | Dev diagnostics; MIT election. |
+| build-macro tree: `proc-macro2`, `quote`, `syn`, `bumpalo`, `cfg-if`, `once_cell`, `rustversion`, `log` | MIT OR Apache-2.0 | Transitive; MIT election. |
+| `unicode-ident` | (MIT OR Apache-2.0) AND Unicode-3.0 | Transitive; all parts permissive. |
 
 ## Runtime — Web front-end (`web/`)
 

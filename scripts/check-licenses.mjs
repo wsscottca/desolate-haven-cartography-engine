@@ -10,22 +10,37 @@ import { execFileSync } from "node:child_process";
 
 const PERMISSIVE = new Set([
   "MIT", "ISC", "BSD-2-Clause", "BSD-3-Clause", "Apache-2.0", "Zlib",
-  "Unlicense", "CC0-1.0", "0BSD", "MPL-2.0", "OFL-1.1", "LicenseRef-Proprietary",
+  "Unlicense", "CC0-1.0", "0BSD", "MPL-2.0", "OFL-1.1", "Unicode-3.0",
+  "LicenseRef-Proprietary",
 ]);
 // Apache-2.0 alone is permitted but flagged — we prefer to minimize Apache lineage.
 const FLAG_ONLY = new Set(["Apache-2.0"]);
 
-// Split an SPDX expression into its license atoms. Handles both the modern
-// "A OR B" / "A AND B" form and the legacy slash form "A/B" (no surrounding spaces,
-// as older crates like console_error_panic_hook still use).
+// Flatten an SPDX expression to its atoms (used for the Apache-only note). Handles
+// "A OR B", "A AND B", and the legacy slash form "A/B" (no surrounding spaces, as
+// older crates like console_error_panic_hook still use).
 const splitExpr = (expr) =>
   expr
     .replace(/[()]/g, " ")
     .split(/\s+(?:OR|AND)\s+|\s*\/\s*/i)
     .map((s) => s.trim())
     .filter(Boolean);
-// OR semantics: an expression is permissive if ANY listed license is (we elect it).
-const isPermissive = (expr) => !!expr && splitExpr(expr).some((p) => PERMISSIVE.has(p));
+
+// Correct SPDX semantics: an AND clause requires EVERY part permissive; an OR (or
+// legacy slash) clause is permissive if ANY atom is (we elect the favorable one).
+const isPermissive = (expr) => {
+  if (!expr) return false;
+  return expr
+    .replace(/[()]/g, " ")
+    .split(/\s+AND\s+/i)
+    .every((clause) =>
+      clause
+        .split(/\s+OR\s+|\s*\/\s*/i)
+        .map((s) => s.trim())
+        .filter(Boolean)
+        .some((atom) => PERMISSIVE.has(atom)),
+    );
+};
 
 const violations = [];
 const notes = [];
