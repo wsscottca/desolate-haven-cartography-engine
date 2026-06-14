@@ -151,6 +151,21 @@ impl Mesh {
     pub fn is_boundary_r(&self, r: usize) -> bool {
         r < self.num_boundary_regions
     }
+
+    /// Adjacency: for each region, its Delaunay-edge neighbors. Built once and used
+    /// by the fluid solver to move liquid between cells.
+    pub fn region_neighbors(&self) -> Vec<Vec<u32>> {
+        let nr = self.num_regions();
+        let mut nb: Vec<Vec<u32>> = vec![Vec::new(); nr];
+        for s in 0..self.num_sides() {
+            let a = self.r_begin_s(s);
+            let b = self.r_end_s(s) as u32;
+            if !nb[a].contains(&b) {
+                nb[a].push(b);
+            }
+        }
+        nb
+    }
 }
 
 /// Circumcenter of a triangle (a Voronoi vertex). Falls back to the centroid if the

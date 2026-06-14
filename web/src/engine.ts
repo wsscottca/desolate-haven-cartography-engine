@@ -11,6 +11,13 @@ export interface SurfaceMesh {
   triangleCount: number;
 }
 
+export interface LiquidMesh {
+  positions: Float32Array;
+  normals: Float32Array;
+  types: Float32Array;
+  indices: Uint32Array;
+}
+
 interface WasmModule {
   default: (input?: unknown) => Promise<unknown>;
   version: () => string;
@@ -26,6 +33,16 @@ interface WasmEngineHandle {
   indices(): Uint32Array;
   region_count(): number;
   triangle_count(): number;
+  // liquid sim
+  set_sea_level(level: number): void;
+  rain(amount: number): void;
+  step_fluid(flowRate: number, evaporation: number, substeps: number): void;
+  clear_liquid(): void;
+  tessellate_liquid(exaggeration: number): void;
+  liquid_positions(): Float32Array;
+  liquid_normals(): Float32Array;
+  liquid_types(): Float32Array;
+  liquid_indices(): Uint32Array;
 }
 
 export class Engine {
@@ -66,6 +83,34 @@ export class Engine {
       indices: this.handle.indices(),
       regionCount: this.handle.region_count(),
       triangleCount: this.handle.triangle_count(),
+    };
+  }
+
+  // --- liquid simulation ---
+  /** Fill below `level` with water (instant sea + lakes). */
+  setSeaLevel(level: number): void {
+    this.handle.set_sea_level(level);
+  }
+  /** Add uniform rainfall over land above the current sea level. */
+  rain(amount: number): void {
+    this.handle.rain(amount);
+  }
+  /** Advance the hydraulic solver `substeps` relaxation steps. */
+  stepFluid(flowRate: number, evaporation: number, substeps: number): void {
+    this.handle.step_fluid(flowRate, evaporation, substeps);
+  }
+  /** Remove all liquid. */
+  clearLiquid(): void {
+    this.handle.clear_liquid();
+  }
+  /** Tessellate the liquid surface at a vertical exaggeration. */
+  liquidSurface(exaggeration: number): LiquidMesh {
+    this.handle.tessellate_liquid(exaggeration);
+    return {
+      positions: this.handle.liquid_positions(),
+      normals: this.handle.liquid_normals(),
+      types: this.handle.liquid_types(),
+      indices: this.handle.liquid_indices(),
     };
   }
 }

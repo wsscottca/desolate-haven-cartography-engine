@@ -62,6 +62,9 @@
   .setting-val { color: var(--ink); }
   .setting input[type="range"] { width: 100%; accent-color: var(--gold); cursor: pointer; }
   .setting-number { width: 100%; background: var(--bg); color: var(--ink); border: 1px solid var(--rule); border-radius: 5px; padding: 3px 6px; font-family: var(--body); }
+  .actions { display: flex; gap: 6px; margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--rule); }
+  .actions button { flex: 1; background: var(--bg); color: var(--ink-dim); border: 1px solid var(--rule); border-radius: 6px; padding: 7px 6px; cursor: pointer; font-family: var(--label); font-size: 11px; }
+  .actions button:hover { color: var(--gold); border-color: var(--gold); }
 </style>
 </head>
 <body>
@@ -117,6 +120,10 @@
   <aside id="settings">
     <h2 class="panel-title">Settings</h2>
     <div id="settings-body"></div>
+    <div class="actions">
+      <button id="btn-settle" title="Add rainfall, then let the solver flow it downhill">Rain &amp; settle</button>
+      <button id="btn-drain" title="Remove all liquid and refill to sea level">Drain</button>
+    </div>
   </aside>
 
   <div class="hint">right-drag — orbit · wheel — zoom · middle / shift-drag — pan · left — tool</div>

@@ -28,6 +28,14 @@ pub struct LiquidProps {
 }
 
 impl LiquidType {
+    /// Recover a liquid type from its stored `u8` id (defaults to water).
+    pub fn from_u8(id: u8) -> LiquidType {
+        match id {
+            1 => LiquidType::Lava,
+            _ => LiquidType::Water,
+        }
+    }
+
     /// Default authored properties for the built-in liquids.
     pub fn props(self) -> LiquidProps {
         match self {

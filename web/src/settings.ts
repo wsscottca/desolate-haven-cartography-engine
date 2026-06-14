@@ -15,6 +15,10 @@ export interface RenderSettings {
   ambient: number; // 0..1
 }
 
+export interface LiquidSettings {
+  seaLevel: number; // fill terrain below this elevation with water
+}
+
 export interface PhysicsSettings {
   gravity: number;
   viscosity: number; // water ≈ 1; lava is low
@@ -26,6 +30,7 @@ export interface PhysicsSettings {
 export interface Settings {
   engine: EngineSettings;
   render: RenderSettings;
+  liquids: LiquidSettings;
   physics: PhysicsSettings;
 }
 
@@ -34,6 +39,7 @@ export type Group = keyof Settings;
 export const DEFAULTS: Settings = {
   engine: { seed: 12345, detail: 256, octaves: 6, exaggeration: 120 },
   render: { lightAzimuth: 51, lightElevation: 50, ambient: 0.38 },
+  liquids: { seaLevel: 0.0 },
   physics: { gravity: 9.8, viscosity: 1.0, flowRate: 0.5, evaporation: 0.002, solverIters: 40 },
 };
 
@@ -56,6 +62,7 @@ const SPECS: Spec[] = [
   { group: "render", key: "lightAzimuth", label: "Light azimuth", min: 0, max: 360, step: 1, integer: true },
   { group: "render", key: "lightElevation", label: "Light elevation", min: 0, max: 90, step: 1, integer: true },
   { group: "render", key: "ambient", label: "Ambient", min: 0, max: 1, step: 0.02 },
+  { group: "liquids", key: "seaLevel", label: "Sea level", min: -1, max: 1, step: 0.02 },
   { group: "physics", key: "gravity", label: "Gravity", min: 0, max: 20, step: 0.1 },
   { group: "physics", key: "viscosity", label: "Viscosity", min: 0.05, max: 2, step: 0.05 },
   { group: "physics", key: "flowRate", label: "Flow rate", min: 0, max: 1, step: 0.05 },
@@ -73,8 +80,8 @@ export function buildSettingsPanel(
   onChange: (group: Group, key: string) => void,
 ): void {
   root.replaceChildren();
-  const labels: Record<Group, string> = { engine: "Engine", render: "Lighting", physics: "Physics" };
-  for (const group of ["engine", "render", "physics"] as Group[]) {
+  const labels: Record<Group, string> = { engine: "Engine", render: "Lighting", liquids: "Liquids", physics: "Physics" };
+  for (const group of ["engine", "render", "liquids", "physics"] as Group[]) {
     const header = document.createElement("div");
     header.className = "group-label";
     header.textContent = labels[group];

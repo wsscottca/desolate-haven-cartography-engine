@@ -7,6 +7,7 @@ import { generateHeightfield } from "./placeholder";
 import { WORLD } from "./config";
 import { buildSettingsPanel, DEFAULTS, type Settings } from "./settings";
 import { Engine } from "./engine";
+import { LiquidRenderer } from "./render/liquid";
 
 const canvas = document.getElementById("view") as HTMLCanvasElement;
 const gl = canvas.getContext("webgl2", { antialias: true });
@@ -19,6 +20,7 @@ if (!gl) {
 }
 
 const terrain = new TerrainRenderer(gl);
+const liquid = new LiquidRenderer(gl);
 const settings: Settings = structuredClone(DEFAULTS);
 let engine: Engine | null = null;
 
@@ -46,7 +48,13 @@ function pushSurface(): void {
   setStatus(`engine: dhce-core ${engine.version} · ${s.regionCount.toLocaleString()} cells`);
 }
 
-// Full rebuild: mesh + elevation (seed / detail / octaves), then tessellate.
+function pushLiquid(): void {
+  if (!engine) return;
+  const l = engine.liquidSurface(settings.engine.exaggeration);
+  liquid.setMesh(l.positions, l.normals, l.types, l.indices);
+}
+
+// Full rebuild: mesh + elevation (seed / detail / octaves), re-apply sea level.
 function regenerate(): void {
   if (engine) {
     engine.build(
@@ -56,7 +64,9 @@ function regenerate(): void {
       settings.engine.seed,
       settings.engine.octaves,
     );
+    engine.setSeaLevel(settings.liquids.seaLevel);
     pushSurface();
+    pushLiquid();
   } else {
     const n = settings.engine.detail;
     const heights = generateHeightfield(n, settings.engine.seed, settings.engine.octaves);
@@ -65,17 +75,20 @@ function regenerate(): void {
   requestDraw();
 }
 
-// Vertical scale only — re-tessellate without rebuilding the mesh (cheap).
+// Vertical scale only — re-tessellate both surfaces without rebuilding the mesh.
 function retessellate(): void {
   if (engine) {
     pushSurface();
+    pushLiquid();
     requestDraw();
   } else {
     regenerate();
   }
 }
 function applyLighting(): void {
-  terrain.setLighting(settings.render.lightAzimuth, settings.render.lightElevation, settings.render.ambient);
+  const { lightAzimuth, lightElevation, ambient } = settings.render;
+  terrain.setLighting(lightAzimuth, lightElevation, ambient);
+  liquid.setLighting(lightAzimuth, lightElevation, ambient);
   requestDraw();
 }
 
@@ -87,10 +100,35 @@ if (settingsRoot) {
       else regenerate();
     } else if (group === "render") {
       applyLighting();
+    } else if (group === "liquids" && engine) {
+      engine.setSeaLevel(settings.liquids.seaLevel);
+      pushLiquid();
+      requestDraw();
     }
-    // physics: stored on settings.physics for the liquid sim (Phase 3+)
+    // physics: stored on settings.physics; used by the settle animation
   });
 }
+
+// Liquid settle: rain, then relax the solver over several frames so the user can
+// watch water flow downhill and pool. Driven by the Physics sliders.
+let settleFrames = 0;
+const physicsFlowRate = (): number => {
+  const p = settings.physics;
+  return Math.max(0.01, Math.min(0.5, p.flowRate * p.viscosity * (p.gravity / 9.8) * 0.5));
+};
+document.getElementById("btn-settle")?.addEventListener("click", () => {
+  if (!engine) return;
+  engine.rain(0.05);
+  settleFrames = settings.physics.solverIters;
+});
+document.getElementById("btn-drain")?.addEventListener("click", () => {
+  if (!engine) return;
+  engine.clearLiquid();
+  engine.setSeaLevel(settings.liquids.seaLevel);
+  settleFrames = 0;
+  pushLiquid();
+  requestDraw();
+});
 
 applyLighting();
 regenerate(); // immediate render on the TS placeholder
@@ -120,13 +158,22 @@ function resize(): void {
 
 function frame(): void {
   resize();
+  // Advance the liquid settle animation (one relaxation step per frame).
+  if (engine && settleFrames > 0) {
+    engine.stepFluid(physicsFlowRate(), settings.physics.evaporation, 1);
+    pushLiquid();
+    settleFrames--;
+    needsDraw = true;
+  }
   if (needsDraw) {
     needsDraw = false;
     gl!.viewport(0, 0, canvas.width, canvas.height);
     gl!.clearColor(0.078, 0.067, 0.055, 1); // --bg
     gl!.clear(gl!.COLOR_BUFFER_BIT | gl!.DEPTH_BUFFER_BIT);
     const aspect = canvas.width / Math.max(1, canvas.height);
-    terrain.draw(camera.viewProj(aspect));
+    const vp = camera.viewProj(aspect);
+    terrain.draw(vp);
+    liquid.draw(vp);
   }
   requestAnimationFrame(frame);
 }
