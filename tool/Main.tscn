@@ -4,9 +4,8 @@
 
 [node name="CartographerSpike" type="Node3D" unique_id=1143501762]
 script = ExtResource("1_glv2v")
-Width = 20000.0
-Height = 20000.0
-Spacing = 12.0
+WorldSizeKm = 20.0
+SpacingM = 12.0
 Octaves = 8
 TerrainHeightKm = 1.5
 metadata/_custom_type_script = "uid://cciqift31mdg4"

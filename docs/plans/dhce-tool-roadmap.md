@@ -19,6 +19,17 @@ hand (place characters, tweak). Design:
 - [ADR 0003](../adr/0003-edit-streaming-and-godot-export.md) — render-streaming + Godot-native export + biome scatter + **hybrid volumetric**.
 - Core API: [docs/specs/dhce-core-contract.md](../specs/dhce-core-contract.md).
 
+## Units & scale
+**1 Godot unit = 1 m** (also Godot's own convention — physics/lighting/audio are metre-tuned). The
+core's `build(width, height, spacing, …)` takes **metres**. Author-facing exports are km where the
+scale warrants it (`WorldSizeKm`, `TerrainHeightKm`) and m for fine-scale tools (`SpacingM`,
+`BrushRadiusM`); C# converts km→m (`×1000`) before any core call. Cost scales with **area**
+(regions ∝ W·H / spacing²), so doubling `WorldSizeKm` is ~4× the regions/gen time.
+**Precision ceiling:** Godot transforms are 32-bit float; at 20 km from origin the ULP is ~2 mm
+(fine for terrain). Past ~40–80 km, or for precise gameplay far from origin, you'd need a
+double-precision ("Large World Coordinates") engine build — a custom Godot compile, so defer until
+a world actually needs it.
+
 ## Repo layout
 - `crates/dhce-core` — shared Rust: gen + sim + **authoring (`world.rs` = the source of truth)** +
   chunking. Pure, deterministic, no engine deps.

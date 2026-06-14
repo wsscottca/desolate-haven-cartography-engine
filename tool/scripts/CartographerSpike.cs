@@ -16,21 +16,27 @@ namespace DesolateHaven.Cartography;
 ///      meshed; far ones are freed. The core's `chunk_grid` maps the camera to tiles with no
 ///      per-region work.
 ///
+/// Units: **1 Godot unit = 1 m**, which is also Godot's own convention (physics/lighting/audio
+/// are metre-tuned). Author-facing sizes are in km where the scale warrants it (world, relief)
+/// and m for fine-scale tools (spacing, brush); all are converted to metres before crossing
+/// into the Rust core, whose `build(width, height, …)` takes metres.
+///
 /// All compute is in Rust (the `dhce-godot` GDExtension); C# only uploads buffers and runs the
 /// camera. The engine is a GDExtension class, so it is driven via `Call(...)`.
 [GlobalClass]
 public partial class CartographerSpike : Node3D
 {
-    [Export] public float Width = 20000f;      // 20 km world
-    [Export] public float Height = 20000f;
-    [Export] public float Spacing = 12f;       // ~2.8M regions at 20 km (smaller ⇒ denser)
+    /// World size in km (square map): 20 ⇒ a 20 km × 20 km world. Cost scales with AREA —
+    /// doubling this is ~4× the regions (and ~4× the gen time).
+    [Export] public float WorldSizeKm = 20f;
+    [Export] public float SpacingM = 12f;      // metres between regions; smaller ⇒ denser (~1.7M @ 20 km)
     [Export] public int Seed = 12345;
     [Export] public int Octaves = 6;
     /// Vertical relief in km. The core clamps normalized elevation to ~[-1.5, 1.5] (span
-    /// `ElevSpan`) and 1 world unit = 1 m, so the on-screen exaggeration is
-    /// `TerrainHeightKm * 1000 / ElevSpan` (0.9 km ⇒ 300, the N0 baseline look).
+    /// `ElevSpan`), so the on-screen exaggeration is `TerrainHeightKm * 1000 / ElevSpan`
+    /// (0.9 km ⇒ 300, the N0 baseline look).
     [Export] public float TerrainHeightKm = 1.2f;
-    [Export] public float BrushRadius = 350f;
+    [Export] public float BrushRadiusM = 350f; // brush footprint radius, metres
     [Export] public float BrushStrength = 0.06f;
 
     /// Tiles (Chebyshev) around the camera focus kept meshed; chunks beyond this are freed.
@@ -55,8 +61,9 @@ public partial class CartographerSpike : Node3D
     private bool[] _built;
     private StandardMaterial3D _mat;
     private int _cols, _rows;
-    private float _sx, _sy;          // tile size in world units (X, Z)
+    private float _sx, _sy;          // tile size in metres (X, Z)
     private float _exaggeration;
+    private float _widthM, _heightM; // world size in metres = WorldSizeKm * 1000 (1 unit = 1 m)
     private bool _pendingGen;        // gen armed in _Ready, fired from _Process after warmup
     private int _warmupFrames;
     private bool _genDone;
@@ -80,6 +87,7 @@ public partial class CartographerSpike : Node3D
 
         GetWindow().Set("mode", 2); // maximize the window (2 = Window.MODE_MAXIMIZED)
         _exaggeration = TerrainHeightKm * 1000f / ElevSpan;
+        _widthM = _heightM = WorldSizeKm * 1000f; // km → metres (1 Godot unit = 1 m)
 
         // Scene dressing + camera are mesh-independent, so set them up first — the window is
         // live the instant `_Ready` returns, showing the splash while gen is pending.
@@ -107,7 +115,7 @@ public partial class CartographerSpike : Node3D
 
         // Camera focus → grid cell. FocusPoint is where the view ray meets the ground; moving
         // the camera (orbit/pan/freelook) streams the world along.
-        Vector3 focus = _cam?.FocusPoint ?? new Vector3(Width * 0.5f, 0f, Height * 0.5f);
+        Vector3 focus = _cam?.FocusPoint ?? new Vector3(_widthM * 0.5f, 0f, _heightM * 0.5f);
         int camGx = Mathf.Clamp((int)(focus.X / _sx), 0, Mathf.Max(_cols - 1, 0));
         int camGy = Mathf.Clamp((int)(focus.Z / _sy), 0, Mathf.Max(_rows - 1, 0));
 
@@ -143,7 +151,7 @@ public partial class CartographerSpike : Node3D
     private void GenerateWorld()
     {
         var sw = Stopwatch.StartNew();
-        _engine.Call("build", Width, Height, Spacing, (float)Seed, Octaves);
+        _engine.Call("build", _widthM, _heightM, SpacingM, (float)Seed, Octaves);
         sw.Stop();
         _genMs = sw.Elapsed.TotalMilliseconds;
         OnGenDone();
@@ -154,8 +162,8 @@ public partial class CartographerSpike : Node3D
         Vector2I grid = _engine.Call("chunk_grid").As<Vector2I>();
         _cols = grid.X;
         _rows = grid.Y;
-        _sx = _cols > 0 ? Width / _cols : Width;
-        _sy = _rows > 0 ? Height / _rows : Height;
+        _sx = _cols > 0 ? _widthM / _cols : _widthM;
+        _sy = _rows > 0 ? _heightM / _rows : _heightM;
 
         int n = _engine.Call("chunk_count").As<int>();
         GD.Print($"[DHCE] regions={_engine.Call("region_count")} triangles={_engine.Call("triangle_count")} chunks={n} grid={_cols}x{_rows}");
@@ -204,7 +212,7 @@ public partial class CartographerSpike : Node3D
 
         _cam = new OrbitCamera();
         AddChild(_cam);
-        _cam.FrameOverhead(new Vector3(Width * 0.5f, 0f, Height * 0.5f), Mathf.Max(Width, Height) * 0.9f);
+        _cam.FrameOverhead(new Vector3(_widthM * 0.5f, 0f, _heightM * 0.5f), Mathf.Max(_widthM, _heightM) * 0.9f);
         _cam.Current = true;
     }
 
@@ -289,7 +297,7 @@ public partial class CartographerSpike : Node3D
         Vector3 hit = from + dir * t;         // core (x, y) = (hit.X, hit.Z)
 
         ulong t0 = Time.GetTicksUsec();
-        _engine.Call("paint_terrain", (double)hit.X, (double)hit.Z, (double)BrushRadius, (double)BrushStrength, 0);
+        _engine.Call("paint_terrain", (double)hit.X, (double)hit.Z, (double)BrushRadiusM, (double)BrushStrength, 0);
         int[] dirty = _engine.Call("take_dirty_chunks").As<int[]>();
         foreach (int ci in dirty)
         {
