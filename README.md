@@ -32,12 +32,25 @@ the Rust/WASM engine takes over from Phase 1 onward.
 
 ## Build & run (web)
 
+Bash / Git Bash:
 ```sh
 cd web
-sh build.sh          # license gate → (wasm if available) → esbuild bundle
+sh build.sh
 python -m http.server 8000
-# open http://localhost:8000/index.html  — orbit with drag, zoom with wheel, pan with shift-drag
 ```
+
+PowerShell (Windows — note: `&&` is not valid in PS 5.1, run each line separately):
+```powershell
+cd web
+.\build.ps1                # or: powershell -ExecutionPolicy Bypass -File .\build.ps1
+python -m http.server 8000
+```
+
+Then open http://localhost:8000/ — orbit (drag), zoom (wheel), pan (shift-drag),
+and retune the world from the Settings panel on the right.
+
+The build is a license gate → (Rust→WASM engine if `wasm-pack` is present) → esbuild
+bundle. Without `wasm-pack` it builds the shell on the TS placeholder engine.
 
 ## Test (core, needs Rust)
 
