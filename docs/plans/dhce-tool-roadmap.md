@@ -120,9 +120,12 @@ Verify: window opens immediately on a 20 km world; tiles stream around the camer
 the per-dab timing line still prints.
 
 ## Then
-- **N3** — sculpt/course/flood/biome tools, brush size + intensity UI, per-biome editor + **biome-driven
-  terrain shaping** (apply per-biome `Landform` profiles so jagged/rolling/volcanic differ) + scatter
-  model selection.
+- **N3** — sculpt/course/flood/biome tools, brush size + intensity UI, **world + physics panels**,
+  per-biome editor + **biome-driven terrain shaping** (per-biome `Landform` profiles so
+  jagged/rolling/volcanic differ) with **natural biome transitions** + scatter-rule authoring.
+  Designed in [docs/specs/n3-tooling-design.md](../specs/n3-tooling-design.md) — four ordered
+  slices: **N3a** tool shell + world/physics + liquid render (C#), **N3b** layered-elevation Apply
+  shaping + diffusion blending (Rust+DLL), **N3c** per-biome editor (C#), **N3d** scatter rules (C#).
 - **N4** — export pipeline → editable Godot `.tscn` (terrain `ArrayMesh`+collision, `MultiMesh` scatter,
   bake-to-instances) + authoring-project save/load.
 - **N5** — authored **volumetric** caves / overhangs / tunnels carved into the heightfield (hybrid;
