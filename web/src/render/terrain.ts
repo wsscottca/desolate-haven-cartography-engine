@@ -1,52 +1,35 @@
-// 3D terrain-surface renderer. Draws an indexed mesh (position + normal + height)
-// with procedural altitude shading and engine-level lighting. Our own WebGL2 +
-// shaders, no deps. The mesh comes from the WASM engine (a TIN over the dual mesh);
-// the placeholder grid path is kept as a fallback.
+// 3D terrain-surface renderer. Draws an indexed mesh (position + normal + per-vertex
+// color) with engine-level lighting. Color is the region's biome color (from the WASM
+// engine); the placeholder grid path computes an altitude ramp in JS. Our own WebGL2.
 import type { Mat4 } from "../math/mat4";
 
 const VERT = `#version 300 es
 precision highp float;
 layout(location=0) in vec3 a_pos;
 layout(location=1) in vec3 a_normal;
-layout(location=2) in float a_h;
+layout(location=2) in vec3 a_color;
 uniform mat4 u_viewProj;
 out vec3 v_normal;
-out float v_h;
+out vec3 v_color;
 void main() {
   v_normal = a_normal;
-  v_h = a_h;
+  v_color = a_color;
   gl_Position = u_viewProj * vec4(a_pos, 1.0);
 }`;
 
 const FRAG = `#version 300 es
 precision highp float;
 in vec3 v_normal;
-in float v_h;
+in vec3 v_color;
 out vec4 fragColor;
 
 uniform vec3 u_lightDir;  // sun direction (engine-level lighting)
 uniform float u_ambient;  // ambient floor 0..1
 
-// Procedural altitude colormap (our palette), h in roughly [-1, 1].
-// Colors are hardcoded for now; biomes own the palette from Phase 5.
-vec3 ramp(float h) {
-  vec3 deep    = vec3(0.06, 0.10, 0.20);
-  vec3 shallow = vec3(0.12, 0.28, 0.34);
-  vec3 sand    = vec3(0.52, 0.50, 0.34);
-  vec3 grass   = vec3(0.27, 0.36, 0.21);
-  vec3 rock    = vec3(0.40, 0.38, 0.34);
-  vec3 snow    = vec3(0.88, 0.90, 0.92);
-  if (h < -0.04) return mix(deep, shallow, clamp((h + 0.5) / 0.46, 0.0, 1.0));
-  if (h <  0.02) return sand;
-  if (h <  0.28) return mix(grass, rock, clamp((h - 0.02) / 0.26, 0.0, 1.0));
-  if (h <  0.62) return mix(rock, snow, clamp((h - 0.28) / 0.34, 0.0, 1.0));
-  return snow;
-}
-
 void main() {
   vec3 n = normalize(v_normal);
   float diff = clamp(dot(n, normalize(u_lightDir)), 0.0, 1.0);
-  vec3 col = ramp(v_h) * (u_ambient + (1.0 - u_ambient) * diff);
+  vec3 col = v_color * (u_ambient + (1.0 - u_ambient) * diff);
   fragColor = vec4(col, 1.0);
 }`;
 
@@ -58,7 +41,6 @@ export class TerrainRenderer {
   private uAmbient: WebGLUniformLocation | null;
   private vao: WebGLVertexArrayObject | null = null;
   private indexCount = 0;
-  // Engine-level lighting; defaults match the original hardcoded look.
   private light = { dir: [0.404, 0.5, 0.766] as [number, number, number], ambient: 0.38 };
 
   constructor(gl: WebGL2RenderingContext) {
@@ -69,7 +51,6 @@ export class TerrainRenderer {
     this.uAmbient = gl.getUniformLocation(this.prog, "u_ambient");
   }
 
-  /** Engine-level lighting from azimuth/elevation degrees + ambient (0..1). */
   setLighting(azimuthDeg: number, elevationDeg: number, ambient: number): void {
     const az = (azimuthDeg * Math.PI) / 180;
     const el = (elevationDeg * Math.PI) / 180;
@@ -77,9 +58,9 @@ export class TerrainRenderer {
     this.light.ambient = ambient;
   }
 
-  /** Upload an engine surface (positions/normals scaled, heights normalized). */
-  setMesh(positions: Float32Array, normals: Float32Array, heights: Float32Array, indices: Uint32Array): void {
-    this.uploadMesh(positions, normals, heights, indices);
+  /** Upload an engine surface (positions/normals scaled, per-vertex RGB color). */
+  setMesh(positions: Float32Array, normals: Float32Array, colors: Float32Array, indices: Uint32Array): void {
+    this.uploadMesh(positions, normals, colors, indices);
   }
 
   /** Build + upload a regular-grid surface from an `n`×`n` height field (fallback). */
@@ -87,7 +68,7 @@ export class TerrainRenderer {
     const cell = worldSize / (n - 1);
     const positions = new Float32Array(n * n * 3);
     const normals = new Float32Array(n * n * 3);
-    const heights = new Float32Array(n * n);
+    const colors = new Float32Array(n * n * 3);
     const at = (i: number, j: number) => field[clampi(j, 0, n - 1) * n + clampi(i, 0, n - 1)];
 
     for (let j = 0; j < n; j++) {
@@ -108,7 +89,10 @@ export class TerrainRenderer {
         normals[o * 3] = nx * inv;
         normals[o * 3 + 1] = ny * inv;
         normals[o * 3 + 2] = nz * inv;
-        heights[o] = h;
+        const c = rampColor(h);
+        colors[o * 3] = c[0];
+        colors[o * 3 + 1] = c[1];
+        colors[o * 3 + 2] = c[2];
       }
     }
 
@@ -124,7 +108,7 @@ export class TerrainRenderer {
         idx[p++] = b; idx[p++] = c; idx[p++] = d;
       }
     }
-    this.uploadMesh(positions, normals, heights, idx);
+    this.uploadMesh(positions, normals, colors, idx);
   }
 
   draw(viewProj: Mat4): void {
@@ -142,13 +126,12 @@ export class TerrainRenderer {
   private uploadMesh(
     positions: Float32Array,
     normals: Float32Array,
-    heights: Float32Array,
+    colors: Float32Array,
     indices: Uint32Array,
   ): void {
     const gl = this.gl;
     this.vao = gl.createVertexArray();
     gl.bindVertexArray(this.vao);
-
     const attrib = (data: Float32Array, loc: number, size: number) => {
       const buf = gl.createBuffer();
       gl.bindBuffer(gl.ARRAY_BUFFER, buf);
@@ -158,18 +141,37 @@ export class TerrainRenderer {
     };
     attrib(positions, 0, 3);
     attrib(normals, 1, 3);
-    attrib(heights, 2, 1);
-
+    attrib(colors, 2, 3);
     const ibo = gl.createBuffer();
     gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ibo);
     gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, indices, gl.STATIC_DRAW);
-
     gl.bindVertexArray(null);
     this.indexCount = indices.length;
   }
 }
 
 const clampi = (v: number, lo: number, hi: number) => (v < lo ? lo : v > hi ? hi : v);
+
+// Altitude colormap for the placeholder fallback (h ~ [-1, 1]).
+function rampColor(h: number): [number, number, number] {
+  const cl = (x: number) => Math.max(0, Math.min(1, x));
+  const mix = (a: number[], b: number[], t: number): [number, number, number] => [
+    a[0] + (b[0] - a[0]) * t,
+    a[1] + (b[1] - a[1]) * t,
+    a[2] + (b[2] - a[2]) * t,
+  ];
+  const deep = [0.06, 0.1, 0.2];
+  const shallow = [0.12, 0.28, 0.34];
+  const sand = [0.52, 0.5, 0.34];
+  const grass = [0.27, 0.36, 0.21];
+  const rock = [0.4, 0.38, 0.34];
+  const snow = [0.88, 0.9, 0.92];
+  if (h < -0.04) return mix(deep, shallow, cl((h + 0.5) / 0.46));
+  if (h < 0.02) return [sand[0], sand[1], sand[2]];
+  if (h < 0.28) return mix(grass, rock, cl((h - 0.02) / 0.26));
+  if (h < 0.62) return mix(rock, snow, cl((h - 0.28) / 0.34));
+  return [snow[0], snow[1], snow[2]];
+}
 
 function link(gl: WebGL2RenderingContext, vsSrc: string, fsSrc: string): WebGLProgram {
   const p = gl.createProgram();

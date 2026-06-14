@@ -13,8 +13,10 @@ pub struct Surface {
     pub positions: Vec<f32>,
     /// 3 floats per vertex: smooth surface normal.
     pub normals: Vec<f32>,
-    /// 1 float per vertex: normalized elevation `[-1, 1]` (for coloring).
+    /// 1 float per vertex: normalized elevation `[-1, 1]`.
     pub heights: Vec<f32>,
+    /// 3 floats per vertex: biome base color (RGB).
+    pub colors: Vec<f32>,
     /// 3 indices per triangle (region indices).
     pub indices: Vec<u32>,
 }
@@ -22,16 +24,25 @@ pub struct Surface {
 /// Build the surface from the dual mesh + per-region elevation at a vertical
 /// `exaggeration`. Cheap relative to the mesh build — recompute on exaggeration
 /// change without rebuilding the triangulation.
-pub fn build_surface(mesh: &Mesh, elevation_r: &[f64], exaggeration: f64) -> Surface {
+pub fn build_surface(
+    mesh: &Mesh,
+    elevation_r: &[f64],
+    exaggeration: f64,
+    region_color: &[f32],
+) -> Surface {
     let nr = mesh.num_regions();
     let mut positions = vec![0.0f32; nr * 3];
     let mut heights = vec![0.0f32; nr];
+    let mut colors = vec![0.0f32; nr * 3];
     for r in 0..nr {
         let p = mesh.pos_of_r(r);
         positions[3 * r] = p[0] as f32;
         positions[3 * r + 1] = p[1] as f32;
         positions[3 * r + 2] = (elevation_r[r] * exaggeration) as f32;
         heights[r] = elevation_r[r] as f32;
+        colors[3 * r] = region_color[3 * r];
+        colors[3 * r + 1] = region_color[3 * r + 1];
+        colors[3 * r + 2] = region_color[3 * r + 2];
     }
 
     let nt = mesh.num_triangles();
@@ -87,6 +98,7 @@ pub fn build_surface(mesh: &Mesh, elevation_r: &[f64], exaggeration: f64) -> Sur
         positions,
         normals,
         heights,
+        colors,
         indices,
     }
 }

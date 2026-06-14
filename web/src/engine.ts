@@ -5,7 +5,7 @@
 export interface SurfaceMesh {
   positions: Float32Array;
   normals: Float32Array;
-  heights: Float32Array;
+  colors: Float32Array;
   indices: Uint32Array;
   regionCount: number;
   triangleCount: number;
@@ -29,7 +29,7 @@ interface WasmEngineHandle {
   tessellate(exaggeration: number): void;
   positions(): Float32Array;
   normals(): Float32Array;
-  heights(): Float32Array;
+  colors(): Float32Array;
   indices(): Uint32Array;
   region_count(): number;
   triangle_count(): number;
@@ -46,6 +46,17 @@ interface WasmEngineHandle {
   // brush tools
   paint_terrain(cx: number, cy: number, radius: number, strength: number, mode: number): void;
   paint_liquid(cx: number, cy: number, radius: number, amount: number, kind: number): void;
+  // biomes + save/load
+  paint_biome(cx: number, cy: number, radius: number, biomeId: number): void;
+  set_biome_color(id: number, r: number, g: number, b: number): void;
+  biome_color_of(id: number): Float32Array;
+  elevation_export(): Float32Array;
+  biome_export(): Uint8Array;
+  liquid_depth_export(): Float32Array;
+  liquid_kind_export(): Uint8Array;
+  set_elevation(e: Float32Array): void;
+  set_biome(b: Uint8Array): void;
+  set_liquid(depth: Float32Array, kind: Uint8Array): void;
 }
 
 export class Engine {
@@ -82,7 +93,7 @@ export class Engine {
     return {
       positions: this.handle.positions(),
       normals: this.handle.normals(),
-      heights: this.handle.heights(),
+      colors: this.handle.colors(),
       indices: this.handle.indices(),
       regionCount: this.handle.region_count(),
       triangleCount: this.handle.triangle_count(),
@@ -125,5 +136,40 @@ export class Engine {
   /** Place liquid `kind` (0 water, 1 lava) under the brush. */
   paintLiquid(cx: number, cy: number, radius: number, amount: number, kind: number): void {
     this.handle.paint_liquid(cx, cy, radius, amount, kind);
+  }
+
+  // --- biomes ---
+  paintBiome(cx: number, cy: number, radius: number, biomeId: number): void {
+    this.handle.paint_biome(cx, cy, radius, biomeId);
+  }
+  setBiomeColor(id: number, r: number, g: number, b: number): void {
+    this.handle.set_biome_color(id, r, g, b);
+  }
+  biomeColor(id: number): [number, number, number] {
+    const c = this.handle.biome_color_of(id);
+    return [c[0], c[1], c[2]];
+  }
+
+  // --- save / load (authored-state arrays) ---
+  exportElevation(): Float32Array {
+    return this.handle.elevation_export();
+  }
+  exportBiome(): Uint8Array {
+    return this.handle.biome_export();
+  }
+  exportLiquidDepth(): Float32Array {
+    return this.handle.liquid_depth_export();
+  }
+  exportLiquidKind(): Uint8Array {
+    return this.handle.liquid_kind_export();
+  }
+  importElevation(e: Float32Array): void {
+    this.handle.set_elevation(e);
+  }
+  importBiome(b: Uint8Array): void {
+    this.handle.set_biome(b);
+  }
+  importLiquid(depth: Float32Array, kind: Uint8Array): void {
+    this.handle.set_liquid(depth, kind);
   }
 }

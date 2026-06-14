@@ -7,7 +7,7 @@
 
 use dhce_core::fluid::{self, LiquidField, LiquidSurface};
 use dhce_core::mesh::Mesh;
-use dhce_core::{elevation, geometry};
+use dhce_core::{biomes, elevation, geometry};
 use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen(start)]
@@ -32,6 +32,8 @@ pub struct WasmEngine {
     neighbors: Vec<Vec<u32>>,
     field: LiquidField,
     sea_level: f64,
+    biome_r: Vec<u8>,
+    biome_color: Vec<[f32; 3]>,
     surface: Option<geometry::Surface>,
     liquid: Option<LiquidSurface>,
 }
@@ -46,6 +48,11 @@ impl Default for WasmEngine {
 impl WasmEngine {
     #[wasm_bindgen(constructor)]
     pub fn new() -> WasmEngine {
+        let roster = biomes::roster();
+        let mut biome_color = vec![[0.5f32, 0.5, 0.5]; biomes::BIOME_COUNT + 1];
+        for (i, b) in roster.iter().enumerate() {
+            biome_color[i + 1] = b.color;
+        }
         WasmEngine {
             width: 0.0,
             height: 0.0,
@@ -54,6 +61,8 @@ impl WasmEngine {
             neighbors: Vec::new(),
             field: LiquidField::new(0),
             sea_level: 0.0,
+            biome_r: Vec::new(),
+            biome_color,
             surface: None,
             liquid: None,
         }
@@ -69,6 +78,20 @@ impl WasmEngine {
         self.neighbors = mesh.region_neighbors();
         self.field = LiquidField::new(nr);
         fluid::sea_fill(&mut self.field, &self.elevation_r, self.sea_level);
+
+        // Auto-classify biomes from elevation + moisture + distance-from-center.
+        let cx = width * 0.5;
+        let cy = height * 0.5;
+        let max_d = 0.5 * (width * width + height * height).sqrt();
+        let mut biome_r = vec![0u8; nr];
+        for r in 0..nr {
+            let p = mesh.pos_of_r(r);
+            let dist = ((p[0] - cx).powi(2) + (p[1] - cy).powi(2)).sqrt() / max_d;
+            let moist = biomes::moisture_at(p[0], p[1], width, height, seed as u64);
+            biome_r[r] = biomes::classify(self.elevation_r[r], moist, dist);
+        }
+        self.biome_r = biome_r;
+
         self.width = width;
         self.height = height;
         self.mesh = Some(mesh);
@@ -78,8 +101,9 @@ impl WasmEngine {
 
     /// Pack the terrain render surface at a vertical `exaggeration`.
     pub fn tessellate(&mut self, exaggeration: f64) {
+        let colors = self.region_color();
         if let Some(mesh) = &self.mesh {
-            self.surface = Some(geometry::build_surface(mesh, &self.elevation_r, exaggeration));
+            self.surface = Some(geometry::build_surface(mesh, &self.elevation_r, exaggeration, &colors));
         }
     }
 
@@ -92,6 +116,9 @@ impl WasmEngine {
     }
     pub fn heights(&self) -> Vec<f32> {
         self.surface.as_ref().map(|s| s.heights.clone()).unwrap_or_default()
+    }
+    pub fn colors(&self) -> Vec<f32> {
+        self.surface.as_ref().map(|s| s.colors.clone()).unwrap_or_default()
     }
     pub fn indices(&self) -> Vec<u32> {
         self.surface.as_ref().map(|s| s.indices.clone()).unwrap_or_default()
@@ -215,5 +242,86 @@ impl WasmEngine {
     }
     pub fn liquid_indices(&self) -> Vec<u32> {
         self.liquid.as_ref().map(|s| s.indices.clone()).unwrap_or_default()
+    }
+
+    // --- biomes (Phase 5) ---
+    /// Assign `biome_id` (1..=14) to every region under `(cx, cy)` within `radius`.
+    pub fn paint_biome(&mut self, cx: f64, cy: f64, radius: f64, biome_id: u32) {
+        let mesh = match &self.mesh {
+            Some(m) => m,
+            None => return,
+        };
+        let r2 = radius * radius;
+        for ri in 0..mesh.num_regions() {
+            let p = mesh.pos_of_r(ri);
+            if (p[0] - cx).powi(2) + (p[1] - cy).powi(2) < r2 {
+                self.biome_r[ri] = biome_id as u8;
+            }
+        }
+    }
+
+    /// Set the display color of biome `id` (1..=14).
+    pub fn set_biome_color(&mut self, id: u32, r: f32, g: f32, b: f32) {
+        if let Some(c) = self.biome_color.get_mut(id as usize) {
+            *c = [r, g, b];
+        }
+    }
+
+    /// Current display color of biome `id` as `[r, g, b]`.
+    pub fn biome_color_of(&self, id: u32) -> Vec<f32> {
+        self.biome_color
+            .get(id as usize)
+            .map(|c| c.to_vec())
+            .unwrap_or_else(|| vec![0.5, 0.5, 0.5])
+    }
+
+    // --- save / load (authored state) ---
+    pub fn elevation_export(&self) -> Vec<f32> {
+        self.elevation_r.iter().map(|&e| e as f32).collect()
+    }
+    pub fn biome_export(&self) -> Vec<u8> {
+        self.biome_r.clone()
+    }
+    pub fn liquid_depth_export(&self) -> Vec<f32> {
+        self.field.depth.iter().map(|&d| d as f32).collect()
+    }
+    pub fn liquid_kind_export(&self) -> Vec<u8> {
+        self.field.kind.clone()
+    }
+    pub fn set_elevation(&mut self, e: &[f32]) {
+        if e.len() == self.elevation_r.len() {
+            for (i, &v) in e.iter().enumerate() {
+                self.elevation_r[i] = v as f64;
+            }
+        }
+    }
+    pub fn set_biome(&mut self, b: &[u8]) {
+        if b.len() == self.biome_r.len() {
+            self.biome_r.copy_from_slice(b);
+        }
+    }
+    pub fn set_liquid(&mut self, depth: &[f32], kind: &[u8]) {
+        if depth.len() == self.field.depth.len() && kind.len() == self.field.kind.len() {
+            for (i, &d) in depth.iter().enumerate() {
+                self.field.depth[i] = d as f64;
+            }
+            self.field.kind.copy_from_slice(kind);
+        }
+    }
+}
+
+impl WasmEngine {
+    /// Per-region RGB color (3 floats per region) from each region's biome.
+    fn region_color(&self) -> Vec<f32> {
+        let nr = self.elevation_r.len();
+        let mut c = vec![0.0f32; nr * 3];
+        for r in 0..nr {
+            let id = self.biome_r.get(r).copied().unwrap_or(0) as usize;
+            let col = self.biome_color.get(id).copied().unwrap_or([0.5, 0.5, 0.5]);
+            c[3 * r] = col[0];
+            c[3 * r + 1] = col[1];
+            c[3 * r + 2] = col[2];
+        }
+        c
     }
 }

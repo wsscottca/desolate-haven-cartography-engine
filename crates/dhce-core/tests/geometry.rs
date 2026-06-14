@@ -19,12 +19,14 @@ fn elevation_is_bounded_and_deterministic() {
 fn surface_counts_and_normals_are_consistent() {
     let mesh = Mesh::new(1000.0, 1000.0, 40.0, 7);
     let elev = elevation::assign_region_elevation(&mesh, 1000.0, 1000.0, 7, 6);
-    let s = geometry::build_surface(&mesh, &elev, 120.0);
+    let region_color = vec![0.5f32; mesh.num_regions() * 3];
+    let s = geometry::build_surface(&mesh, &elev, 120.0, &region_color);
 
     let nr = mesh.num_regions();
     assert_eq!(s.positions.len(), nr * 3);
     assert_eq!(s.normals.len(), nr * 3);
     assert_eq!(s.heights.len(), nr);
+    assert_eq!(s.colors.len(), nr * 3);
     assert_eq!(s.indices.len(), mesh.num_triangles() * 3);
 
     assert!(s.positions.iter().all(|v| v.is_finite()), "non-finite position");

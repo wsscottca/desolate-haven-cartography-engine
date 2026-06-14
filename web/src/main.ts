@@ -5,7 +5,7 @@ import { OrbitCamera } from "./camera";
 import { TerrainRenderer } from "./render/terrain";
 import { generateHeightfield } from "./placeholder";
 import { WORLD } from "./config";
-import { buildSettingsPanel, DEFAULTS, type Settings } from "./settings";
+import { buildSettingsPanel, DEFAULTS, type Settings, type Group } from "./settings";
 import { Engine } from "./engine";
 import { LiquidRenderer } from "./render/liquid";
 import { invert, transformPoint } from "./math/mat4";
@@ -47,7 +47,7 @@ const detailToSpacing = (detail: number): number => WORLD.size / detail;
 function pushSurface(): void {
   if (!engine) return;
   const s = engine.surface(settings.engine.exaggeration);
-  terrain.setMesh(s.positions, s.normals, s.heights, s.indices);
+  terrain.setMesh(s.positions, s.normals, s.colors, s.indices);
   setStatus(`engine: dhce-core ${engine.version} · ${s.regionCount.toLocaleString()} cells`);
 }
 
@@ -96,21 +96,20 @@ function applyLighting(): void {
 }
 
 const settingsRoot = document.getElementById("settings-body");
-if (settingsRoot) {
-  buildSettingsPanel(settingsRoot, settings, (group, key) => {
-    if (group === "engine") {
-      if (key === "exaggeration") retessellate();
-      else regenerate();
-    } else if (group === "render") {
-      applyLighting();
-    } else if (group === "liquids" && engine) {
-      engine.setSeaLevel(settings.liquids.seaLevel);
-      pushLiquid();
-      requestDraw();
-    }
-    // physics: stored on settings.physics; used by the settle animation
-  });
+function onSettingChange(group: Group, key: string): void {
+  if (group === "engine") {
+    if (key === "exaggeration") retessellate();
+    else regenerate();
+  } else if (group === "render") {
+    applyLighting();
+  } else if (group === "liquids" && engine) {
+    engine.setSeaLevel(settings.liquids.seaLevel);
+    pushLiquid();
+    requestDraw();
+  }
+  // tools/physics: read on demand (brush, settle)
 }
+if (settingsRoot) buildSettingsPanel(settingsRoot, settings, onSettingChange);
 
 // Liquid settle: rain, then relax the solver over several frames so the user can
 // watch water flow downhill and pool. Driven by the Physics sliders.
@@ -133,6 +132,65 @@ document.getElementById("btn-drain")?.addEventListener("click", () => {
   requestDraw();
 });
 
+// Save / load the authored state as JSON.
+document.getElementById("btn-save")?.addEventListener("click", () => {
+  if (!engine) return;
+  const biomeColors: number[] = [];
+  for (let id = 1; id <= 14; id++) {
+    const c = engine.biomeColor(id);
+    biomeColors.push(c[0], c[1], c[2]);
+  }
+  const state = {
+    v: 1,
+    seed: settings.engine.seed,
+    detail: settings.engine.detail,
+    octaves: settings.engine.octaves,
+    exaggeration: settings.engine.exaggeration,
+    seaLevel: settings.liquids.seaLevel,
+    biomeColors,
+    elevation: Array.from(engine.exportElevation()),
+    biome: Array.from(engine.exportBiome()),
+    liquidDepth: Array.from(engine.exportLiquidDepth()),
+    liquidKind: Array.from(engine.exportLiquidKind()),
+  };
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([JSON.stringify(state)], { type: "application/json" }));
+  a.download = "sundered-vale.dhce.json";
+  a.click();
+  URL.revokeObjectURL(a.href);
+});
+
+const fileLoad = document.getElementById("file-load") as HTMLInputElement | null;
+document.getElementById("btn-load")?.addEventListener("click", () => fileLoad?.click());
+fileLoad?.addEventListener("change", async () => {
+  const file = fileLoad.files?.[0];
+  if (!file || !engine) return;
+  try {
+    const state = JSON.parse(await file.text());
+    settings.engine.seed = state.seed;
+    settings.engine.detail = state.detail;
+    settings.engine.octaves = state.octaves;
+    settings.engine.exaggeration = state.exaggeration;
+    settings.liquids.seaLevel = state.seaLevel;
+    engine.build(WORLD.size, WORLD.size, detailToSpacing(settings.engine.detail), settings.engine.seed, settings.engine.octaves);
+    engine.importElevation(new Float32Array(state.elevation));
+    engine.importBiome(new Uint8Array(state.biome));
+    engine.importLiquid(new Float32Array(state.liquidDepth), new Uint8Array(state.liquidKind));
+    for (let id = 1; id <= 14; id++) {
+      const i = (id - 1) * 3;
+      engine.setBiomeColor(id, state.biomeColors[i], state.biomeColors[i + 1], state.biomeColors[i + 2]);
+    }
+    if (settingsRoot) buildSettingsPanel(settingsRoot, settings, onSettingChange);
+    pushSurface();
+    pushLiquid();
+    syncBiomeColorInput();
+    requestDraw();
+  } catch (err) {
+    console.error("load failed:", err);
+  }
+  fileLoad.value = "";
+});
+
 applyLighting();
 regenerate(); // immediate render on the TS placeholder
 
@@ -141,6 +199,7 @@ Engine.load().then((loaded) => {
   if (loaded) {
     engine = loaded;
     regenerate();
+    syncBiomeColorInput();
   } else {
     setStatus("engine: TS placeholder (run wasm-pack to build dhce-core)");
   }
@@ -203,6 +262,29 @@ const liquidSelect = document.getElementById("liquid-type") as HTMLSelectElement
 const liquidKind = (): number => (liquidSelect?.value === "lava" ? 1 : 0);
 const SCULPT_MODE: Record<string, number> = { raise: 0, carve: 1, level: 2, crest: 3 };
 
+const biomeSelect = document.getElementById("biome-type") as HTMLSelectElement | null;
+const biomeColorInput = document.getElementById("biome-color") as HTMLInputElement | null;
+const selectedBiome = (): number => Number(biomeSelect?.value ?? "1") || 1;
+const hexToRgb = (hex: string): [number, number, number] => {
+  const h = hex.replace("#", "");
+  return [parseInt(h.slice(0, 2), 16) / 255, parseInt(h.slice(2, 4), 16) / 255, parseInt(h.slice(4, 6), 16) / 255];
+};
+const rgbToHex = (c: [number, number, number]): string => {
+  const ch = (v: number) => Math.max(0, Math.min(255, Math.round(v * 255))).toString(16).padStart(2, "0");
+  return `#${ch(c[0])}${ch(c[1])}${ch(c[2])}`;
+};
+function syncBiomeColorInput(): void {
+  if (!engine || !biomeColorInput) return;
+  biomeColorInput.value = rgbToHex(engine.biomeColor(selectedBiome()));
+}
+biomeSelect?.addEventListener("change", syncBiomeColorInput);
+biomeColorInput?.addEventListener("input", () => {
+  if (!engine || !biomeColorInput) return;
+  const c = hexToRgb(biomeColorInput.value);
+  engine.setBiomeColor(selectedBiome(), c[0], c[1], c[2]);
+  needsRetess = true;
+});
+
 // Unproject a screen point onto the z = 0 ground plane → world (x, y), or null.
 function pickGround(clientX: number, clientY: number): [number, number] | null {
   const rect = canvas.getBoundingClientRect();
@@ -233,6 +315,8 @@ function paintAt(clientX: number, clientY: number): void {
     const amount = activeTool === "flood" ? s * 6 : s * 1.5;
     engine.paintLiquid(hit[0], hit[1], r, amount, liquidKind());
     settleFrames = Math.max(settleFrames, 40);
+  } else if (activeTool === "biome") {
+    engine.paintBiome(hit[0], hit[1], r, selectedBiome());
   } else {
     return;
   }
