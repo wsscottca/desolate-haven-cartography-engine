@@ -14,10 +14,10 @@ public partial class CartographerSpike : Node3D
 {
     [Export] public float Width = 6000f;
     [Export] public float Height = 6000f;
-    [Export] public float Spacing = 12f;     // smaller ⇒ more regions (lower to stress-test toward ~445k)
+    [Export] public float Spacing = 12f;      // smaller ⇒ more regions (lower toward 6 to stress-test)
     [Export] public int Seed = 12345;
     [Export] public int Octaves = 6;
-    [Export] public float Exaggeration = 900f;
+    [Export] public float Exaggeration = 300f; // vertical scale (web tool used ~120–300)
     [Export] public float BrushRadius = 350f;
     [Export] public float BrushStrength = 0.06f;
 
@@ -25,7 +25,8 @@ public partial class CartographerSpike : Node3D
     private MeshInstance3D _terrain;
     private readonly ArrayMesh _mesh = new();
     private int _dabs;
-    private double _accumMs;
+    private double _rustMs;   // paint + tessellate + marshal across the gdext boundary
+    private double _meshMs;   // ArrayMesh rebuild + GPU upload
 
     public override void _Ready()
     {
@@ -42,15 +43,19 @@ public partial class CartographerSpike : Node3D
         var mat = new StandardMaterial3D
         {
             VertexColorUseAsAlbedo = true,
-            Roughness = 0.95f,
+            Roughness = 1.0f,
+            Metallic = 0.0f,
         };
         _terrain = new MeshInstance3D { Mesh = _mesh, MaterialOverride = mat };
         AddChild(_terrain);
         Retessellate();
 
-        // Self-contained scene: spawn a sun and the orbit camera centered on the map.
-        var sun = new DirectionalLight3D { RotationDegrees = new Vector3(-50, -40, 0) };
-        AddChild(sun);
+        // Ambient fill via several directional lights (no WorldEnvironment needed): a key
+        // light, a fill from the opposite side, and a near-overhead light so no visible
+        // face renders pure black. Approximates ambient with a rock-solid node API.
+        AddSun(new Vector3(-50, -40, 0), 1.0f);   // key / sun
+        AddSun(new Vector3(-25, 150, 0), 0.45f);  // fill from behind
+        AddSun(new Vector3(-85, 20, 0), 0.40f);   // near-overhead, lights tops + most slopes
 
         var cam = new OrbitCamera
         {
@@ -61,10 +66,15 @@ public partial class CartographerSpike : Node3D
         cam.Current = true;
     }
 
-    /// Re-pack the whole surface in Rust and rebuild the ArrayMesh. The N0 question is
-    /// whether this is smooth at full density; if it stutters, the fallback is a
-    /// `RenderingServer` partial vertex update over the touched regions (the engine
-    /// returns them from paint_*).
+    private void AddSun(Vector3 rotationDegrees, float energy)
+    {
+        AddChild(new DirectionalLight3D { RotationDegrees = rotationDegrees, LightEnergy = energy });
+    }
+
+    /// Re-pack the whole surface in Rust and rebuild the ArrayMesh (used for the initial
+    /// build and after each sculpt dab). The N0 finding: this full rebuild is the cost we
+    /// measure — smooth at moderate density, too slow at extreme density, where the next
+    /// step is a partial update over just the touched regions (paint_* returns them).
     private void Retessellate()
     {
         _engine.Call("tessellate", Exaggeration);
@@ -73,14 +83,18 @@ public partial class CartographerSpike : Node3D
         var normals = _engine.Call("surface_normals").As<Vector3[]>();
         var colors = _engine.Call("surface_colors").As<Color[]>();
         var indices = _engine.Call("surface_indices").As<int[]>();
+        UploadSurface(positions, normals, colors, indices);
+    }
 
+    private void UploadSurface(Vector3[] positions, Vector3[] normals, Color[] colors, int[] indices)
+    {
+        if (positions.Length == 0) return;
         var arrays = new Godot.Collections.Array();
         arrays.Resize((int)Mesh.ArrayType.Max);
         arrays[(int)Mesh.ArrayType.Vertex] = positions;
         arrays[(int)Mesh.ArrayType.Normal] = normals;
         arrays[(int)Mesh.ArrayType.Color] = colors;
         arrays[(int)Mesh.ArrayType.Index] = indices;
-
         _mesh.ClearSurfaces();
         _mesh.AddSurfaceFromArrays(Mesh.PrimitiveType.Triangles, arrays);
     }
@@ -106,9 +120,18 @@ public partial class CartographerSpike : Node3D
 
         ulong t0 = Time.GetTicksUsec();
         _engine.Call("paint_terrain", (double)hit.X, (double)hit.Z, (double)BrushRadius, (double)BrushStrength, 0);
-        Retessellate();
-        _accumMs += (Time.GetTicksUsec() - t0) / 1000.0;
+        _engine.Call("tessellate", Exaggeration);
+        var positions = _engine.Call("surface_positions").As<Vector3[]>();
+        var normals = _engine.Call("surface_normals").As<Vector3[]>();
+        var colors = _engine.Call("surface_colors").As<Color[]>();
+        var indices = _engine.Call("surface_indices").As<int[]>();
+        ulong t1 = Time.GetTicksUsec();
+        UploadSurface(positions, normals, colors, indices);
+        ulong t2 = Time.GetTicksUsec();
+
+        _rustMs += (t1 - t0) / 1000.0;
+        _meshMs += (t2 - t1) / 1000.0;
         if (++_dabs % 30 == 0)
-            GD.Print($"[DHCE] paint+retess avg {_accumMs / _dabs:0.0} ms over {_dabs} dabs");
+            GD.Print($"[DHCE] {_dabs} dabs: rust(paint+pack) {_rustMs / _dabs:0.0} ms  mesh(upload) {_meshMs / _dabs:0.0} ms  total {(_rustMs + _meshMs) / _dabs:0.0} ms");
     }
 }
