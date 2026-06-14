@@ -37,7 +37,11 @@ public partial class CartographerSpike : Node3D
             return;
         }
 
+        GetWindow().Set("mode", 2); // maximize the window (2 = Window.MODE_MAXIMIZED)
+
+        ulong gen0 = Time.GetTicksUsec();
         _engine.Call("build", Width, Height, Spacing, (float)Seed, Octaves);
+        double genMs = (Time.GetTicksUsec() - gen0) / 1000.0;
         GD.Print($"[DHCE] regions={_engine.Call("region_count")} triangles={_engine.Call("triangle_count")} chunks={_engine.Call("chunk_count")}");
 
         var mat = new StandardMaterial3D
@@ -55,6 +59,7 @@ public partial class CartographerSpike : Node3D
         int n = _engine.Call("chunk_count").As<int>();
         _chunks = new MeshInstance3D[n];
         _chunkMeshes = new ArrayMesh[n];
+        ulong tess0 = Time.GetTicksUsec();
         for (int i = 0; i < n; i++)
         {
             var am = new ArrayMesh();
@@ -64,6 +69,7 @@ public partial class CartographerSpike : Node3D
             _chunkMeshes[i] = am;
             BuildChunk(i);
         }
+        GD.Print($"[DHCE] load: gen {genMs:0} ms, tessellate {n} chunks {(Time.GetTicksUsec() - tess0) / 1000.0:0} ms");
 
         // Flat ambient fill (so faces turned from the sun aren't black) + a distinct dark
         // background so the terrain reads against it. Property ids dodge enum-name risk:
