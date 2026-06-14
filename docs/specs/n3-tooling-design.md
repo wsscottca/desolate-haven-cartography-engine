@@ -232,3 +232,74 @@ rule changes.
 
 Each slice gets its own implementation plan (`docs/plans/n3X-*.md`) when reached; N3a is planned
 first. Commit + push per slice; `cargo test -p dhce-core` + `dotnet build` green at each boundary.
+
+## 7. Revision R1 (2026-06-14) — mapgen4-aligned biome UX + Desolate Haven style
+
+After N3a's first live passes, the user pointed at an existing **worked prototype** of the desired
+tool — `web/mapgen4/painting.ts` ("Sundered Vale cartographer's table") — and the **Desolate Haven
+Visual Style Guide** at `web/mapgen4/style.html`. These are now the authority for N3's biome UX and
+look. This revision supersedes the N3b/N3c sketches above and reorders the remaining work.
+
+**Source of truth.** The prototype is a heavily-customized mapgen4: it lays out the canon Vale (our
+14 biomes), derives terrain from biomes, and edits via three biome tools + a per-biome panel. Most
+of it maps onto the existing `DhceEngine` (see the mapping table — `paint_biome`,
+`regions_in_polygon`, `region_at`/`select_contiguous`/`set_biome_of`, `biome_landform`,
+`biome_water` all already exist). The new core work is small and itemized per slice.
+
+### 7.1 Biome model (per biome id 1..=14)
+- **Seed** — `base_elevation` ([-1,1]) + `relief` ([0,0.4]). *(new core field)* Defines the terrain a
+  biome generates when you "seed terrain from biomes."
+- **Landform** — peak_shape, hill_amp, valley_floor, roughness. *(exists: `biome_landform`)*
+- **Water** — raininess, rain_shadow, evaporation, flow, ocean_depth. *(exists: `biome_water`)*
+
+### 7.2 Biome tools (a "Biomes" tab beside "Terrain")
+- **Brush** — freehand `paint_biome`. *(exists)*
+- **Territory** — click to outline a polygon; close it → `regions_in_polygon` → assign biome to those
+  regions (+ optionally seed their terrain). *(core exists; UI draws the polygon)*
+- **Select** — click a region → `select_contiguous` (flood same-biome) → reassign via `set_biome_of`;
+  selection drives the per-biome panel. *(exists)*
+- Actions: **Seed terrain from biomes** *(new core)*, **Seed biomes from terrain** (classify-all via
+  `biomes::classify`) *(new core)*, **Clear biomes**, **Show biome borders** (overlay).
+
+### 7.3 Per-biome editor panel (right pane, when a biome is selected)
+Sliders exactly per the prototype, two groups:
+- **Terrain**: Base elevation, Relief, Peak shape, Hill amount, Valley floor, Jaggedness.
+- **Water**: Raininess, Rain shadow, Evaporation, River flow, Ocean depth.
+Editing a seed/landform value re-seeds that biome's terrain; the world re-tessellates.
+
+### 7.4 Biome-driven shaping (N3b, unchanged intent)
+Still the layered, idempotent Apply pass + diffusion blending from §3 N3b — now fed by the per-biome
+seed + landform above. "Seed terrain from biomes" is the simpler first step (region elevation =
+biome base + noise·relief); landform shaping refines it.
+
+### 7.5 Visual style — Desolate Haven Style Guide (`style.html`)
+A Godot `Theme` built to the guide; applied to the tool overlay.
+- **Fonts (OFL, bundle .ttf in `tool/fonts/`):** IM Fell English SC (titles, section headers, tool
+  labels), Alegreya (body/values), Metamorphous (place names — minor). Degrade to default if absent.
+- **Palette:** `--bg #14110E`, `--bg-2 #1E1A15`, `--bg-3 #272118`, `--rule #3A3326`, `--ink #ECE3D0`,
+  `--ink-dim #B9AE97`, `--gold #C7A24B`; biome/world palette for swatches.
+- **Chrome:** rounded dark panels (StyleBoxFlat, bg-3→bg-2, 1px `--rule` border, ~10px radius); ghost
+  buttons (transparent, `--rule` border, gold text/border on hover/active); section headers in gold
+  small-caps IM Fell English SC; brush-size as a row of dots.
+- **Dock layout (per the mockups):** left dock — title + "cartographer's table", **Terrain | Biomes**
+  tabs, **BRUSH SIZE** dots, then tab content (Terrain: World + Terrain Tools + Biome Layer; Biomes:
+  Brush/Territory/Select + biome swatches + seed actions). Right panel — Reset/Save canon Vale +
+  contextual controls (per-biome editor, or world/physics).
+- Keep our tool **functionality** (Raise/Carve/Level/Crest/River/Flood) — only the styling/structure
+  changes.
+
+### 7.6 Brush = 3D sphere (Blender-style; sculpt + River)
+Core falloff uses **3D distance** (world metres incl. the vertical `elev·exaggeration`) so the brush
+is a sphere that bites into the surface under the cursor; gizmo becomes a sphere/oriented ring.
+Applies to sculpt and makes River carve in smoothly. *(core falloff change + gizmo)*
+
+### 7.7 Revised build order (this supersedes §6 for the remainder)
+1. **Restyle + dock** — Theme (fonts/palette) + Terrain|Biomes tabbed dock, brush-size dots, styled
+   tools; keep functionality. Right panel: Reset/Save + world/physics. *(C#)*
+2. **Biome system** — core: per-biome seed, `seed_terrain_from_biomes`, `seed_biomes_from_terrain`,
+   biome-driven shaping; tools: Brush/Territory/Select; per-biome editor panel; borders overlay.
+   *(core + C#)*
+3. **Brush 3D sphere** — 3D falloff + sphere gizmo for sculpt + River. *(core + C#)*
+
+N3a's shipped pieces (tool shell, world/physics panels, liquid render, surface raycast, brush
+spacing/gizmo, metre strength) stay; the restyle reskins them into the dock.
