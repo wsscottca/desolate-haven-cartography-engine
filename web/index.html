@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Desolate Haven — Cartographer's Table</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link
+  href="https://fonts.googleapis.com/css2?family=Alegreya:wght@400;500;700&family=IM+Fell+English+SC&family=Metamorphous&display=swap"
+  rel="stylesheet"
+/>
+<style>
+  :root {
+    --bg: #14110e; --bg-2: #1e1a15; --bg-3: #272118; --rule: #3a3326;
+    --ink: #ece3d0; --ink-dim: #b9ae97; --gold: #c7a24b;
+    --display: "IM Fell English SC", Georgia, serif;
+    --label: "Metamorphous", "IM Fell English SC", serif;
+    --body: "Alegreya", Georgia, serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: var(--bg); color: var(--ink); font-family: var(--body); }
+  #view { position: fixed; inset: 0; width: 100vw; height: 100vh; display: block; touch-action: none; }
+
+  #dock {
+    position: absolute; top: 16px; left: 16px; width: 232px; z-index: 10;
+    background: linear-gradient(var(--bg-2), var(--bg-3));
+    border: 1px solid var(--rule); border-radius: 8px; padding: 14px 14px 12px;
+    box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
+    max-height: calc(100vh - 32px); overflow: auto;
+  }
+  .brand { font-family: var(--display); color: var(--gold); font-size: 22px; line-height: 1; margin: 0; letter-spacing: 0.5px; }
+  .sub { font-family: var(--label); color: var(--ink-dim); font-size: 11px; margin: 2px 0 12px; text-transform: lowercase; letter-spacing: 0.4px; }
+  .group-label { font-family: var(--label); color: var(--ink-dim); font-size: 11px; letter-spacing: 1px; text-transform: uppercase; margin: 12px 0 6px; }
+  .tools { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
+  .tools.two { grid-template-columns: repeat(2, 1fr); }
+  button.tool {
+    display: flex; flex-direction: column; align-items: center; gap: 4px;
+    background: var(--bg); color: var(--ink-dim); border: 1px solid var(--rule);
+    border-radius: 6px; padding: 8px 4px 6px; cursor: pointer; font-family: var(--label); font-size: 10.5px;
+  }
+  button.tool svg { width: 22px; height: 22px; }
+  button.tool:hover { color: var(--ink); border-color: var(--ink-dim); }
+  button.tool.active { color: var(--gold); border-color: var(--gold); box-shadow: 0 0 0 1px var(--gold) inset; }
+  .liquid-row { display: flex; gap: 6px; margin-top: 6px; }
+  .liquid-row label { font-family: var(--label); font-size: 11px; color: var(--ink-dim); display: flex; align-items: center; gap: 6px; }
+  select { background: var(--bg); color: var(--ink); border: 1px solid var(--rule); border-radius: 5px; padding: 3px 6px; font-family: var(--body); }
+  #engine-status { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--rule); font-size: 10.5px; color: var(--ink-dim); }
+  .hint { position: absolute; right: 16px; bottom: 12px; z-index: 10; color: var(--ink-dim); font-size: 11px; opacity: 0.8; }
+</style>
+</head>
+<body>
+  <canvas id="view"></canvas>
+
+  <aside id="dock">
+    <h1 class="brand">Sundered Vale</h1>
+    <p class="sub">cartographer's table</p>
+
+    <div class="group-label">Sculpt</div>
+    <div class="tools">
+      <button class="tool active" data-tool="raise" title="Raise — broad uplift">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 19h18"/><path d="M6 19c2-6 10-6 12 0"/><path d="M12 4v6m0-6l-2.5 2.5M12 4l2.5 2.5"/></svg>
+        Raise
+      </button>
+      <button class="tool" data-tool="carve" title="Carve — gouge / lower">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M6 6c2 8 10 8 12 0"/><path d="M12 20v-6m0 6l-2.5-2.5M12 20l2.5-2.5"/></svg>
+        Carve
+      </button>
+      <button class="tool" data-tool="level" title="Level — flatten to a plateau">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 19h18"/><path d="M5 19l3.5-9h7l3.5 9"/><path d="M8.5 10h7"/></svg>
+        Level
+      </button>
+      <button class="tool" data-tool="crest" title="Crest — sharp peak">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 20h18"/><path d="M6 20l6-15 6 15"/><path d="M9.5 11.5l2.5-2 2.5 2"/></svg>
+        Crest
+      </button>
+    </div>
+
+    <div class="group-label">Liquids</div>
+    <div class="tools two">
+      <button class="tool" data-tool="course" title="Course — flowing channel of the selected liquid">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M7 3c-2 4 4 5 2 9s-4 5-2 9"/><path d="M14 3c-2 4 4 5 2 9s-4 5-2 9" opacity="0.5"/></svg>
+        Course
+      </button>
+      <button class="tool" data-tool="flood" title="Flood — fill a basin with the selected liquid">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4v9a8 8 0 0 0 16 0V4"/><path d="M4 13h16"/></svg>
+        Flood
+      </button>
+    </div>
+    <div class="liquid-row">
+      <label>Liquid
+        <select id="liquid-type">
+          <option value="water">Water</option>
+          <option value="lava">Lava</option>
+        </select>
+      </label>
+    </div>
+
+    <div id="engine-status">engine: …</div>
+  </aside>
+
+  <div class="hint">drag — orbit · wheel — zoom · shift-drag — pan</div>
+
+  <script type="module" src="build/_bundle.js"></script>
+</body>
+</html>

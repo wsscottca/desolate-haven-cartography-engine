@@ -1,0 +1,19 @@
+[workspace]
+resolver = "2"
+members = ["crates/dhce-core", "crates/dhce-wasm"]
+# dhce-godot is built separately (Phase 8) — it needs the Godot toolchain + gdext.
+exclude = ["crates/dhce-godot"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "LicenseRef-Proprietary"
+authors = ["Will Scott"]
+
+# Release profile tuned for the WASM engine. `cargo test` uses the dev profile,
+# so `panic = "abort"` here does not affect the test harness.
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"

@@ -1,0 +1,18 @@
+[package]
+name = "dhce-wasm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "WASM (wasm-bindgen) adapter exposing dhce-core to the browser front-end."
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+dhce-core = { path = "../dhce-core" }
+wasm-bindgen = "0.2"
+console_error_panic_hook = { version = "0.1", optional = true }
+
+[features]
+default = ["console_error_panic_hook"]

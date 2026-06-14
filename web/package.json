@@ -1,0 +1,11 @@
+{
+  "name": "dhce-web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Desolate Haven Cartography Engine — 3D WebGL2 front-end.",
+  "scripts": {
+    "build": "sh build.sh",
+    "serve": "python -m http.server 8000"
+  }
+}

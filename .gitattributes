@@ -1,0 +1,26 @@
+# Normalize line endings: LF in the repo and on checkout, for cross-platform
+# consistency. Shell scripts in particular must stay LF or /bin/sh breaks.
+* text=auto eol=lf
+
+*.rs   text eol=lf
+*.ts   text eol=lf
+*.js   text eol=lf
+*.mjs  text eol=lf
+*.sh   text eol=lf
+*.glsl text eol=lf
+*.html text eol=lf
+*.css  text eol=lf
+*.json text eol=lf
+*.md   text eol=lf
+*.toml text eol=lf
+*.svg  text eol=lf
+
+# Binary assets — never touch.
+*.wasm  binary
+*.png   binary
+*.jpg   binary
+*.ico   binary
+*.woff  binary
+*.woff2 binary
+*.ttf   binary
+*.data  binary

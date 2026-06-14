@@ -1,0 +1,16 @@
+# Rust
+/target
+**/target
+crates/*/pkg/
+
+# Web
+web/build/
+web/node_modules/
+
+# Artifacts
+*.wasm
+*.map
+
+# OS / editor
+.DS_Store
+Thumbs.db

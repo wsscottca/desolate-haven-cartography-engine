@@ -1,0 +1,15 @@
+# Phase 8 — Godot GDExtension adapter. Excluded from the default workspace build
+# (it needs the Godot toolchain + godot-rust/gdext). Built on its own when wired up.
+[package]
+name = "dhce-godot"
+version = "0.1.0"
+edition = "2021"
+license = "LicenseRef-Proprietary"
+description = "GDExtension adapter exposing dhce-core to the Godot desolate-haven game."
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+dhce-core = { path = "../dhce-core" }
+# Phase 8: godot = "0.x"  (godot-rust/gdext, MIT-elect)
