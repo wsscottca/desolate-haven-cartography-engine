@@ -1,29 +1,70 @@
 using Godot;
+using System.Collections.Generic;
+using System.Diagnostics;
 
 namespace DesolateHaven.Cartography;
 
-/// N0 risk spike: build a `DhceEngine` world, render it as a grid of chunk meshes, sculpt
-/// with the left mouse, and measure the per-stroke cost. Chunking is the perf fix: an edit
-/// re-tessellates + re-uploads only the chunks it touches, not the whole mesh.
+/// N2 streaming tool shell: a large world (default 20 km) opens *instantly* and edits stay
+/// responsive. Three pieces deliver that (ADR 0003 render-streaming):
+///   1. Splash-deferred gen — the window shows a "Generating…" splash immediately; `build()`
+///      runs a few frames later so the splash is visible during it. (Generation runs on the
+///      MAIN thread: gdext methods can't be called from a background thread — Godot rejects
+///      the cross-thread `Call` with error #1337 — so the C#-`Task` approach is not viable.)
+///   2. Progressive tessellation — chunk `MeshInstance3D`s are created empty, then a few are
+///      tessellated per frame in `_Process` (no upload hitch; the window fills in).
+///   3. Render distance — only chunks within `RenderDistance` tiles of the camera focus are
+///      meshed; far ones are freed. The core's `chunk_grid` maps the camera to tiles with no
+///      per-region work.
 ///
-/// All compute is in Rust (the `dhce-godot` GDExtension); C# only uploads buffers and runs
-/// the camera. The engine is a GDExtension class, so it is driven via `Call(...)` — C# has
-/// no static binding for it.
+/// All compute is in Rust (the `dhce-godot` GDExtension); C# only uploads buffers and runs the
+/// camera. The engine is a GDExtension class, so it is driven via `Call(...)`.
 [GlobalClass]
 public partial class CartographerSpike : Node3D
 {
-    [Export] public float Width = 6000f;
-    [Export] public float Height = 6000f;
-    [Export] public float Spacing = 12f;      // smaller ⇒ more regions (lower toward 6 to stress-test)
+    [Export] public float Width = 20000f;      // 20 km world
+    [Export] public float Height = 20000f;
+    [Export] public float Spacing = 12f;       // ~2.8M regions at 20 km (smaller ⇒ denser)
     [Export] public int Seed = 12345;
     [Export] public int Octaves = 6;
-    [Export] public float Exaggeration = 300f; // vertical scale (web tool used ~120–300)
+    /// Vertical relief in km. The core clamps normalized elevation to ~[-1.5, 1.5] (span
+    /// `ElevSpan`) and 1 world unit = 1 m, so the on-screen exaggeration is
+    /// `TerrainHeightKm * 1000 / ElevSpan` (0.9 km ⇒ 300, the N0 baseline look).
+    [Export] public float TerrainHeightKm = 1.2f;
     [Export] public float BrushRadius = 350f;
     [Export] public float BrushStrength = 0.06f;
 
+    /// Tiles (Chebyshev) around the camera focus kept meshed; chunks beyond this are freed.
+    [Export] public int RenderDistance = 6;
+    /// Chunks tessellated per frame while streaming in (caps the per-frame upload cost; at
+    /// ~3-4 ms/chunk, 4 keeps inside a 60 fps frame while still filling the view in well under 1 s).
+    [Export] public int ChunksPerFrame = 4;
+
+    /// Normalized-elevation span the core clamps to (ELEV_MAX - ELEV_MIN in world.rs).
+    private const float ElevSpan = 3.0f;
+    /// Frames to let the splash render before the (blocking) main-thread gen runs.
+    private const int WarmupFrames = 3;
+
     private GodotObject _engine;
+    private OrbitCamera _cam;
+    private CanvasLayer _splash;
+
+    // Chunk render state. Nodes are created once (empty); `_built[i]` tracks whether chunk i
+    // currently holds a tessellated surface.
     private MeshInstance3D[] _chunks;
     private ArrayMesh[] _chunkMeshes;
+    private bool[] _built;
+    private StandardMaterial3D _mat;
+    private int _cols, _rows;
+    private float _sx, _sy;          // tile size in world units (X, Z)
+    private float _exaggeration;
+    private bool _pendingGen;        // gen armed in _Ready, fired from _Process after warmup
+    private int _warmupFrames;
+    private bool _genDone;
+    private double _genMs;
+
+    // Reused per-frame scratch for nearest-first streaming (no per-frame allocation).
+    private readonly List<(int dist, int ci)> _pending = new();
+
     private int _dabs;
     private double _totalMs;
     private long _dirtyAccum;
@@ -38,42 +79,118 @@ public partial class CartographerSpike : Node3D
         }
 
         GetWindow().Set("mode", 2); // maximize the window (2 = Window.MODE_MAXIMIZED)
+        _exaggeration = TerrainHeightKm * 1000f / ElevSpan;
 
-        ulong gen0 = Time.GetTicksUsec();
+        // Scene dressing + camera are mesh-independent, so set them up first — the window is
+        // live the instant `_Ready` returns, showing the splash while gen is pending.
+        SetupSceneAndCamera();
+        ShowSplash("Generating world…");
+        _pendingGen = true; // fired from _Process once the splash has drawn (see WarmupFrames)
+    }
+
+    public override void _Process(double delta)
+    {
+        if (_pendingGen)
+        {
+            // Generation blocks the main thread for a few seconds, so hold it off until the
+            // splash has rendered — the window then opens instantly with "Generating…" instead
+            // of going blank. (Cross-thread gen is impossible here, see the class header.)
+            if (_warmupFrames++ >= WarmupFrames)
+            {
+                _pendingGen = false;
+                GenerateWorld();
+            }
+            return;
+        }
+
+        if (!_genDone) return;
+
+        // Camera focus → grid cell. FocusPoint is where the view ray meets the ground; moving
+        // the camera (orbit/pan/freelook) streams the world along.
+        Vector3 focus = _cam?.FocusPoint ?? new Vector3(Width * 0.5f, 0f, Height * 0.5f);
+        int camGx = Mathf.Clamp((int)(focus.X / _sx), 0, Mathf.Max(_cols - 1, 0));
+        int camGy = Mathf.Clamp((int)(focus.Z / _sy), 0, Mathf.Max(_rows - 1, 0));
+
+        _pending.Clear();
+        for (int ci = 0; ci < _chunks.Length; ci++)
+        {
+            int gx = ci % _cols;
+            int gy = ci / _cols;
+            int dist = Mathf.Max(Mathf.Abs(gx - camGx), Mathf.Abs(gy - camGy));
+            if (dist <= RenderDistance)
+            {
+                if (!_built[ci]) _pending.Add((dist, ci));
+            }
+            else if (_built[ci])
+            {
+                FreeChunk(ci); // out of range — release its GPU surface
+            }
+        }
+
+        // Build nearest-first so the world fills outward from where you're looking.
+        if (_pending.Count > 0)
+        {
+            _pending.Sort((a, b) => a.dist.CompareTo(b.dist));
+            int budget = Mathf.Min(ChunksPerFrame, _pending.Count);
+            for (int k = 0; k < budget; k++)
+                BuildChunk(_pending[k].ci);
+        }
+    }
+
+    /// Build the world on the main thread, then arm streaming. Heavy (~seconds for a 20 km
+    /// world); the splash covers it. Mesh upload is lazy — `OnGenDone` only creates empty nodes
+    /// and `_Process` tessellates them around the camera.
+    private void GenerateWorld()
+    {
+        var sw = Stopwatch.StartNew();
         _engine.Call("build", Width, Height, Spacing, (float)Seed, Octaves);
-        double genMs = (Time.GetTicksUsec() - gen0) / 1000.0;
-        GD.Print($"[DHCE] regions={_engine.Call("region_count")} triangles={_engine.Call("triangle_count")} chunks={_engine.Call("chunk_count")}");
+        sw.Stop();
+        _genMs = sw.Elapsed.TotalMilliseconds;
+        OnGenDone();
+    }
 
-        var mat = new StandardMaterial3D
+    private void OnGenDone()
+    {
+        Vector2I grid = _engine.Call("chunk_grid").As<Vector2I>();
+        _cols = grid.X;
+        _rows = grid.Y;
+        _sx = _cols > 0 ? Width / _cols : Width;
+        _sy = _rows > 0 ? Height / _rows : Height;
+
+        int n = _engine.Call("chunk_count").As<int>();
+        GD.Print($"[DHCE] regions={_engine.Call("region_count")} triangles={_engine.Call("triangle_count")} chunks={n} grid={_cols}x{_rows}");
+        GD.Print($"[DHCE] gen {_genMs:0} ms; streaming {ChunksPerFrame} chunks/frame within {RenderDistance} tiles");
+
+        _chunks = new MeshInstance3D[n];
+        _chunkMeshes = new ArrayMesh[n];
+        _built = new bool[n];
+        for (int i = 0; i < n; i++)
+        {
+            var am = new ArrayMesh();
+            var mi = new MeshInstance3D { Mesh = am, MaterialOverride = _mat };
+            AddChild(mi);
+            _chunks[i] = mi;
+            _chunkMeshes[i] = am;
+        }
+
+        HideSplash();
+        _genDone = true;
+    }
+
+    private void SetupSceneAndCamera()
+    {
+        _mat = new StandardMaterial3D
         {
             VertexColorUseAsAlbedo = true,
             Roughness = 1.0f,
             Metallic = 0.0f,
         };
-        // Double-sided: the Y-up remap flips triangle winding, so backface culling hides
-        // the terrain when viewed top-down. Disable culling so it shows from any angle.
-        // (Set by property id to avoid enum-name fragility: cull_mode 2 = CULL_DISABLED.)
-        mat.Set("cull_mode", 2);
+        // Double-sided: the Y-up remap flips triangle winding, so backface culling hides the
+        // terrain top-down. (cull_mode 2 = CULL_DISABLED, set by id to dodge enum-name risk.)
+        _mat.Set("cull_mode", 2);
 
-        // One MeshInstance3D per chunk; edits rebuild only the dirty ones.
-        int n = _engine.Call("chunk_count").As<int>();
-        _chunks = new MeshInstance3D[n];
-        _chunkMeshes = new ArrayMesh[n];
-        ulong tess0 = Time.GetTicksUsec();
-        for (int i = 0; i < n; i++)
-        {
-            var am = new ArrayMesh();
-            var mi = new MeshInstance3D { Mesh = am, MaterialOverride = mat };
-            AddChild(mi);
-            _chunks[i] = mi;
-            _chunkMeshes[i] = am;
-            BuildChunk(i);
-        }
-        GD.Print($"[DHCE] load: gen {genMs:0} ms, tessellate {n} chunks {(Time.GetTicksUsec() - tess0) / 1000.0:0} ms");
-
-        // Flat ambient fill (so faces turned from the sun aren't black) + a distinct dark
-        // background so the terrain reads against it. Property ids dodge enum-name risk:
-        // background_mode 1 = COLOR, ambient_light_source 2 = COLOR.
+        // Flat ambient fill + a distinct dark background so the terrain reads against it.
+        // (background_mode 1 = COLOR, ambient_light_source 2 = COLOR.)
         var env = new Godot.Environment();
         env.Set("background_mode", 1);
         env.Set("background_color", new Color(0.10f, 0.12f, 0.16f));
@@ -82,17 +199,13 @@ public partial class CartographerSpike : Node3D
         env.Set("ambient_light_energy", 1.2f);
         AddChild(new WorldEnvironment { Environment = env });
 
-        // A key light + a near-overhead light add relief on top of the ambient.
         AddSun(new Vector3(-50, -40, 0), 0.9f);
         AddSun(new Vector3(-85, 20, 0), 0.4f);
 
-        var cam = new OrbitCamera
-        {
-            Target = new Vector3(Width * 0.5f, 0f, Height * 0.5f),
-            Distance = Mathf.Max(Width, Height) * 0.9f,
-        };
-        AddChild(cam);
-        cam.Current = true;
+        _cam = new OrbitCamera();
+        AddChild(_cam);
+        _cam.FrameOverhead(new Vector3(Width * 0.5f, 0f, Height * 0.5f), Mathf.Max(Width, Height) * 0.9f);
+        _cam.Current = true;
     }
 
     private void AddSun(Vector3 rotationDegrees, float energy)
@@ -100,15 +213,39 @@ public partial class CartographerSpike : Node3D
         AddChild(new DirectionalLight3D { RotationDegrees = rotationDegrees, LightEnergy = energy });
     }
 
-    /// Re-pack one chunk in Rust and rebuild its ArrayMesh. Cost ∝ chunk size, not the
-    /// whole mesh — this is what makes high-density sculpting interactive.
+    /// A full-screen splash shown while the world generates, so the window is never blank.
+    private void ShowSplash(string text)
+    {
+        _splash = new CanvasLayer();
+        var bg = new ColorRect { Color = new Color(0.06f, 0.07f, 0.09f) };
+        bg.SetAnchorsAndOffsetsPreset(Control.LayoutPreset.FullRect);
+        var label = new Label
+        {
+            Text = text,
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+        label.SetAnchorsAndOffsetsPreset(Control.LayoutPreset.FullRect);
+        _splash.AddChild(bg);
+        _splash.AddChild(label);
+        AddChild(_splash);
+    }
+
+    private void HideSplash()
+    {
+        _splash?.QueueFree();
+        _splash = null;
+    }
+
+    /// Re-pack one chunk in Rust and upload its ArrayMesh. Cost ∝ chunk size, not the whole
+    /// mesh — what makes high-density sculpting (and streaming) interactive.
     private void BuildChunk(int i)
     {
-        _engine.Call("tessellate_chunk", i, Exaggeration);
+        _engine.Call("tessellate_chunk", i, _exaggeration);
         ArrayMesh am = _chunkMeshes[i];
         am.ClearSurfaces();
         var positions = _engine.Call("chunk_positions").As<Vector3[]>();
-        if (positions.Length == 0) return; // empty tile
+        if (positions.Length == 0) { _built[i] = true; return; } // empty tile — nothing to draw
         var normals = _engine.Call("chunk_normals").As<Vector3[]>();
         var colors = _engine.Call("chunk_colors").As<Color[]>();
         var indices = _engine.Call("chunk_indices").As<int[]>();
@@ -120,6 +257,15 @@ public partial class CartographerSpike : Node3D
         arrays[(int)Mesh.ArrayType.Color] = colors;
         arrays[(int)Mesh.ArrayType.Index] = indices;
         am.AddSurfaceFromArrays(Mesh.PrimitiveType.Triangles, arrays);
+        _built[i] = true;
+    }
+
+    /// Release a chunk's GPU surface when it leaves render distance (the node stays; it just
+    /// goes empty until the chunk comes back into range and re-tessellates).
+    private void FreeChunk(int i)
+    {
+        _chunkMeshes[i].ClearSurfaces();
+        _built[i] = false;
     }
 
     public override void _UnhandledInput(InputEvent e)
@@ -132,6 +278,7 @@ public partial class CartographerSpike : Node3D
 
     private void PaintAt(Vector2 screen)
     {
+        if (!_genDone) return;
         var cam = GetViewport().GetCamera3D();
         if (cam == null) return;
         Vector3 from = cam.ProjectRayOrigin(screen);
@@ -146,7 +293,9 @@ public partial class CartographerSpike : Node3D
         int[] dirty = _engine.Call("take_dirty_chunks").As<int[]>();
         foreach (int ci in dirty)
         {
-            if (ci >= 0 && ci < _chunkMeshes.Length) BuildChunk(ci);
+            // Rebuild only chunks currently on screen; out-of-range ones re-tessellate fresh
+            // (reflecting this edit) when they next stream in.
+            if (ci >= 0 && ci < _chunkMeshes.Length && _built[ci]) BuildChunk(ci);
         }
         double ms = (Time.GetTicksUsec() - t0) / 1000.0;
 

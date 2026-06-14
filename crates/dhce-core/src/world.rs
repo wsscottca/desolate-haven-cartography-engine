@@ -68,6 +68,11 @@ pub struct World {
     chunk_tris: Vec<Vec<u32>>,
     region_chunks: Vec<Vec<u32>>,
     chunk_dirty: Vec<bool>,
+    /// Dimensions of the (square) chunk grid; `chunk id = gy * chunk_cols + gx`. Both 0
+    /// until [`build`] partitions the mesh. Stored so the front-end can map the camera to
+    /// visible tiles (render-distance streaming) without re-deriving the layout.
+    chunk_cols: usize,
+    chunk_rows: usize,
     color_cache: Vec<f32>,
 }
 
@@ -115,6 +120,8 @@ impl World {
             chunk_tris: Vec::new(),
             region_chunks: Vec::new(),
             chunk_dirty: Vec::new(),
+            chunk_cols: 0,
+            chunk_rows: 0,
             color_cache: Vec::new(),
         }
     }
@@ -794,6 +801,8 @@ impl World {
         self.chunk_tris = chunk_tris;
         self.region_chunks = region_chunks;
         self.chunk_dirty = vec![false; cols * rows];
+        self.chunk_cols = cols;
+        self.chunk_rows = rows;
     }
 
     /// After editing `regions`: refresh their cached colors (same jitter as `region_color`,
@@ -823,6 +832,33 @@ impl World {
     /// Number of rendering chunks.
     pub fn chunk_count(&self) -> usize {
         self.chunk_tris.len()
+    }
+
+    /// `(cols, rows)` of the rendering-chunk grid (square: `cols == rows`); `(0, 0)` until
+    /// [`build`] has run. A chunk's grid cell is `(gx, gy) = (id % cols, id / cols)`.
+    pub fn chunk_grid(&self) -> (usize, usize) {
+        (self.chunk_cols, self.chunk_rows)
+    }
+
+    /// World-space center `(x, y)` of every chunk tile, flat `[x0, y0, x1, y1, …]` indexed
+    /// by chunk id. Lets the front-end map the camera to visible tiles for render-distance
+    /// streaming with no per-region work. Empty until [`build`] has run.
+    pub fn chunk_centers(&self) -> Vec<f64> {
+        let (cols, rows) = (self.chunk_cols, self.chunk_rows);
+        if cols == 0 || rows == 0 {
+            return Vec::new();
+        }
+        // Same tile size the partitioner used (see `build_chunks`).
+        let sx = (self.width / cols as f64).max(1.0);
+        let sy = (self.height / rows as f64).max(1.0);
+        let mut out = Vec::with_capacity(cols * rows * 2);
+        for gy in 0..rows {
+            for gx in 0..cols {
+                out.push((gx as f64 + 0.5) * sx);
+                out.push((gy as f64 + 0.5) * sy);
+            }
+        }
+        out
     }
 
     /// Chunk ids flagged dirty since the last call, clearing them. The front-end

@@ -107,6 +107,25 @@ impl DhceEngine {
     fn chunk_count(&self) -> i64 {
         self.world.chunk_count() as i64
     }
+    /// `(cols, rows)` of the chunk grid as a `Vector2i` (square: x == y); `(0, 0)` until
+    /// `build`. A chunk's grid cell is `(id % cols, id / cols)`.
+    #[func]
+    fn chunk_grid(&self) -> Vector2i {
+        let (cols, rows) = self.world.chunk_grid();
+        Vector2i::new(cols as i32, rows as i32)
+    }
+    /// World-space center of every chunk tile, indexed by chunk id. Core `(x, y)` is the
+    /// Godot ground plane (Y is up), so each `Vector2`'s `.x`/`.y` are the tile's Godot
+    /// X/Z — feed straight into render-distance streaming. Empty until `build`.
+    #[func]
+    fn chunk_centers(&self) -> PackedVector2Array {
+        let flat = self.world.chunk_centers();
+        let mut v = Vec::with_capacity(flat.len() / 2);
+        for c in flat.chunks_exact(2) {
+            v.push(Vector2::new(c[0] as f32, c[1] as f32));
+        }
+        PackedVector2Array::from(v.as_slice())
+    }
     /// Pack chunk `chunk` at `exaggeration` into the chunk cache, then read the getters.
     #[func]
     fn tessellate_chunk(&mut self, chunk: i64, exaggeration: f64) {

@@ -2,8 +2,8 @@
 .godot/
 *.import
 
-# Built GDExtension libraries — rebuild with `cargo build -p dhce-godot --release`
-# then copy from crates/dhce-godot/target/release/ into addons/dhce/
+# Built GDExtension libraries — rebuild from the crate dir: `cd crates/dhce-godot; cargo build --release`
+# then copy the DLL from C:\Users\WSSco\.dhce-build\release\ (the .cargo/config.toml target-dir) into addons/dhce/
 addons/dhce/*.dll
 addons/dhce/*.so
 addons/dhce/*.dylib

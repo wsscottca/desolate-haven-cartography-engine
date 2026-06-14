@@ -5,7 +5,7 @@ Goal: confirm the Godot stack is viable — orbit a true-3D terrain built by the
 All compute is in Rust; C# only uploads buffers and runs the camera.
 
 **Already done for you (in this repo):**
-- `addons/dhce/dhce_godot.dll` — the release GDExtension (rebuild: `cargo build -p dhce-godot --release`, then copy from `crates/dhce-godot/target/release/`).
+- `addons/dhce/dhce_godot.dll` — the release GDExtension (rebuild from the crate dir: `cd crates/dhce-godot; cargo build --release`, then copy the DLL from `C:\Users\WSSco\.dhce-build\release\` — the target-dir set in `.cargo/config.toml`).
 - `addons/dhce/dhce.gdextension` — the extension manifest (auto-loads on project open).
 - `scripts/OrbitCamera.cs`, `scripts/CartographerSpike.cs` — the spike (self-contained: spawns camera, light, and terrain).
 
@@ -28,9 +28,10 @@ All compute is in Rust; C# only uploads buffers and runs the camera.
    (it's a `[GlobalClass]`; or add a `Node3D` and attach `scripts/CartographerSpike.cs`).
    Save as `Main.tscn`, set it as the main scene (Project → Project Settings → Run).
 
-5. **Run (F5).** Controls: **right-drag** orbit, **wheel** zoom, **middle-drag** pan,
-   **left-drag** sculpt (raise). The Output panel prints `regions=… triangles=…` and a
-   rolling `paint+retess avg … ms`.
+5. **Run (F5).** Controls (editor-style): **middle-drag** orbit, **Shift+middle-drag** pan,
+   **wheel** zoom, **right-drag** freelook (mouse-look + **WASD** fly, **Q/E** down/up,
+   **Shift** faster, wheel = speed), **left-drag** sculpt (raise). The Output panel prints
+   `regions=… triangles=…` and a rolling per-dab timing line.
 
 6. **Stress it.** Select the root node and lower the **Spacing** export (e.g. 12 → 8 → 6)
    to push the region count up toward ~445k. Note where it lands and whether left-drag

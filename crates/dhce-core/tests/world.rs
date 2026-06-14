@@ -94,3 +94,37 @@ fn chunks_partition_all_triangles_and_track_edits() {
     assert!(!w.take_dirty_chunks().is_empty(), "an edit flags its chunks dirty");
     assert!(w.take_dirty_chunks().is_empty(), "taking dirty chunks clears them");
 }
+
+#[test]
+fn chunk_grid_is_empty_before_build() {
+    let w = World::new();
+    assert_eq!(w.chunk_grid(), (0, 0), "no grid before build");
+    assert!(w.chunk_centers().is_empty(), "no centers before build");
+}
+
+#[test]
+fn chunk_grid_and_centers_match_the_partition() {
+    let mut w = World::new();
+    let (width, height) = (4000.0, 4000.0);
+    w.build(width, height, 12.0, 7, 5); // dense enough for a multi-tile grid
+
+    let (cols, rows) = w.chunk_grid();
+    assert!(cols > 1 && rows > 1, "a dense world spans several tiles");
+    assert_eq!(cols, rows, "the chunk grid is square");
+    assert_eq!(cols * rows, w.chunk_count(), "the grid covers every chunk exactly");
+
+    let centers = w.chunk_centers();
+    assert_eq!(centers.len(), w.chunk_count() * 2, "one (x, y) per chunk id");
+
+    // Each center sits on its tile's half-step and stays inside the world bounds — this is
+    // the exact mapping the front-end relies on to turn a camera position into visible tiles.
+    let sx = width / cols as f64;
+    let sy = height / rows as f64;
+    for id in 0..w.chunk_count() {
+        let (gx, gy) = (id % cols, id / cols);
+        let (cx, cy) = (centers[2 * id], centers[2 * id + 1]);
+        assert!((cx - (gx as f64 + 0.5) * sx).abs() < 1e-6, "center x is the tile mid-point");
+        assert!((cy - (gy as f64 + 0.5) * sy).abs() < 1e-6, "center y is the tile mid-point");
+        assert!(cx > 0.0 && cx < width && cy > 0.0 && cy < height, "center is in-bounds");
+    }
+}

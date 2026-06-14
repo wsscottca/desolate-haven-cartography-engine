@@ -37,8 +37,13 @@ hand (place characters, tweak). Design:
   cargo with `--manifest-path` from another CWD, also set `$env:CARGO_TARGET_DIR="C:\Users\WSSco\.dhce-build"`.
 - **LNK1104 on test/exe link** = Windows Defender / OneDrive scanning the fresh `.exe`. Kill stale
   test procs by name and retry (clears on its own). A Defender exclusion for `.dhce-build` stops it.
-- Build the DLL: `cargo build -p dhce-godot --release` → `crates/dhce-godot/target/release/dhce_godot.dll`
-  (or `.dhce-build/release/` if CARGO_TARGET_DIR set). Copy to `tool/addons/dhce/dhce_godot.dll`.
+- Build the DLL: dhce-godot is **excluded from the workspace** (`exclude` in root `Cargo.toml` — it
+  needs the gdext toolchain), so `cargo build -p dhce-godot` from the repo root **fails**
+  (`package ID specification did not match any packages`). Build from inside the crate dir:
+  `cd crates/dhce-godot; cargo build --release`. Output → the dir set in `.cargo/config.toml`
+  (currently `C:\Users\WSSco\.dhce-build\release\dhce_godot.dll` — the redirect off OneDrive applies
+  to the excluded crate too, via upward config discovery; the old `crates/dhce-godot/target/release/`
+  path is stale). Copy that DLL to `tool/addons/dhce/dhce_godot.dll`.
 - **The DLL is locked while the Godot editor is open** — to swap it: user closes Godot → copy → reopen.
   **C#-only changes don't need a DLL swap** — just Build in the editor and F5.
 - Git: a repo-scoped push allow-rule exists. Commit + push per phase. **No `Co-Authored-By` on the
@@ -55,12 +60,43 @@ hand (place characters, tweak). Design:
 - Known finding to fix in N2: **startup gen freezes** (~5 s @1.7M — the global Rust `build()` blocks
   the main thread); tessellate-all adds ~0.5 s.
 
-## NEXT: N2 — streaming tool shell  ← start here
+## N2 — streaming tool shell ✅ DONE (verified live 2026-06-14)
 Goal (ADR 0003 render-streaming): a 20 km world opens **instantly** and edits responsively.
-1. **Threaded gen** — run `DhceEngine.build(...)` on a C# `Task`; show a "Generating…" splash; on
-   completion `Callable.From(OnGenDone).CallDeferred()` to return to the main thread for mesh upload.
-   Add `[Export] bool ThreadedGen = true` (sync fallback) — the cross-thread gdext call is the one
-   piece not yet tested live, so keep the escape hatch.
+
+**STATUS — VERIFIED (2026-06-14).** 20 km world (spacing 12 ⇒ **1.71M regions / 3.42M tris / 144
+chunks, 12×12 grid**): window opens instantly on the "Generating…" splash, gen ~5 s behind it, terrain
+fills in progressively, sculpt **3.8–5.9 ms/dab** over ~1.5–2 dirty chunks/dab (well under the ~10 ms
+target). One blocker was found + fixed on the first run (see FINDING below). `cargo test -p dhce-core`
+(24) + `dotnet build` green. What landed:
+- Core: `World::chunk_grid() -> (cols, rows)` + `World::chunk_centers()` (square grid, `id = gy*cols+gx`),
+  stored `chunk_cols/chunk_rows` set in `build_chunks`; exposed via `DhceEngine.chunk_grid()` (Vector2i)
+  + `chunk_centers()` (PackedVector2Array). 2 new world tests.
+- `CartographerSpike.cs`: gen is **splash-deferred on the main thread** — `_Ready` shows a `CanvasLayer`
+  splash, `_Process` fires `build()` after `WarmupFrames` so the splash draws first, then `OnGenDone`
+  creates an empty `MeshInstance3D` per chunk; `_Process` streams nearest-first (`ChunksPerFrame`) within
+  `RenderDistance` tiles of the camera **Target**, freeing far chunks (`ClearSurfaces`). Exports:
+  `RenderDistance`, `ChunksPerFrame`, `TerrainHeightKm` (vertical relief in km; `exaggeration = km*1000/3.0`,
+  0.9 km ⇒ 300). `Main.tscn` → 20 km / spacing 12.
+- Edits: `paint_terrain` rebuilds only dirty chunks that are currently meshed; out-of-range dirty
+  chunks re-tessellate fresh (with the edit) when they next stream in.
+- Note: at 12×12 with `RenderDistance=6` the whole world stays in range (progressive fill, no
+  zoom-out gaps); render-distance freeing only bites on a larger grid or a lower `RenderDistance`.
+- Camera (post-N2): editor-style nav — middle-drag orbit, Shift+middle pan, wheel zoom, right-drag
+  freelook (mouse-look + WASD/QE fly, Shift faster, wheel = speed). Left-drag stays the sculpt tool.
+  Streaming focus reads `OrbitCamera.FocusPoint` (camera→ground ray) instead of an orbit target.
+
+**FINDING — gdext methods cannot be called from a background thread.** The original step-1 plan
+(run `build()` on a C# `Task`, return via `CallDeferred`) does **not** work: Godot rejects the
+cross-thread `_engine.Call("build", …)` with `ERROR: Bug, call error: #1337` (from
+`ExceptionUtils.DebugCheckCallError`), the call is a no-op, and gen "completes" in ~18 ms with
+`regions=0`. There is no C#-`Task`/`Thread`/`WorkerThreadPool` path — they're all non-main-thread, all
+rejected. So gen runs on the main thread; the splash (rendered for a few frames first) covers the one
+~5 s hitch. True off-thread gen would need an async core API (Rust-side thread inside a single gdext
+call) — out of scope; revisit only if the hitch is unacceptable. `ThreadedGen` export removed.
+1. ~~**Threaded gen** — run `DhceEngine.build(...)` on a C# `Task`.~~ **Not viable** — gdext rejects
+   cross-thread `Call` (#1337; see FINDING above). Replaced by **splash-deferred main-thread gen**:
+   show a "Generating…" splash in `_Ready`, then run `build()` from `_Process` after a few frames so
+   the splash is visible during the (blocking) gen.
 2. **Progressive tessellation** — create the N chunk `MeshInstance3D`s, then tessellate a few per
    frame in `_Process` instead of all in `_Ready` (removes the upload hitch; window fills in).
 3. **Render distance** — `[Export] int RenderDistance`; mesh only chunks within that tile-distance of
