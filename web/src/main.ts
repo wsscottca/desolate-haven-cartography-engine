@@ -6,6 +6,7 @@ import { TerrainRenderer } from "./render/terrain";
 import { generateHeightfield } from "./placeholder";
 import { WORLD } from "./config";
 import { buildSettingsPanel, DEFAULTS, type Settings } from "./settings";
+import { Engine } from "./engine";
 
 const canvas = document.getElementById("view") as HTMLCanvasElement;
 const gl = canvas.getContext("webgl2", { antialias: true });
@@ -19,6 +20,12 @@ if (!gl) {
 
 const terrain = new TerrainRenderer(gl);
 const settings: Settings = structuredClone(DEFAULTS);
+let engine: Engine | null = null;
+
+const setStatus = (text: string): void => {
+  const el = document.getElementById("engine-status");
+  if (el) el.textContent = text;
+};
 
 const camera = new OrbitCamera([WORLD.size / 2, WORLD.size / 2, 0], WORLD.size * 1.15);
 
@@ -29,13 +36,43 @@ const requestDraw = () => {
 camera.attach(canvas, requestDraw);
 window.addEventListener("resize", requestDraw);
 
-// Engine settings regenerate the world live; physics settings are stored on
-// `settings.physics` for the liquid sim (consumed from the fluid phase onward).
+// `Detail` maps to mesh spacing — roughly the number of cells across the world.
+const detailToSpacing = (detail: number): number => WORLD.size / detail;
+
+function pushSurface(): void {
+  if (!engine) return;
+  const s = engine.surface(settings.engine.exaggeration);
+  terrain.setMesh(s.positions, s.normals, s.heights, s.indices);
+  setStatus(`engine: dhce-core ${engine.version} · ${s.regionCount.toLocaleString()} cells`);
+}
+
+// Full rebuild: mesh + elevation (seed / detail / octaves), then tessellate.
 function regenerate(): void {
-  const n = settings.engine.detail;
-  const heights = generateHeightfield(n, settings.engine.seed, settings.engine.octaves);
-  terrain.setHeightfield(heights, n, WORLD.size, settings.engine.exaggeration);
+  if (engine) {
+    engine.build(
+      WORLD.size,
+      WORLD.size,
+      detailToSpacing(settings.engine.detail),
+      settings.engine.seed,
+      settings.engine.octaves,
+    );
+    pushSurface();
+  } else {
+    const n = settings.engine.detail;
+    const heights = generateHeightfield(n, settings.engine.seed, settings.engine.octaves);
+    terrain.setHeightfield(heights, n, WORLD.size, settings.engine.exaggeration);
+  }
   requestDraw();
+}
+
+// Vertical scale only — re-tessellate without rebuilding the mesh (cheap).
+function retessellate(): void {
+  if (engine) {
+    pushSurface();
+    requestDraw();
+  } else {
+    regenerate();
+  }
 }
 function applyLighting(): void {
   terrain.setLighting(settings.render.lightAzimuth, settings.render.lightElevation, settings.render.ambient);
@@ -44,13 +81,29 @@ function applyLighting(): void {
 
 const settingsRoot = document.getElementById("settings-body");
 if (settingsRoot) {
-  buildSettingsPanel(settingsRoot, settings, (group) => {
-    if (group === "engine") regenerate();
-    else if (group === "render") applyLighting();
+  buildSettingsPanel(settingsRoot, settings, (group, key) => {
+    if (group === "engine") {
+      if (key === "exaggeration") retessellate();
+      else regenerate();
+    } else if (group === "render") {
+      applyLighting();
+    }
+    // physics: stored on settings.physics for the liquid sim (Phase 3+)
   });
 }
+
 applyLighting();
-regenerate();
+regenerate(); // immediate render on the TS placeholder
+
+// Upgrade to the Rust/WASM engine once it loads (falls back to the placeholder).
+Engine.load().then((loaded) => {
+  if (loaded) {
+    engine = loaded;
+    regenerate();
+  } else {
+    setStatus("engine: TS placeholder (run wasm-pack to build dhce-core)");
+  }
+});
 
 gl.enable(gl.DEPTH_TEST);
 
@@ -87,7 +140,4 @@ for (const btn of Array.from(document.querySelectorAll<HTMLButtonElement>("[data
   });
 }
 
-// Engine status: the WASM engine wires in from Phase 1/2; for now the shell runs on
-// the TS placeholder field.
-const status = document.getElementById("engine-status");
-if (status) status.textContent = "engine: TS placeholder (build the Rust core for dhce-core)";
+// (engine status is managed by setStatus() / the Engine.load() handler above.)

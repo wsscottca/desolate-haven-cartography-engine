@@ -1,6 +1,7 @@
-// 3D terrain-surface renderer: displaces a grid by a height field and shades it
-// procedurally (altitude ramp + lambert). Our own WebGL2 + shaders, no deps.
-// Phase 2 swaps the regular grid for the engine's dual-mesh surface.
+// 3D terrain-surface renderer. Draws an indexed mesh (position + normal + height)
+// with procedural altitude shading and engine-level lighting. Our own WebGL2 +
+// shaders, no deps. The mesh comes from the WASM engine (a TIN over the dual mesh);
+// the placeholder grid path is kept as a fallback.
 import type { Mat4 } from "../math/mat4";
 
 const VERT = `#version 300 es
@@ -76,19 +77,26 @@ export class TerrainRenderer {
     this.light.ambient = ambient;
   }
 
-  /** Build the surface mesh from an `n`×`n` height field (values ~[-1,1]). */
-  setHeightfield(heights: Float32Array, n: number, worldSize: number, heightScale: number): void {
-    const gl = this.gl;
-    const STRIDE = 7; // x,y,z, nx,ny,nz, h
-    const verts = new Float32Array(n * n * STRIDE);
+  /** Upload an engine surface (positions/normals scaled, heights normalized). */
+  setMesh(positions: Float32Array, normals: Float32Array, heights: Float32Array, indices: Uint32Array): void {
+    this.uploadMesh(positions, normals, heights, indices);
+  }
+
+  /** Build + upload a regular-grid surface from an `n`×`n` height field (fallback). */
+  setHeightfield(field: Float32Array, n: number, worldSize: number, heightScale: number): void {
     const cell = worldSize / (n - 1);
-    const at = (i: number, j: number) =>
-      heights[clampi(j, 0, n - 1) * n + clampi(i, 0, n - 1)];
+    const positions = new Float32Array(n * n * 3);
+    const normals = new Float32Array(n * n * 3);
+    const heights = new Float32Array(n * n);
+    const at = (i: number, j: number) => field[clampi(j, 0, n - 1) * n + clampi(i, 0, n - 1)];
 
     for (let j = 0; j < n; j++) {
       for (let i = 0; i < n; i++) {
-        const h = heights[j * n + i];
-        // Normal from central differences in scaled world space.
+        const o = j * n + i;
+        const h = field[o];
+        positions[o * 3] = i * cell;
+        positions[o * 3 + 1] = j * cell;
+        positions[o * 3 + 2] = h * heightScale;
         const hl = at(i - 1, j) * heightScale;
         const hr = at(i + 1, j) * heightScale;
         const hd = at(i, j - 1) * heightScale;
@@ -97,14 +105,10 @@ export class TerrainRenderer {
         const ny = hd - hu;
         const nz = 2 * cell;
         const inv = 1 / Math.hypot(nx, ny, nz);
-        const o = (j * n + i) * STRIDE;
-        verts[o] = i * cell;
-        verts[o + 1] = j * cell;
-        verts[o + 2] = h * heightScale;
-        verts[o + 3] = nx * inv;
-        verts[o + 4] = ny * inv;
-        verts[o + 5] = nz * inv;
-        verts[o + 6] = h;
+        normals[o * 3] = nx * inv;
+        normals[o * 3 + 1] = ny * inv;
+        normals[o * 3 + 2] = nz * inv;
+        heights[o] = h;
       }
     }
 
@@ -120,27 +124,7 @@ export class TerrainRenderer {
         idx[p++] = b; idx[p++] = c; idx[p++] = d;
       }
     }
-    this.indexCount = idx.length;
-
-    this.vao = gl.createVertexArray();
-    gl.bindVertexArray(this.vao);
-
-    const vbo = gl.createBuffer();
-    gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
-    gl.bufferData(gl.ARRAY_BUFFER, verts, gl.STATIC_DRAW);
-    const FS = 4; // bytes per float
-    gl.enableVertexAttribArray(0);
-    gl.vertexAttribPointer(0, 3, gl.FLOAT, false, STRIDE * FS, 0);
-    gl.enableVertexAttribArray(1);
-    gl.vertexAttribPointer(1, 3, gl.FLOAT, false, STRIDE * FS, 3 * FS);
-    gl.enableVertexAttribArray(2);
-    gl.vertexAttribPointer(2, 1, gl.FLOAT, false, STRIDE * FS, 6 * FS);
-
-    const ibo = gl.createBuffer();
-    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ibo);
-    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, idx, gl.STATIC_DRAW);
-
-    gl.bindVertexArray(null);
+    this.uploadMesh(positions, normals, heights, idx);
   }
 
   draw(viewProj: Mat4): void {
@@ -153,6 +137,35 @@ export class TerrainRenderer {
     gl.bindVertexArray(this.vao);
     gl.drawElements(gl.TRIANGLES, this.indexCount, gl.UNSIGNED_INT, 0);
     gl.bindVertexArray(null);
+  }
+
+  private uploadMesh(
+    positions: Float32Array,
+    normals: Float32Array,
+    heights: Float32Array,
+    indices: Uint32Array,
+  ): void {
+    const gl = this.gl;
+    this.vao = gl.createVertexArray();
+    gl.bindVertexArray(this.vao);
+
+    const attrib = (data: Float32Array, loc: number, size: number) => {
+      const buf = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+      gl.bufferData(gl.ARRAY_BUFFER, data, gl.STATIC_DRAW);
+      gl.enableVertexAttribArray(loc);
+      gl.vertexAttribPointer(loc, size, gl.FLOAT, false, 0, 0);
+    };
+    attrib(positions, 0, 3);
+    attrib(normals, 1, 3);
+    attrib(heights, 2, 1);
+
+    const ibo = gl.createBuffer();
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ibo);
+    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, indices, gl.STATIC_DRAW);
+
+    gl.bindVertexArray(null);
+    this.indexCount = indices.length;
   }
 }
 

@@ -1,0 +1,9 @@
+# Keep Cargo build artifacts OUT of OneDrive.
+#
+# This repo lives under OneDrive, which locks files in `target/` mid-sync — causing
+# intermittent `LNK1104: cannot open file ...exe` link errors — and needlessly syncs
+# gigabytes of build output. Redirecting the target dir outside OneDrive fixes both.
+# (Single-machine setup; see the profile CLAUDE.md OneDrive cautions. Adjust this path
+# if you ever build on another machine.)
+[build]
+target-dir = "C:/Users/WSSco/.dhce-build"

@@ -1,8 +1,12 @@
 //! Thin wasm-bindgen adapter exposing `dhce-core` to the browser front-end.
 //!
-//! Phase 0 surfaces just enough to prove the JS↔WASM boundary (version + a terrain
-//! sample). Phase 2 adds the resident `Engine` (mesh + memory views + `generate`).
+//! Phase 2 surfaces a resident `WasmEngine`: `build` constructs the mesh + elevation
+//! (on seed/detail/octaves change), `tessellate` packs the render surface at a given
+//! vertical exaggeration (cheap; no mesh rebuild), and the getters hand the flat
+//! arrays to the renderer. Phase 6 moves this behind a worker + shared memory views.
 
+use dhce_core::mesh::Mesh;
+use dhce_core::{elevation, geometry};
 use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen(start)]
@@ -17,9 +21,73 @@ pub fn version() -> String {
     dhce_core::VERSION.to_string()
 }
 
-/// Sample the placeholder terrain field at `(x, y)` for `seed`.
-/// Phase 2 replaces this with the full mesh/elevation pipeline behind an `Engine`.
+/// Resident generation engine. Holds the mesh + elevation between calls so that
+/// re-styling (exaggeration) doesn't rebuild the triangulation.
 #[wasm_bindgen]
-pub fn sample_terrain(seed: f64, x: f64, y: f64) -> f64 {
-    dhce_core::noise::fbm2(x, y, seed as u64, 6)
+pub struct WasmEngine {
+    width: f64,
+    height: f64,
+    mesh: Option<Mesh>,
+    elevation_r: Vec<f64>,
+    surface: Option<geometry::Surface>,
+}
+
+impl Default for WasmEngine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[wasm_bindgen]
+impl WasmEngine {
+    #[wasm_bindgen(constructor)]
+    pub fn new() -> WasmEngine {
+        WasmEngine {
+            width: 0.0,
+            height: 0.0,
+            mesh: None,
+            elevation_r: Vec::new(),
+            surface: None,
+        }
+    }
+
+    /// Build the mesh + per-region elevation over `[0,width] × [0,height]` at
+    /// `spacing` (smaller = denser), seeded by `seed` with `octaves` of noise.
+    pub fn build(&mut self, width: f64, height: f64, spacing: f64, seed: f64, octaves: u32) {
+        let mesh = Mesh::new(width, height, spacing, seed as u64);
+        self.elevation_r = elevation::assign_region_elevation(&mesh, width, height, seed as u64, octaves);
+        self.width = width;
+        self.height = height;
+        self.mesh = Some(mesh);
+        self.surface = None;
+    }
+
+    /// Pack the render surface at a vertical `exaggeration`. Call after `build`, and
+    /// again (alone) when only the exaggeration changes.
+    pub fn tessellate(&mut self, exaggeration: f64) {
+        if let Some(mesh) = &self.mesh {
+            self.surface = Some(geometry::build_surface(mesh, &self.elevation_r, exaggeration));
+        }
+    }
+
+    // --- surface getters (each returns a fresh typed array to JS) ---
+    pub fn positions(&self) -> Vec<f32> {
+        self.surface.as_ref().map(|s| s.positions.clone()).unwrap_or_default()
+    }
+    pub fn normals(&self) -> Vec<f32> {
+        self.surface.as_ref().map(|s| s.normals.clone()).unwrap_or_default()
+    }
+    pub fn heights(&self) -> Vec<f32> {
+        self.surface.as_ref().map(|s| s.heights.clone()).unwrap_or_default()
+    }
+    pub fn indices(&self) -> Vec<u32> {
+        self.surface.as_ref().map(|s| s.indices.clone()).unwrap_or_default()
+    }
+
+    pub fn region_count(&self) -> usize {
+        self.mesh.as_ref().map(|m| m.num_regions()).unwrap_or(0)
+    }
+    pub fn triangle_count(&self) -> usize {
+        self.mesh.as_ref().map(|m| m.num_triangles()).unwrap_or(0)
+    }
 }
