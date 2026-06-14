@@ -24,6 +24,7 @@ unsafe impl ExtensionLibrary for DhceExtension {}
 struct DhceEngine {
     world: World,
     surface: Option<Surface>,
+    chunk_cache: Option<Surface>,
     liquid: Option<LiquidSurface>,
     scatter_buf: Vec<f32>,
     scatter_n: usize,
@@ -36,6 +37,7 @@ impl IRefCounted for DhceEngine {
         DhceEngine {
             world: World::new(),
             surface: None,
+            chunk_cache: None,
             liquid: None,
             scatter_buf: Vec::new(),
             scatter_n: 0,
@@ -97,6 +99,39 @@ impl DhceEngine {
     #[func]
     fn surface_indices(&self) -> PackedInt32Array {
         self.surface.as_ref().map(|s| u32_to_packed(&s.indices)).unwrap_or_default()
+    }
+
+    // --- terrain chunks (incremental re-tessellation: an edit re-packs only dirty tiles) ---
+
+    #[func]
+    fn chunk_count(&self) -> i64 {
+        self.world.chunk_count() as i64
+    }
+    /// Pack chunk `chunk` at `exaggeration` into the chunk cache, then read the getters.
+    #[func]
+    fn tessellate_chunk(&mut self, chunk: i64, exaggeration: f64) {
+        self.chunk_cache = self.world.chunk_surface(chunk.max(0) as usize, exaggeration);
+    }
+    #[func]
+    fn chunk_positions(&self) -> PackedVector3Array {
+        self.chunk_cache.as_ref().map(|s| to_vec3_yup(&s.positions)).unwrap_or_default()
+    }
+    #[func]
+    fn chunk_normals(&self) -> PackedVector3Array {
+        self.chunk_cache.as_ref().map(|s| to_vec3_yup(&s.normals)).unwrap_or_default()
+    }
+    #[func]
+    fn chunk_colors(&self) -> PackedColorArray {
+        self.chunk_cache.as_ref().map(|s| to_colors(&s.colors)).unwrap_or_default()
+    }
+    #[func]
+    fn chunk_indices(&self) -> PackedInt32Array {
+        self.chunk_cache.as_ref().map(|s| u32_to_packed(&s.indices)).unwrap_or_default()
+    }
+    /// Chunk ids changed by the last edit (cleared by this call); re-tessellate exactly these.
+    #[func]
+    fn take_dirty_chunks(&mut self) -> PackedInt32Array {
+        u32_to_packed(&self.world.take_dirty_chunks())
     }
 
     // --- liquid simulation + render surface ---

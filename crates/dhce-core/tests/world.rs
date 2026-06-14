@@ -69,3 +69,27 @@ fn region_at_finds_an_interior_region_and_selects_its_biome() {
     let same_biome = w.biome_at(r);
     assert!(sel.iter().all(|&s| w.biome_at(s as usize) == same_biome), "selection is single-biome");
 }
+
+#[test]
+fn chunks_partition_all_triangles_and_track_edits() {
+    let mut w = built();
+    assert!(w.chunk_count() > 1, "should partition into several chunks");
+
+    // Each triangle is assigned to exactly one chunk → chunk triangle counts sum to total.
+    let mut tri_total = 0usize;
+    for c in 0..w.chunk_count() {
+        if let Some(s) = w.chunk_surface(c, 100.0) {
+            assert_eq!(s.positions.len(), s.colors.len(), "3 floats per local vertex for both");
+            tri_total += s.indices.len() / 3;
+        }
+    }
+    assert_eq!(tri_total, w.triangle_count(), "chunks partition all triangles exactly once");
+
+    // Fresh build: nothing dirty. An edit flags the chunks under the brush, and taking
+    // them clears the flags.
+    assert!(w.take_dirty_chunks().is_empty(), "no dirty chunks before editing");
+    let touched = w.paint_terrain(500.0, 500.0, 120.0, 0.2, 0);
+    assert!(!touched.is_empty());
+    assert!(!w.take_dirty_chunks().is_empty(), "an edit flags its chunks dirty");
+    assert!(w.take_dirty_chunks().is_empty(), "taking dirty chunks clears them");
+}

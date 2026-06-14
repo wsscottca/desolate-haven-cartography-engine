@@ -15,6 +15,7 @@ use crate::fluid::{self, LiquidField, LiquidSurface};
 use crate::mesh::Mesh;
 use crate::scatter::Instance;
 use crate::{biomes, elevation, geometry, scatter, streams};
+use std::collections::HashMap;
 
 /// Channel-carve depth per unit tool intensity (Course tool).
 const CHANNEL_DEPTH_GAIN: f64 = 6.0;
@@ -28,6 +29,9 @@ const COLOR_VAR: f32 = 0.04;
 /// Elevation clamp shared by every sculpt/carve op (normalized terrain stays in range).
 const ELEV_MIN: f64 = -1.5;
 const ELEV_MAX: f64 = 1.5;
+/// Target chunk count along the longest axis — the rendering partition that lets an edit
+/// re-tessellate only the tiles it touches instead of the whole mesh.
+const CHUNK_AXIS: f64 = 12.0;
 
 /// The authored world: generation output plus every interactive edit applied on top.
 pub struct World {
@@ -57,6 +61,13 @@ pub struct World {
     grid_cols: usize,
     grid_rows: usize,
     grid: Vec<Vec<u32>>,
+    // Rendering chunks: triangles partitioned by centroid into a grid so an edit can
+    // re-tessellate only the affected tiles. `color_cache` is the per-region RGB the chunk
+    // meshes read (full smoothing at build; per-region refresh on edit).
+    chunk_tris: Vec<Vec<u32>>,
+    region_chunks: Vec<Vec<u32>>,
+    chunk_dirty: Vec<bool>,
+    color_cache: Vec<f32>,
 }
 
 impl Default for World {
@@ -100,6 +111,10 @@ impl World {
             grid_cols: 0,
             grid_rows: 0,
             grid: Vec::new(),
+            chunk_tris: Vec::new(),
+            region_chunks: Vec::new(),
+            chunk_dirty: Vec::new(),
+            color_cache: Vec::new(),
         }
     }
 
@@ -150,6 +165,10 @@ impl World {
         self.width = width;
         self.height = height;
         self.mesh = Some(mesh);
+
+        // Partition into rendering chunks and cache smoothed colors for them.
+        self.build_chunks();
+        self.color_cache = self.region_color();
     }
 
     pub fn region_count(&self) -> usize {
@@ -264,6 +283,7 @@ impl World {
         // Elevation changed → re-classify the auto-biome cells under the brush so the
         // coloring tracks the new terrain (manually painted cells stay locked).
         self.reclassify(&touched);
+        self.after_edit(&touched);
         touched
     }
 
@@ -349,6 +369,7 @@ impl World {
             }
         }
         self.reclassify(&touched);
+        self.after_edit(&touched);
         touched
     }
 
@@ -393,6 +414,7 @@ impl World {
 
         let idx: Vec<u32> = (0..n).filter(|&r| res.is_stream[r]).map(|r| r as u32).collect();
         self.reclassify(&idx);
+        self.after_edit(&idx);
     }
 
     // --- biomes ---
@@ -418,6 +440,7 @@ impl World {
                 touched.push(rid);
             }
         }
+        self.after_edit(&touched);
         touched
     }
 
@@ -498,6 +521,7 @@ impl World {
             if region < self.biome_locked.len() {
                 self.biome_locked[region] = true;
             }
+            self.after_edit(&[region as u32]);
         }
     }
 
@@ -728,6 +752,177 @@ impl World {
             let moist = biomes::moisture_at(p[0], p[1], width, height, seed);
             self.biome_r[ri] = biomes::classify(self.elevation_r[ri], moist, dist);
         }
+    }
+
+    // --- rendering chunks (incremental re-tessellation) ---
+
+    /// Partition triangles into a chunk grid by centroid, and record which chunks each
+    /// region participates in (so an edit can flag exactly the affected tiles).
+    fn build_chunks(&mut self) {
+        let mesh = match &self.mesh {
+            Some(m) => m,
+            None => return,
+        };
+        let size = (self.width.max(self.height) / CHUNK_AXIS).max(1.0);
+        let cols = (self.width / size).ceil() as usize + 1;
+        let rows = (self.height / size).ceil() as usize + 1;
+        let nr = mesh.num_regions();
+        let nt = mesh.num_triangles();
+        let mut chunk_tris: Vec<Vec<u32>> = vec![Vec::new(); cols * rows];
+        let mut region_chunks: Vec<Vec<u32>> = vec![Vec::new(); nr];
+        for t in 0..nt {
+            let a = mesh.r_begin_s(3 * t);
+            let b = mesh.r_begin_s(3 * t + 1);
+            let c = mesh.r_begin_s(3 * t + 2);
+            let (pa, pb, pc) = (mesh.pos_of_r(a), mesh.pos_of_r(b), mesh.pos_of_r(c));
+            let cxw = (pa[0] + pb[0] + pc[0]) / 3.0;
+            let cyw = (pa[1] + pb[1] + pc[1]) / 3.0;
+            let gx = ((cxw / size) as usize).min(cols - 1);
+            let gy = ((cyw / size) as usize).min(rows - 1);
+            let ci = (gy * cols + gx) as u32;
+            chunk_tris[ci as usize].push(t as u32);
+            for &r in &[a, b, c] {
+                if !region_chunks[r].contains(&ci) {
+                    region_chunks[r].push(ci);
+                }
+            }
+        }
+        self.chunk_tris = chunk_tris;
+        self.region_chunks = region_chunks;
+        self.chunk_dirty = vec![false; cols * rows];
+    }
+
+    /// After editing `regions`: refresh their cached colors (same jitter as `region_color`,
+    /// minus the neighbour smoothing) and flag the chunks they belong to for re-tessellation.
+    fn after_edit(&mut self, regions: &[u32]) {
+        for &rid in regions {
+            let r = rid as usize;
+            if 3 * r + 2 < self.color_cache.len() {
+                let id = self.biome_r.get(r).copied().unwrap_or(0) as usize;
+                let base = self.biome_color.get(id).copied().unwrap_or([0.5, 0.5, 0.5]);
+                let h = hash_u32(r as u32);
+                let f = 1.0 + ((h & 0xffff) as f32 / 65535.0 - 0.5) * 2.0 * COLOR_VAR;
+                for k in 0..3 {
+                    self.color_cache[3 * r + k] = (base[k] * f).clamp(0.0, 1.0);
+                }
+            }
+            if let Some(chunks) = self.region_chunks.get(r) {
+                for &c in chunks {
+                    if let Some(d) = self.chunk_dirty.get_mut(c as usize) {
+                        *d = true;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Number of rendering chunks.
+    pub fn chunk_count(&self) -> usize {
+        self.chunk_tris.len()
+    }
+
+    /// Chunk ids flagged dirty since the last call, clearing them. The front-end
+    /// re-tessellates exactly these after an edit.
+    pub fn take_dirty_chunks(&mut self) -> Vec<u32> {
+        let mut out = Vec::new();
+        for (i, d) in self.chunk_dirty.iter_mut().enumerate() {
+            if *d {
+                *d = false;
+                out.push(i as u32);
+            }
+        }
+        out
+    }
+
+    /// Pack one chunk's sub-mesh: a local vertex array (the regions used by the chunk's
+    /// triangles), positions at `exaggeration`, cached colors, and area-weighted normals
+    /// from this chunk's triangles. (Boundary normals can differ slightly across chunks — a
+    /// faint seam, acceptable for interactive editing.) `None` on bad index / unbuilt mesh.
+    pub fn chunk_surface(&self, chunk: usize, exaggeration: f64) -> Option<geometry::Surface> {
+        let mesh = self.mesh.as_ref()?;
+        let tris = self.chunk_tris.get(chunk)?;
+        let mut local_of: HashMap<u32, u32> = HashMap::new();
+        let mut globals: Vec<u32> = Vec::new();
+        let mut indices: Vec<u32> = Vec::with_capacity(tris.len() * 3);
+        for &t in tris {
+            for k in 0..3 {
+                let r = mesh.r_begin_s(3 * t as usize + k) as u32;
+                let li = *local_of.entry(r).or_insert_with(|| {
+                    let idx = globals.len() as u32;
+                    globals.push(r);
+                    idx
+                });
+                indices.push(li);
+            }
+        }
+        let n = globals.len();
+        let mut positions = vec![0.0f32; n * 3];
+        let mut heights = vec![0.0f32; n];
+        let mut colors = vec![0.0f32; n * 3];
+        for (li, &r) in globals.iter().enumerate() {
+            let ru = r as usize;
+            let p = mesh.pos_of_r(ru);
+            positions[3 * li] = p[0] as f32;
+            positions[3 * li + 1] = p[1] as f32;
+            positions[3 * li + 2] = (self.elevation_r[ru] * exaggeration) as f32;
+            heights[li] = self.elevation_r[ru] as f32;
+            if 3 * ru + 2 < self.color_cache.len() {
+                colors[3 * li] = self.color_cache[3 * ru];
+                colors[3 * li + 1] = self.color_cache[3 * ru + 1];
+                colors[3 * li + 2] = self.color_cache[3 * ru + 2];
+            } else {
+                colors[3 * li] = 0.5;
+                colors[3 * li + 1] = 0.5;
+                colors[3 * li + 2] = 0.5;
+            }
+        }
+        let mut accum = vec![0.0f64; n * 3];
+        for tri in indices.chunks_exact(3) {
+            let (la, lb, lc) = (tri[0] as usize, tri[1] as usize, tri[2] as usize);
+            let ax = positions[3 * la] as f64;
+            let ay = positions[3 * la + 1] as f64;
+            let az = positions[3 * la + 2] as f64;
+            let bx = positions[3 * lb] as f64;
+            let by = positions[3 * lb + 1] as f64;
+            let bz = positions[3 * lb + 2] as f64;
+            let cx = positions[3 * lc] as f64;
+            let cy = positions[3 * lc + 1] as f64;
+            let cz = positions[3 * lc + 2] as f64;
+            let (ux, uy, uz) = (bx - ax, by - ay, bz - az);
+            let (vx, vy, vz) = (cx - ax, cy - ay, cz - az);
+            let mut nx = uy * vz - uz * vy;
+            let mut ny = uz * vx - ux * vz;
+            let mut nz = ux * vy - uy * vx;
+            if nz < 0.0 {
+                nx = -nx;
+                ny = -ny;
+                nz = -nz;
+            }
+            for &li in &[la, lb, lc] {
+                accum[3 * li] += nx;
+                accum[3 * li + 1] += ny;
+                accum[3 * li + 2] += nz;
+            }
+        }
+        let mut normals = vec![0.0f32; n * 3];
+        for li in 0..n {
+            let (nx, ny, nz) = (accum[3 * li], accum[3 * li + 1], accum[3 * li + 2]);
+            let len = (nx * nx + ny * ny + nz * nz).sqrt();
+            if len > 1e-12 {
+                normals[3 * li] = (nx / len) as f32;
+                normals[3 * li + 1] = (ny / len) as f32;
+                normals[3 * li + 2] = (nz / len) as f32;
+            } else {
+                normals[3 * li + 2] = 1.0;
+            }
+        }
+        Some(geometry::Surface {
+            positions,
+            normals,
+            heights,
+            colors,
+            indices,
+        })
     }
 }
 
