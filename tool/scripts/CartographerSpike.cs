@@ -53,6 +53,7 @@ public partial class CartographerSpike : Node3D
     private GodotObject _engine;
     private OrbitCamera _cam;
     private CanvasLayer _splash;
+    private ToolUi _ui;
 
     // Chunk render state. Nodes are created once (empty); `_built[i]` tracks whether chunk i
     // currently holds a tessellated surface.
@@ -104,6 +105,8 @@ public partial class CartographerSpike : Node3D
         // Scene dressing + camera are mesh-independent, so set them up first — the window is
         // live the instant `_Ready` returns, showing the splash while gen is pending.
         SetupSceneAndCamera();
+        _ui = new ToolUi { Root = this };
+        AddChild(_ui);
         ShowSplash("Generating world…");
         _pendingGen = true; // fired from _Process once the splash has drawn (see WarmupFrames)
     }
@@ -369,6 +372,10 @@ public partial class CartographerSpike : Node3D
         _totalMs += ms;
         _dirtyAccum += dirtyCount;
         if (++_dabs % 30 == 0)
-            GD.Print($"[DHCE] {_dabs} dabs: {_totalMs / _dabs:0.0} ms/dab over {(double)_dirtyAccum / _dabs:0.0} dirty chunks/dab");
+        {
+            string line = $"{_dabs} dabs: {_totalMs / _dabs:0.0} ms/dab over {(double)_dirtyAccum / _dabs:0.0} dirty chunks/dab";
+            GD.Print($"[DHCE] {line}");
+            _ui?.SetStatus(line);
+        }
     }
 }
