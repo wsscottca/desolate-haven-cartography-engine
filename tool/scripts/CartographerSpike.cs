@@ -76,6 +76,11 @@ public partial class CartographerSpike : Node3D
     private double _totalMs;
     private long _dirtyAccum;
 
+    /// Shared tool state: the UI mutates it, left-drag applies it. Seeded from the brush exports.
+    public ToolState Tool { get; } = new ToolState();
+    public GodotObject Engine => _engine;
+    public float Exaggeration => _exaggeration;
+
     public override void _Ready()
     {
         _engine = ClassDB.Instantiate("DhceEngine").AsGodotObject();
@@ -88,6 +93,8 @@ public partial class CartographerSpike : Node3D
         GetWindow().Set("mode", 2); // maximize the window (2 = Window.MODE_MAXIMIZED)
         _exaggeration = TerrainHeightKm * 1000f / ElevSpan;
         _widthM = _heightM = WorldSizeKm * 1000f; // km → metres (1 Godot unit = 1 m)
+        Tool.RadiusM = BrushRadiusM;
+        Tool.Strength = BrushStrength;
 
         // Scene dressing + camera are mesh-independent, so set them up first — the window is
         // live the instant `_Ready` returns, showing the splash while gen is pending.
@@ -276,6 +283,20 @@ public partial class CartographerSpike : Node3D
         _built[i] = false;
     }
 
+    /// Re-tessellate the chunks the last edit dirtied that are currently meshed. Out-of-range
+    /// dirty chunks re-tessellate fresh (reflecting the edit) when they next stream in. Returns
+    /// the dirty-chunk count (for the per-dab timing line).
+    public int RepaintDirtyTerrain()
+    {
+        int[] dirty = _engine.Call("take_dirty_chunks").As<int[]>();
+        foreach (int ci in dirty)
+            if (ci >= 0 && ci < _chunkMeshes.Length && _built[ci]) BuildChunk(ci);
+        return dirty.Length;
+    }
+
+    /// Re-tessellate the whole liquid surface and re-upload it. Implemented in Task 2.
+    public void RebuildLiquid() { }
+
     public override void _UnhandledInput(InputEvent e)
     {
         bool down = e is InputEventMouseButton { ButtonIndex: MouseButton.Left, Pressed: true };
@@ -297,18 +318,14 @@ public partial class CartographerSpike : Node3D
         Vector3 hit = from + dir * t;         // core (x, y) = (hit.X, hit.Z)
 
         ulong t0 = Time.GetTicksUsec();
-        _engine.Call("paint_terrain", (double)hit.X, (double)hit.Z, (double)BrushRadiusM, (double)BrushStrength, 0);
-        int[] dirty = _engine.Call("take_dirty_chunks").As<int[]>();
-        foreach (int ci in dirty)
-        {
-            // Rebuild only chunks currently on screen; out-of-range ones re-tessellate fresh
-            // (reflecting this edit) when they next stream in.
-            if (ci >= 0 && ci < _chunkMeshes.Length && _built[ci]) BuildChunk(ci);
-        }
+        EditResult res = Tool.Apply(_engine, hit);
+        int dirtyCount = 0;
+        if (res.HasFlag(EditResult.Terrain)) dirtyCount = RepaintDirtyTerrain();
+        if (res.HasFlag(EditResult.Liquid)) RebuildLiquid();
         double ms = (Time.GetTicksUsec() - t0) / 1000.0;
 
         _totalMs += ms;
-        _dirtyAccum += dirty.Length;
+        _dirtyAccum += dirtyCount;
         if (++_dabs % 30 == 0)
             GD.Print($"[DHCE] {_dabs} dabs: {_totalMs / _dabs:0.0} ms/dab over {(double)_dirtyAccum / _dabs:0.0} dirty chunks/dab");
     }
