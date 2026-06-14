@@ -1,0 +1,21 @@
+; Engine configuration file for the DHCE cartography tool (native pivot).
+; Bootstrap project file — the Godot editor manages it from here and generates the
+; .sln/.csproj on first C# build. Renderer matches the desolate-haven game (GL
+; Compatibility). See tool/N0-SETUP.md for the import + run steps.
+
+config_version=5
+
+[application]
+
+config/name="DHCE Cartographer"
+config/features=PackedStringArray("4.6", "C#", "GL Compatibility")
+run/main_scene="res://Main.tscn"
+
+[dotnet]
+
+project/assembly_name="DhceCartographer"
+
+[rendering]
+
+renderer/rendering_method="gl_compatibility"
+renderer/rendering_method.mobile="gl_compatibility"
