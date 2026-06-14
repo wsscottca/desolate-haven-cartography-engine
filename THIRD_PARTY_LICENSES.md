@@ -34,6 +34,16 @@ the Delaunay triangulation:
 | build-macro tree: `proc-macro2`, `quote`, `syn`, `bumpalo`, `cfg-if`, `once_cell`, `rustversion`, `log` | MIT OR Apache-2.0 | Transitive; MIT election. |
 | `unicode-ident` | (MIT OR Apache-2.0) AND Unicode-3.0 | Transitive; all parts permissive. |
 
+## Runtime — Godot adapter (`crates/dhce-godot`, built separately)
+
+Excluded from the default Cargo workspace and built on its own, so the web license
+gate does not scan it; recorded here for completeness.
+
+| Crate | License | Notes |
+|---|---|---|
+| `godot` + `godot-core`/`-ffi`/`-codegen`/`-macros`/`-bindings`/`-cell`, `gdextension-api` | MPL-2.0 | godot-rust/gdext; weak (file-level) copyleft — permitted. |
+| `glam`, `venial`, `nanoserde`, `regex` (+ `regex-*`, `aho-corasick`), `paste`, `heck` | MIT / MIT OR Apache-2.0 | Transitive; permissive (MIT election). |
+
 ## Runtime — Web front-end (`web/`)
 
 | Package | License | Notes |
