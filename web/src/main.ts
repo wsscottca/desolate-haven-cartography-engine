@@ -8,6 +8,8 @@ import { WORLD } from "./config";
 import { buildSettingsPanel, DEFAULTS, type Settings } from "./settings";
 import { Engine } from "./engine";
 import { LiquidRenderer } from "./render/liquid";
+import { invert, transformPoint } from "./math/mat4";
+import { sub } from "./math/vec3";
 
 const canvas = document.getElementById("view") as HTMLCanvasElement;
 const gl = canvas.getContext("webgl2", { antialias: true });
@@ -32,6 +34,7 @@ const setStatus = (text: string): void => {
 const camera = new OrbitCamera([WORLD.size / 2, WORLD.size / 2, 0], WORLD.size * 1.15);
 
 let needsDraw = true;
+let needsRetess = false; // coalesce brush re-tessellation to once per frame
 const requestDraw = () => {
   needsDraw = true;
 };
@@ -158,6 +161,13 @@ function resize(): void {
 
 function frame(): void {
   resize();
+  // Re-tessellate once per frame after any brush strokes this frame.
+  if (engine && needsRetess) {
+    needsRetess = false;
+    pushSurface();
+    pushLiquid();
+    needsDraw = true;
+  }
   // Advance the liquid settle animation (one relaxation step per frame).
   if (engine && settleFrames > 0) {
     engine.stepFluid(physicsFlowRate(), settings.physics.evaporation, 1);
@@ -179,12 +189,75 @@ function frame(): void {
 }
 requestAnimationFrame(frame);
 
-// Tool dock — Phase 0 shows selection state only; wiring lands in Phase 4.
+// --- tools: left-click paints with the active dock tool ---
+let activeTool = "raise";
 for (const btn of Array.from(document.querySelectorAll<HTMLButtonElement>("[data-tool]"))) {
   btn.addEventListener("click", () => {
     for (const b of Array.from(document.querySelectorAll("[data-tool]"))) b.classList.remove("active");
     btn.classList.add("active");
+    activeTool = btn.dataset.tool ?? activeTool;
   });
 }
+
+const liquidSelect = document.getElementById("liquid-type") as HTMLSelectElement | null;
+const liquidKind = (): number => (liquidSelect?.value === "lava" ? 1 : 0);
+const SCULPT_MODE: Record<string, number> = { raise: 0, carve: 1, level: 2, crest: 3 };
+
+// Unproject a screen point onto the z = 0 ground plane → world (x, y), or null.
+function pickGround(clientX: number, clientY: number): [number, number] | null {
+  const rect = canvas.getBoundingClientRect();
+  const nx = ((clientX - rect.left) / rect.width) * 2 - 1;
+  const ny = -(((clientY - rect.top) / rect.height) * 2 - 1);
+  const aspect = canvas.width / Math.max(1, canvas.height);
+  const inv = invert(camera.viewProj(aspect));
+  if (!inv) return null;
+  const near = transformPoint(inv, [nx, ny, -1]);
+  const far = transformPoint(inv, [nx, ny, 1]);
+  const dir = sub(far, near);
+  if (Math.abs(dir[2]) < 1e-9) return null;
+  const t = -near[2] / dir[2];
+  if (t < 0) return null;
+  return [near[0] + dir[0] * t, near[1] + dir[1] * t];
+}
+
+function paintAt(clientX: number, clientY: number): void {
+  if (!engine) return;
+  const hit = pickGround(clientX, clientY);
+  if (!hit) return;
+  const r = settings.tools.brushRadius;
+  const s = settings.tools.strength;
+  if (activeTool in SCULPT_MODE) {
+    engine.paintTerrain(hit[0], hit[1], r, s, SCULPT_MODE[activeTool]);
+    settleFrames = Math.max(settleFrames, 20); // liquid re-settles to the new terrain
+  } else if (activeTool === "course" || activeTool === "flood") {
+    const amount = activeTool === "flood" ? s * 6 : s * 1.5;
+    engine.paintLiquid(hit[0], hit[1], r, amount, liquidKind());
+    settleFrames = Math.max(settleFrames, 40);
+  } else {
+    return;
+  }
+  needsRetess = true;
+}
+
+let painting = false;
+canvas.addEventListener("pointerdown", (e) => {
+  if (e.button !== 0) return; // left only; right/middle drive the camera
+  painting = true;
+  canvas.setPointerCapture(e.pointerId);
+  paintAt(e.clientX, e.clientY);
+});
+canvas.addEventListener("pointermove", (e) => {
+  if (painting) paintAt(e.clientX, e.clientY);
+});
+const endPaint = (e: PointerEvent) => {
+  painting = false;
+  try {
+    canvas.releasePointerCapture(e.pointerId);
+  } catch {
+    /* capture already released */
+  }
+};
+canvas.addEventListener("pointerup", endPaint);
+canvas.addEventListener("pointercancel", endPaint);
 
 // (engine status is managed by setStatus() / the Engine.load() handler above.)

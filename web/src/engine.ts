@@ -43,6 +43,9 @@ interface WasmEngineHandle {
   liquid_normals(): Float32Array;
   liquid_types(): Float32Array;
   liquid_indices(): Uint32Array;
+  // brush tools
+  paint_terrain(cx: number, cy: number, radius: number, strength: number, mode: number): void;
+  paint_liquid(cx: number, cy: number, radius: number, amount: number, kind: number): void;
 }
 
 export class Engine {
@@ -112,5 +115,15 @@ export class Engine {
       types: this.handle.liquid_types(),
       indices: this.handle.liquid_indices(),
     };
+  }
+
+  // --- brush tools ---
+  /** Sculpt terrain: mode 0 raise, 1 carve, 2 level, 3 crest. */
+  paintTerrain(cx: number, cy: number, radius: number, strength: number, mode: number): void {
+    this.handle.paint_terrain(cx, cy, radius, strength, mode);
+  }
+  /** Place liquid `kind` (0 water, 1 lava) under the brush. */
+  paintLiquid(cx: number, cy: number, radius: number, amount: number, kind: number): void {
+    this.handle.paint_liquid(cx, cy, radius, amount, kind);
   }
 }

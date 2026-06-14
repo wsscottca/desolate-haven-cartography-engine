@@ -128,6 +128,74 @@ impl WasmEngine {
         self.field.clear();
     }
 
+    // --- brush tools (Phase 4) ---
+    /// Sculpt the terrain under `(cx, cy)` within `radius`. `mode`: 0 raise, 1 carve,
+    /// 2 level (toward the height at the brush center), 3 crest (sharp peak).
+    /// `strength` is the per-application elevation delta. JS re-tessellates after.
+    pub fn paint_terrain(&mut self, cx: f64, cy: f64, radius: f64, strength: f64, mode: u32) {
+        let mesh = match &self.mesh {
+            Some(m) => m,
+            None => return,
+        };
+        let r2 = radius * radius;
+
+        // Center height for the level tool (nearest region to the cursor).
+        let mut center_e = 0.0;
+        if mode == 2 {
+            let mut best = f64::INFINITY;
+            for ri in 0..mesh.num_regions() {
+                let p = mesh.pos_of_r(ri);
+                let d2 = (p[0] - cx).powi(2) + (p[1] - cy).powi(2);
+                if d2 < best {
+                    best = d2;
+                    center_e = self.elevation_r[ri];
+                }
+            }
+        }
+
+        for ri in 0..mesh.num_regions() {
+            let p = mesh.pos_of_r(ri);
+            let d2 = (p[0] - cx).powi(2) + (p[1] - cy).powi(2);
+            if d2 >= r2 {
+                continue;
+            }
+            let t = 1.0 - (d2 / r2).sqrt(); // 1 at center → 0 at the rim
+            let w = t * t * (3.0 - 2.0 * t); // smoothstep falloff
+            let e = &mut self.elevation_r[ri];
+            match mode {
+                0 => *e += strength * w,
+                1 => *e -= strength * w,
+                2 => *e += (center_e - *e) * w * 0.5,
+                3 => *e += strength * (t * t * t) * 2.5, // sharper, peaked
+                _ => {}
+            }
+            *e = e.clamp(-1.5, 1.5);
+        }
+    }
+
+    /// Place `amount` of liquid `kind` (0 water, 1 lava) under `(cx, cy)` within
+    /// `radius`. Used by the Course (trickle) and Flood (pour) tools.
+    pub fn paint_liquid(&mut self, cx: f64, cy: f64, radius: f64, amount: f64, kind: u32) {
+        let mesh = match &self.mesh {
+            Some(m) => m,
+            None => return,
+        };
+        let r2 = radius * radius;
+        for ri in 0..mesh.num_regions() {
+            let p = mesh.pos_of_r(ri);
+            let d2 = (p[0] - cx).powi(2) + (p[1] - cy).powi(2);
+            if d2 >= r2 {
+                continue;
+            }
+            let t = 1.0 - (d2 / r2).sqrt();
+            let add = amount * t * t * (3.0 - 2.0 * t);
+            if add > 0.0 {
+                self.field.depth[ri] += add;
+                self.field.kind[ri] = kind as u8;
+            }
+        }
+    }
+
     /// Pack the liquid render surface at a vertical `exaggeration`.
     pub fn tessellate_liquid(&mut self, exaggeration: f64) {
         if let Some(mesh) = &self.mesh {

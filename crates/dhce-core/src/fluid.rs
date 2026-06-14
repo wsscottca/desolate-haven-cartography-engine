@@ -106,6 +106,7 @@ pub fn relax_step(
         }
 
         let movable = w * flow_rate;
+        let src_kind = field.kind[r];
         for &nb in &neighbors[r] {
             let nb = nb as usize;
             let surf_n = terrain[nb] + field.depth[nb];
@@ -115,6 +116,10 @@ pub fn relax_step(
                 let amt = (movable * (drop / total_drop)).min(drop * 0.5);
                 delta[r] -= amt;
                 delta[nb] += amt;
+                // Liquid carries its type into dry cells it flows into (lava stays lava).
+                if field.depth[nb] <= WET && field.kind[nb] == 0 {
+                    field.kind[nb] = src_kind;
+                }
             }
         }
     }

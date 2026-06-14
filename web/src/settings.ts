@@ -9,6 +9,11 @@ export interface EngineSettings {
   exaggeration: number; // vertical scale
 }
 
+export interface ToolSettings {
+  brushRadius: number; // world units
+  strength: number; // sculpt delta / liquid amount factor
+}
+
 export interface RenderSettings {
   lightAzimuth: number; // degrees
   lightElevation: number; // degrees above the ground plane
@@ -29,6 +34,7 @@ export interface PhysicsSettings {
 
 export interface Settings {
   engine: EngineSettings;
+  tools: ToolSettings;
   render: RenderSettings;
   liquids: LiquidSettings;
   physics: PhysicsSettings;
@@ -38,6 +44,7 @@ export type Group = keyof Settings;
 
 export const DEFAULTS: Settings = {
   engine: { seed: 12345, detail: 256, octaves: 6, exaggeration: 120 },
+  tools: { brushRadius: 60, strength: 0.04 },
   render: { lightAzimuth: 51, lightElevation: 50, ambient: 0.38 },
   liquids: { seaLevel: 0.0 },
   physics: { gravity: 9.8, viscosity: 1.0, flowRate: 0.5, evaporation: 0.002, solverIters: 40 },
@@ -59,6 +66,8 @@ const SPECS: Spec[] = [
   { group: "engine", key: "detail", label: "Detail", min: 64, max: 512, step: 32, integer: true },
   { group: "engine", key: "octaves", label: "Noise octaves", min: 1, max: 8, step: 1, integer: true },
   { group: "engine", key: "exaggeration", label: "Vertical scale", min: 0, max: 300, step: 5, integer: true },
+  { group: "tools", key: "brushRadius", label: "Brush size", min: 10, max: 250, step: 5, integer: true },
+  { group: "tools", key: "strength", label: "Strength", min: 0.005, max: 0.15, step: 0.005 },
   { group: "render", key: "lightAzimuth", label: "Light azimuth", min: 0, max: 360, step: 1, integer: true },
   { group: "render", key: "lightElevation", label: "Light elevation", min: 0, max: 90, step: 1, integer: true },
   { group: "render", key: "ambient", label: "Ambient", min: 0, max: 1, step: 0.02 },
@@ -80,8 +89,8 @@ export function buildSettingsPanel(
   onChange: (group: Group, key: string) => void,
 ): void {
   root.replaceChildren();
-  const labels: Record<Group, string> = { engine: "Engine", render: "Lighting", liquids: "Liquids", physics: "Physics" };
-  for (const group of ["engine", "render", "liquids", "physics"] as Group[]) {
+  const labels: Record<Group, string> = { engine: "Engine", tools: "Tools", render: "Lighting", liquids: "Liquids", physics: "Physics" };
+  for (const group of ["engine", "tools", "render", "liquids", "physics"] as Group[]) {
     const header = document.createElement("div");
     header.className = "group-label";
     header.textContent = labels[group];
