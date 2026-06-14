@@ -1,14 +1,17 @@
-//! GDExtension adapter exposing `dhce-core` to the Godot `desolate-haven` game.
+//! GDExtension adapter exposing `dhce-core` to Godot (the cartography tool + the game).
 //!
-//! `DhceEngine` (a `RefCounted`) wraps the shared core so the game generates the same
-//! terrain + biomes as the browser authoring tool. Determinism is guaranteed by the
-//! core (same seed/inputs ⇒ identical output on wasm32 and native).
+//! `DhceEngine` (a `RefCounted`) wraps the shared [`dhce_core::world::World`]: all state
+//! and compute live in the core, so this adapter only marshals types across the
+//! GDExtension boundary and caches the packed render surfaces. Determinism is guaranteed
+//! by the core (same seed/inputs/edits ⇒ identical output on wasm32 and native), so a
+//! world authored in the tool reproduces exactly in the game.
 //!
-//! See `docs/specs/dhce-core-contract.md` for the full contract. Pin the `godot`
-//! crate version to the project's Godot 4.x build.
+//! See `docs/specs/dhce-core-contract.md` for the full contract. Pin the `godot` crate
+//! version to the project's Godot 4.x build.
 
-use dhce_core::mesh::Mesh;
-use dhce_core::{biomes, elevation, geometry};
+use dhce_core::fluid::LiquidSurface;
+use dhce_core::geometry::Surface;
+use dhce_core::world::World;
 use godot::prelude::*;
 
 struct DhceExtension;
@@ -19,11 +22,11 @@ unsafe impl ExtensionLibrary for DhceExtension {}
 #[derive(GodotClass)]
 #[class(base = RefCounted)]
 struct DhceEngine {
-    width: f64,
-    height: f64,
-    mesh: Option<Mesh>,
-    elevation_r: Vec<f64>,
-    biome_r: Vec<u8>,
+    world: World,
+    surface: Option<Surface>,
+    liquid: Option<LiquidSurface>,
+    scatter_buf: Vec<f32>,
+    scatter_n: usize,
     base: Base<RefCounted>,
 }
 
@@ -31,11 +34,11 @@ struct DhceEngine {
 impl IRefCounted for DhceEngine {
     fn init(base: Base<RefCounted>) -> Self {
         DhceEngine {
-            width: 0.0,
-            height: 0.0,
-            mesh: None,
-            elevation_r: Vec::new(),
-            biome_r: Vec::new(),
+            world: World::new(),
+            surface: None,
+            liquid: None,
+            scatter_buf: Vec::new(),
+            scatter_n: 0,
             base,
         }
     }
@@ -43,98 +46,240 @@ impl IRefCounted for DhceEngine {
 
 #[godot_api]
 impl DhceEngine {
-    /// Build mesh + per-region elevation + biome classification.
+    // --- build / metadata ---
+
+    /// Build mesh + per-region elevation + auto biome classification.
     #[func]
     fn build(&mut self, width: f64, height: f64, spacing: f64, seed: f64, octaves: i64) {
-        let mesh = Mesh::new(width, height, spacing, seed as u64);
-        let nr = mesh.num_regions();
-        self.elevation_r = elevation::assign_region_elevation(&mesh, width, height, seed as u64, octaves as u32);
-
-        let cx = width * 0.5;
-        let cy = height * 0.5;
-        let max_d = 0.5 * (width * width + height * height).sqrt();
-        let mut biome_r = vec![0u8; nr];
-        for r in 0..nr {
-            let p = mesh.pos_of_r(r);
-            let dist = ((p[0] - cx).powi(2) + (p[1] - cy).powi(2)).sqrt() / max_d;
-            let moist = biomes::moisture_at(p[0], p[1], width, height, seed as u64);
-            biome_r[r] = biomes::classify(self.elevation_r[r], moist, dist);
-        }
-        self.biome_r = biome_r;
-        self.width = width;
-        self.height = height;
-        self.mesh = Some(mesh);
+        self.world.build(width, height, spacing, seed as u64, octaves.max(1) as u32);
+        self.surface = None;
+        self.liquid = None;
     }
 
     #[func]
     fn region_count(&self) -> i64 {
-        self.mesh.as_ref().map(|m| m.num_regions() as i64).unwrap_or(0)
+        self.world.region_count() as i64
     }
-
+    #[func]
+    fn triangle_count(&self) -> i64 {
+        self.world.triangle_count() as i64
+    }
     #[func]
     fn version(&self) -> GString {
         GString::from(dhce_core::VERSION)
     }
 
-    /// Biome id (1..=14, 0 = none) for a region.
+    // --- terrain render surface (pack once, read each array) ---
+
+    /// Pack the terrain render surface at a vertical `exaggeration` into the cache.
+    #[func]
+    fn tessellate(&mut self, exaggeration: f64) {
+        self.surface = self.world.surface(exaggeration);
+    }
+    #[func]
+    fn surface_positions(&self) -> PackedFloat32Array {
+        self.surface.as_ref().map(|s| PackedFloat32Array::from(s.positions.as_slice())).unwrap_or_default()
+    }
+    #[func]
+    fn surface_normals(&self) -> PackedFloat32Array {
+        self.surface.as_ref().map(|s| PackedFloat32Array::from(s.normals.as_slice())).unwrap_or_default()
+    }
+    #[func]
+    fn surface_colors(&self) -> PackedFloat32Array {
+        self.surface.as_ref().map(|s| PackedFloat32Array::from(s.colors.as_slice())).unwrap_or_default()
+    }
+    #[func]
+    fn surface_heights(&self) -> PackedFloat32Array {
+        self.surface.as_ref().map(|s| PackedFloat32Array::from(s.heights.as_slice())).unwrap_or_default()
+    }
+    #[func]
+    fn surface_indices(&self) -> PackedInt32Array {
+        self.surface.as_ref().map(|s| u32_to_packed(&s.indices)).unwrap_or_default()
+    }
+
+    // --- liquid simulation + render surface ---
+
+    #[func]
+    fn set_sea_level(&mut self, level: f64) {
+        self.world.set_sea_level(level);
+    }
+    #[func]
+    fn rain(&mut self, amount: f64) {
+        self.world.rain(amount);
+    }
+    #[func]
+    fn step_fluid(&mut self, flow_rate: f64, evaporation: f64, substeps: i64) {
+        self.world.step_fluid(flow_rate, evaporation, substeps.max(0) as u32);
+    }
+    #[func]
+    fn clear_liquid(&mut self) {
+        self.world.clear_liquid();
+    }
+    #[func]
+    fn tessellate_liquid(&mut self, exaggeration: f64) {
+        self.liquid = self.world.liquid_surface(exaggeration);
+    }
+    #[func]
+    fn liquid_positions(&self) -> PackedFloat32Array {
+        self.liquid.as_ref().map(|s| PackedFloat32Array::from(s.positions.as_slice())).unwrap_or_default()
+    }
+    #[func]
+    fn liquid_normals(&self) -> PackedFloat32Array {
+        self.liquid.as_ref().map(|s| PackedFloat32Array::from(s.normals.as_slice())).unwrap_or_default()
+    }
+    #[func]
+    fn liquid_types(&self) -> PackedFloat32Array {
+        self.liquid.as_ref().map(|s| PackedFloat32Array::from(s.types.as_slice())).unwrap_or_default()
+    }
+    #[func]
+    fn liquid_indices(&self) -> PackedInt32Array {
+        self.liquid.as_ref().map(|s| u32_to_packed(&s.indices)).unwrap_or_default()
+    }
+
+    // --- brush tools (return touched region ids for partial mesh updates) ---
+
+    #[func]
+    fn paint_terrain(&mut self, cx: f64, cy: f64, radius: f64, strength: f64, mode: i64) -> PackedInt32Array {
+        u32_to_packed(&self.world.paint_terrain(cx, cy, radius, strength, mode.max(0) as u32))
+    }
+    #[func]
+    fn paint_liquid(&mut self, cx: f64, cy: f64, radius: f64, amount: f64, kind: i64) {
+        self.world.paint_liquid(cx, cy, radius, amount, kind.max(0) as u8);
+    }
+    #[func]
+    fn paint_course(&mut self, cx: f64, cy: f64, radius: f64, intensity: f64, kind: i64) -> PackedInt32Array {
+        u32_to_packed(&self.world.paint_course(cx, cy, radius, intensity, kind.max(0) as u8))
+    }
+    #[func]
+    fn generate_streams(&mut self, threshold: f64, depth_gain: f64) {
+        self.world.generate_streams(threshold, depth_gain);
+    }
+
+    // --- biomes ---
+
+    #[func]
+    fn paint_biome(&mut self, cx: f64, cy: f64, radius: f64, biome_id: i64) -> PackedInt32Array {
+        u32_to_packed(&self.world.paint_biome(cx, cy, radius, biome_id.max(0) as u8))
+    }
+    #[func]
+    fn set_biome_color(&mut self, id: i64, r: f64, g: f64, b: f64) {
+        self.world.set_biome_color(id.max(0) as usize, r as f32, g as f32, b as f32);
+    }
+    #[func]
+    fn biome_color_of(&self, id: i64) -> PackedFloat32Array {
+        PackedFloat32Array::from(self.world.biome_color_of(id.max(0) as usize).as_slice())
+    }
+    #[func]
+    fn biome_landform_of(&self, id: i64) -> PackedFloat32Array {
+        PackedFloat32Array::from(self.world.biome_landform_of(id.max(0) as usize).as_slice())
+    }
+    #[func]
+    fn biome_water_of(&self, id: i64) -> PackedFloat32Array {
+        PackedFloat32Array::from(self.world.biome_water_of(id.max(0) as usize).as_slice())
+    }
+    #[func]
+    fn set_biome_landform(&mut self, id: i64, idx: i64, v: f64) {
+        self.world.set_biome_landform(id.max(0) as usize, idx.max(0) as usize, v as f32);
+    }
+    #[func]
+    fn set_biome_water(&mut self, id: i64, idx: i64, v: f64) {
+        self.world.set_biome_water(id.max(0) as usize, idx.max(0) as usize, v as f32);
+    }
+
+    // --- selection / boundary tools ---
+
+    /// Region nearest to world `(x, y)`, excluding the boundary frame; `-1` if none.
+    #[func]
+    fn region_at(&self, x: f64, y: f64) -> i64 {
+        self.world.region_at(x, y).map(|r| r as i64).unwrap_or(-1)
+    }
     #[func]
     fn biome_at(&self, region: i64) -> i64 {
-        self.biome_r.get(region as usize).copied().unwrap_or(0) as i64
+        self.world.biome_at(region.max(0) as usize) as i64
+    }
+    #[func]
+    fn set_biome_of(&mut self, region: i64, id: i64) {
+        self.world.set_biome_of(region.max(0) as usize, id.max(0) as u8);
+    }
+    #[func]
+    fn select_contiguous(&self, region: i64) -> PackedInt32Array {
+        u32_to_packed(&self.world.select_contiguous(region.max(0) as usize))
+    }
+    #[func]
+    fn selection_indices(&self, regions: PackedInt32Array) -> PackedInt32Array {
+        let regs: Vec<u32> = regions.to_vec().iter().map(|&i| i as u32).collect();
+        u32_to_packed(&self.world.selection_indices(&regs))
+    }
+    #[func]
+    fn regions_in_polygon(&self, xs: PackedFloat32Array, ys: PackedFloat32Array) -> PackedInt32Array {
+        let xs: Vec<f64> = xs.to_vec().iter().map(|&v| v as f64).collect();
+        let ys: Vec<f64> = ys.to_vec().iter().map(|&v| v as f64).collect();
+        u32_to_packed(&self.world.regions_in_polygon(&xs, &ys))
     }
 
-    /// Surface vertex positions (x, y, z per vertex) at a vertical exaggeration.
+    // --- save / load (authored state) ---
+
     #[func]
-    fn surface_positions(&self, exaggeration: f64) -> PackedFloat32Array {
-        self.surface(exaggeration)
-            .map(|s| PackedFloat32Array::from(s.positions.as_slice()))
-            .unwrap_or_default()
+    fn course_mask_export(&self) -> PackedByteArray {
+        PackedByteArray::from(self.world.course_mask_export().as_slice())
+    }
+    #[func]
+    fn set_course_mask(&mut self, m: PackedByteArray) {
+        self.world.set_course_mask(&m.to_vec());
+    }
+    #[func]
+    fn elevation_export(&self) -> PackedFloat32Array {
+        PackedFloat32Array::from(self.world.elevation_export().as_slice())
+    }
+    #[func]
+    fn biome_export(&self) -> PackedByteArray {
+        PackedByteArray::from(self.world.biome_export().as_slice())
+    }
+    #[func]
+    fn liquid_depth_export(&self) -> PackedFloat32Array {
+        PackedFloat32Array::from(self.world.liquid_depth_export().as_slice())
+    }
+    #[func]
+    fn liquid_kind_export(&self) -> PackedByteArray {
+        PackedByteArray::from(self.world.liquid_kind_export().as_slice())
+    }
+    #[func]
+    fn set_elevation(&mut self, e: PackedFloat32Array) {
+        self.world.set_elevation(&e.to_vec());
+    }
+    #[func]
+    fn set_biome(&mut self, b: PackedByteArray) {
+        self.world.set_biome(&b.to_vec());
+    }
+    #[func]
+    fn set_liquid(&mut self, depth: PackedFloat32Array, kind: PackedByteArray) {
+        self.world.set_liquid(&depth.to_vec(), &kind.to_vec());
     }
 
-    /// Surface vertex normals (3 per vertex).
-    #[func]
-    fn surface_normals(&self, exaggeration: f64) -> PackedFloat32Array {
-        self.surface(exaggeration)
-            .map(|s| PackedFloat32Array::from(s.normals.as_slice()))
-            .unwrap_or_default()
-    }
+    // --- decoration scatter ---
 
-    /// Surface vertex colors (3 per vertex, from each region's biome).
     #[func]
-    fn surface_colors(&self, exaggeration: f64) -> PackedFloat32Array {
-        self.surface(exaggeration)
-            .map(|s| PackedFloat32Array::from(s.colors.as_slice()))
-            .unwrap_or_default()
-    }
-
-    /// Surface triangle indices (3 per triangle).
-    #[func]
-    fn surface_indices(&self, exaggeration: f64) -> PackedInt32Array {
-        match self.surface(exaggeration) {
-            Some(s) => {
-                let v: Vec<i32> = s.indices.iter().map(|&i| i as i32).collect();
-                PackedInt32Array::from(v.as_slice())
-            }
-            None => PackedInt32Array::new(),
+    fn tessellate_scatter(&mut self, exaggeration: f64, density: f64, seed: f64) {
+        let inst = self.world.scatter_instances(exaggeration, density, seed as u64);
+        let mut data = Vec::with_capacity(inst.len() * 5);
+        for i in &inst {
+            data.extend_from_slice(&[i.x, i.y, i.z, i.scale, i.species]);
         }
+        self.scatter_n = inst.len();
+        self.scatter_buf = data;
+    }
+    #[func]
+    fn scatter_data(&self) -> PackedFloat32Array {
+        PackedFloat32Array::from(self.scatter_buf.as_slice())
+    }
+    #[func]
+    fn scatter_count(&self) -> i64 {
+        self.scatter_n as i64
     }
 }
 
-impl DhceEngine {
-    /// Build the render surface with per-region biome colors. Not exported to Godot.
-    fn surface(&self, exaggeration: f64) -> Option<geometry::Surface> {
-        let mesh = self.mesh.as_ref()?;
-        let roster = biomes::roster();
-        let nr = mesh.num_regions();
-        let mut rc = vec![0.5f32; nr * 3];
-        for r in 0..nr {
-            let id = self.biome_r.get(r).copied().unwrap_or(0);
-            if id >= 1 && (id as usize) <= biomes::BIOME_COUNT {
-                let c = roster[(id - 1) as usize].color;
-                rc[3 * r] = c[0];
-                rc[3 * r + 1] = c[1];
-                rc[3 * r + 2] = c[2];
-            }
-        }
-        Some(geometry::build_surface(mesh, &self.elevation_r, exaggeration, &rc))
-    }
+/// Pack `u32` region/triangle indices into a Godot `PackedInt32Array`.
+fn u32_to_packed(v: &[u32]) -> PackedInt32Array {
+    let s: Vec<i32> = v.iter().map(|&i| i as i32).collect();
+    PackedInt32Array::from(s.as_slice())
 }

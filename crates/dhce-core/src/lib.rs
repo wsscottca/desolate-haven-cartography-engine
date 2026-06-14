@@ -24,6 +24,7 @@ pub mod liquids;
 pub mod geometry;
 pub mod biomes;
 pub mod scatter;
+pub mod world;
 
 /// Engine version, surfaced to front-ends for diagnostics and the JS↔WASM smoke test.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
