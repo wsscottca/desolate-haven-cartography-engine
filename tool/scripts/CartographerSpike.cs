@@ -60,6 +60,11 @@ public partial class CartographerSpike : Node3D
     private ArrayMesh[] _chunkMeshes;
     private bool[] _built;
     private StandardMaterial3D _mat;
+    private MeshInstance3D _liquid;
+    private ArrayMesh _liquidMesh;
+    private StandardMaterial3D _liquidMat;
+    private static readonly Color WaterColor = new Color(0.20f, 0.45f, 0.75f, 0.6f);
+    private static readonly Color LavaColor = new Color(0.95f, 0.35f, 0.10f, 0.9f);
     private int _cols, _rows;
     private float _sx, _sy;          // tile size in metres (X, Z)
     private float _exaggeration;
@@ -188,6 +193,10 @@ public partial class CartographerSpike : Node3D
             _chunkMeshes[i] = am;
         }
 
+        _liquidMesh = new ArrayMesh();
+        _liquid = new MeshInstance3D { Mesh = _liquidMesh, MaterialOverride = _liquidMat };
+        AddChild(_liquid);
+
         HideSplash();
         _genDone = true;
     }
@@ -203,6 +212,15 @@ public partial class CartographerSpike : Node3D
         // Double-sided: the Y-up remap flips triangle winding, so backface culling hides the
         // terrain top-down. (cull_mode 2 = CULL_DISABLED, set by id to dodge enum-name risk.)
         _mat.Set("cull_mode", 2);
+
+        _liquidMat = new StandardMaterial3D
+        {
+            VertexColorUseAsAlbedo = true,
+            Roughness = 0.1f,
+            Metallic = 0.0f,
+        };
+        _liquidMat.Set("transparency", 1);  // BaseMaterial3D.Transparency.Alpha
+        _liquidMat.Set("cull_mode", 2);     // CULL_DISABLED (same Y-up winding flip as terrain)
 
         // Flat ambient fill + a distinct dark background so the terrain reads against it.
         // (background_mode 1 = COLOR, ambient_light_source 2 = COLOR.)
@@ -294,8 +312,32 @@ public partial class CartographerSpike : Node3D
         return dirty.Length;
     }
 
-    /// Re-tessellate the whole liquid surface and re-upload it. Implemented in Task 2.
-    public void RebuildLiquid() { }
+    /// Re-tessellate the whole liquid surface and re-upload it. Whole-surface (water is sparse);
+    /// chunked liquid is a deferred optimization. Vertex colour comes from liquid_types
+    /// (0 water → blue, 1 lava → orange-red).
+    public void RebuildLiquid()
+    {
+        if (_liquidMesh == null) return;
+        _engine.Call("tessellate_liquid", (double)_exaggeration);
+        _liquidMesh.ClearSurfaces();
+        var positions = _engine.Call("liquid_positions").As<Vector3[]>();
+        if (positions.Length == 0) return; // no liquid — empty surface
+        var normals = _engine.Call("liquid_normals").As<Vector3[]>();
+        var types = _engine.Call("liquid_types").As<float[]>();
+        var indices = _engine.Call("liquid_indices").As<int[]>();
+
+        var colors = new Color[positions.Length];
+        for (int i = 0; i < positions.Length; i++)
+            colors[i] = (i < types.Length && types[i] > 0.5f) ? LavaColor : WaterColor;
+
+        var arrays = new Godot.Collections.Array();
+        arrays.Resize((int)Mesh.ArrayType.Max);
+        arrays[(int)Mesh.ArrayType.Vertex] = positions;
+        arrays[(int)Mesh.ArrayType.Normal] = normals;
+        arrays[(int)Mesh.ArrayType.Color] = colors;
+        arrays[(int)Mesh.ArrayType.Index] = indices;
+        _liquidMesh.AddSurfaceFromArrays(Mesh.PrimitiveType.Triangles, arrays);
+    }
 
     public override void _UnhandledInput(InputEvent e)
     {
