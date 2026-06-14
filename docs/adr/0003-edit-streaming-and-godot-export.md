@@ -41,9 +41,10 @@ render distance** of the camera, loading/unloading tiles as the camera moves.
 - **Rejected — load all + render all**: freezes on gen + tessellate and caps practical world size.
 
 ### 2. Scale + height
-World extent `W × H` is arbitrary (20 km target). Vertical range is the normalized elevation
-`[-1.5, 1.5]` × a configurable **exaggeration**, so "enough height" is just a vertical-scale
-setting — no structural limit.
+Target envelope **≈20 km × 20 km × up to 10 km**. Extent `W × H` is arbitrary; vertical range is
+normalized elevation `[-1.5, 1.5]` × a configurable **vertical scale** (exposed as world-height in
+km), so 10 km of relief is just a setting — f32 precision is fine at this size (~mm at 20 km). No
+structural limit.
 
 ### 3. Godot-native export pipeline
 Because the tool **is** a Godot project, "export" = saving **native Godot resources** the game
@@ -65,6 +66,21 @@ surfaced in the biome editor. The tool places procedurally + deterministically; 
 editable. The tool references owner-supplied models; it bundles **no art** (keeps the
 procedural/clean-room stance).
 
+### 5. Volumetric features (caves, overhangs, tunnels) — hybrid, authored
+The heightfield base can't represent geometry that folds over itself, and some features genuinely
+require it (a tunnel *through* a mountain can't be faked by a hidden wall). These are **occasional,
+authored** features, so rather than make the whole world volumetric (a voxel/SDF engine that would
+reset the core), the template stays heightfield and gains an **authored volumetric-feature tool**:
+mark a cave/overhang/tunnel and the tool produces real volumetric geometry there (local SDF /
+marching-cubes or CSG carve) merged into the world mesh on export. Volumetric only where authored;
+the ~99% normal terrain stays the efficient heightfield.
+
+Biome **variety** (round vs jagged vs volcanic rock, hill types, flora, water) is **not** a
+volumetric concern — it comes from per-biome **landform profiles** shaping the heightfield
+(`Landform`: peak_shape / hill_amp / valley_floor / roughness) + noise/erosion, scatter (flora),
+and the liquid overlay (water). Heightfield gen is also far lighter than volumetric, so it wins on
+both variety and performance. (Biome-driven terrain shaping lands in the biome pass, N3.)
+
 ## Consequences
 - One-time, non-blocking world gen + a render-distance setting → responsive 20 km editing.
 - Export is a "bake the whole world" build step; slowness there is acceptable.
@@ -78,9 +94,12 @@ procedural/clean-room stance).
 - **N2** — tool shell + render streaming (threaded gen, progressive tessellation, render-distance,
   region-sized chunks) on a maximized window.
 - **N3** — sculpt + course/flood + biome tools, brush size/intensity UI, the per-biome editor
-  incl. scatter-rule + model selection.
+  (scatter-rule + model selection) and **biome-driven terrain shaping** (apply the per-biome
+  landform profiles so jagged / rolling / volcanic biomes actually differ).
 - **N4** — export pipeline: terrain `ArrayMesh`(+collision), `MultiMesh` scatter, bake-to-instances,
   save `.tscn`/`.res`; plus save/load of the authoring project.
+- **N5 — Volumetric Features** — authored caves / overhangs / tunnels carved into the heightfield
+  base (hybrid; local volumetric meshing merged on export). See §5.
 - **Later** — generation-streaming / LOD only if a world outgrows RAM; Atmospheric Fog.
 
 ## Open items
