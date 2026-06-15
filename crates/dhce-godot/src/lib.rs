@@ -105,6 +105,17 @@ impl DhceEngine {
 
     // --- terrain chunks (incremental re-tessellation: an edit re-packs only dirty tiles) ---
 
+    /// Set the rendering-chunk edge length in world metres. Call **before** `build`. Smaller tiles ⇒
+    /// finer, lighter streaming. The world size should be a whole multiple of this.
+    #[func]
+    fn set_chunk_size_m(&mut self, m: f64) {
+        self.world.set_chunk_size_m(m);
+    }
+    /// Current rendering-chunk edge length, in world metres.
+    #[func]
+    fn chunk_size_m(&self) -> f64 {
+        self.world.chunk_size_m()
+    }
     #[func]
     fn chunk_count(&self) -> i64 {
         self.world.chunk_count() as i64
@@ -231,6 +242,13 @@ impl DhceEngine {
 
     // --- brush tools (return touched region ids for partial mesh updates) ---
 
+    /// Set the active brush's vertical sphere from the raycast hit: `hit_y` = the hit's Godot-space Y,
+    /// `exaggeration` = the current vertical scale. The footprint brushes then bite a 3D sphere under
+    /// the cursor (the directional-brush fix); call once per stroke before painting. `(0, 0)` ⇒ flat.
+    #[func]
+    fn set_brush_sphere(&mut self, hit_y: f64, exaggeration: f64) {
+        self.world.set_brush_sphere(hit_y, exaggeration);
+    }
     #[func]
     fn paint_terrain(&mut self, cx: f64, cy: f64, radius: f64, strength: f64, mode: i64) -> PackedInt32Array {
         u32_to_packed(&self.world.paint_terrain(cx, cy, radius, strength, mode.max(0) as u32))

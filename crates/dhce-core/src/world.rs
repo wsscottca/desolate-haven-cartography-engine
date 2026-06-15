@@ -53,10 +53,14 @@ const SHAPE_RELIEF_SALT: u64 = 0x2545_F491_4F6C_DD1D;
 /// Elevation clamp shared by every sculpt/carve op (normalized terrain stays in range).
 const ELEV_MIN: f64 = -1.5;
 const ELEV_MAX: f64 = 1.5;
-/// Target regions per rendering chunk. The chunk grid is sized from the region count so
-/// each tile holds roughly this many regions regardless of world size or density — that
-/// keeps edit cost flat (a dab re-tessellates a fixed amount) as the world scales up.
-const TARGET_REGIONS_PER_CHUNK: usize = 12_000;
+/// Default edge length of a rendering chunk, in world metres (overridable via
+/// [`World::set_chunk_size_m`]). Chunks are a **fixed physical size** (not derived from the region
+/// count), so each tile covers the same ground area regardless of density: finer streaming
+/// granularity and a smaller, cheaper unit to show/hide as the camera moves. The world dimensions
+/// are expected to be (near) a whole multiple of this; a partial edge tile is fine.
+const DEFAULT_CHUNK_SIZE_M: f64 = 256.0;
+/// Lower bound on a settable chunk size — keeps the chunk grid from exploding on a bad input.
+const MIN_CHUNK_SIZE_M: f64 = 32.0;
 
 /// The authored world: generation output plus every interactive edit applied on top.
 pub struct World {
@@ -120,6 +124,9 @@ pub struct World {
     chunk_tris: Vec<Vec<u32>>,
     region_chunks: Vec<Vec<u32>>,
     chunk_dirty: Vec<bool>,
+    /// Edge length of a rendering chunk in world metres (see [`set_chunk_size_m`]); the chunk grid
+    /// is `ceil(dim / chunk_size_m)` tiles each side. Set before [`build`]; defaults sensibly.
+    chunk_size_m: f64,
     /// Dimensions of the (square) chunk grid; `chunk id = gy * chunk_cols + gx`. Both 0
     /// until [`build`] partitions the mesh. Stored so the front-end can map the camera to
     /// visible tiles (render-distance streaming) without re-deriving the layout.
@@ -129,6 +136,13 @@ pub struct World {
     /// Active data-view mode (see the `VIEW_*` consts). Off `Natural`, the colour cache holds a
     /// direct readout of one field instead of the composed terrain colour.
     view_mode: u8,
+    /// Transient brush-sphere parameters set per stroke by [`set_brush_sphere`]: the Godot-space Y
+    /// of the brush centre (the raycast hit) and the vertical exaggeration. The footprint brushes
+    /// gate cells by **3D** distance — horizontal XZ plus the vertical `elev·exag − hit_y` term — so
+    /// the brush is a sphere that bites the surface under the cursor from any view angle (the
+    /// directional-brush fix, ADR 0005 §R3). Both default to 0 ⇒ a flat 2D footprint (top-down).
+    brush_hit_y: f64,
+    brush_exag: f64,
     /// Liquid render caches (parallel to the terrain chunk system): the smoothed liquid-surface
     /// height + wet mask per region, recomputed lazily when liquid changes (`liquid_cache_dirty`),
     /// plus a per-chunk dirty flag. The front-end streams + re-tessellates only in-range, changed
@@ -206,10 +220,13 @@ impl World {
             chunk_tris: Vec::new(),
             region_chunks: Vec::new(),
             chunk_dirty: Vec::new(),
+            chunk_size_m: DEFAULT_CHUNK_SIZE_M,
             chunk_cols: 0,
             chunk_rows: 0,
             color_cache: Vec::new(),
             view_mode: VIEW_NATURAL,
+            brush_hit_y: 0.0,
+            brush_exag: 0.0,
             liquid_surf_cache: Vec::new(),
             liquid_wet_cache: Vec::new(),
             liquid_cache_dirty: true,
@@ -460,6 +477,16 @@ impl World {
 
     // --- brush tools ---
 
+    /// Set the active brush's vertical sphere: `hit_y` is the Godot-space Y of the brush centre (the
+    /// raycast hit's height = `elev·exaggeration`), `exaggeration` the current vertical scale. The
+    /// footprint brushes then gate cells by 3D distance (XZ + the vertical `elev·exag − hit_y` term),
+    /// so the brush bites the surface under the cursor from any angle. Call once per stroke before
+    /// painting; `(0, 0)` (the default) restores a flat 2D footprint. Mirrors [`set_view_mode`].
+    pub fn set_brush_sphere(&mut self, hit_y: f64, exaggeration: f64) {
+        self.brush_hit_y = hit_y;
+        self.brush_exag = exaggeration;
+    }
+
     /// Sculpt the terrain under `(cx, cy)` within `radius`. `mode`: 0 raise, 1 carve,
     /// 2 level (toward the height at the brush center), 3 crest (sharp peak). `strength`
     /// is the per-application elevation delta. Returns the region ids touched (the brush
@@ -471,6 +498,7 @@ impl World {
         }
         let r2 = radius * radius;
         let candidates = self.brush_candidates(cx, cy, radius);
+        let (bexag, bhy) = (self.brush_exag, self.brush_hit_y);
 
         // Center height for the level tool (nearest candidate to the cursor).
         let mut center_e = 0.0;
@@ -493,7 +521,8 @@ impl World {
             for &rid in &candidates {
                 let ri = rid as usize;
                 let p = mesh.pos_of_r(ri);
-                let d2 = (p[0] - cx).powi(2) + (p[1] - cy).powi(2);
+                let dv = self.elevation_r[ri] * bexag - bhy; // 3D sphere: vertical term
+                let d2 = (p[0] - cx).powi(2) + (p[1] - cy).powi(2) + dv * dv;
                 if d2 >= r2 {
                     continue;
                 }
@@ -535,13 +564,15 @@ impl World {
         }
         let r2 = radius * radius;
         let candidates = self.brush_candidates(cx, cy, radius);
+        let (bexag, bhy) = (self.brush_exag, self.brush_hit_y);
         let mut touched = Vec::new();
         {
             let mesh = self.mesh.as_ref().unwrap();
             for &rid in &candidates {
                 let ri = rid as usize;
                 let p = mesh.pos_of_r(ri);
-                let d2 = (p[0] - cx).powi(2) + (p[1] - cy).powi(2);
+                let dv = self.elevation_r[ri] * bexag - bhy; // 3D sphere: vertical term
+                let d2 = (p[0] - cx).powi(2) + (p[1] - cy).powi(2) + dv * dv;
                 if d2 >= r2 {
                     continue;
                 }
@@ -567,6 +598,7 @@ impl World {
         }
         let r2 = radius * radius;
         let candidates = self.brush_candidates(cx, cy, radius);
+        let (bexag, bhy) = (self.brush_exag, self.brush_hit_y);
 
         // Bed reference = lowest elevation under the brush this dab (the channel follows
         // the existing downhill grade rather than cutting a flat trench).
@@ -576,7 +608,9 @@ impl World {
             for &rid in &candidates {
                 let ri = rid as usize;
                 let p = mesh.pos_of_r(ri);
-                if (p[0] - cx).powi(2) + (p[1] - cy).powi(2) < r2 && self.elevation_r[ri] < e_ref {
+                let dv = self.elevation_r[ri] * bexag - bhy; // 3D sphere: vertical term
+                let d2 = (p[0] - cx).powi(2) + (p[1] - cy).powi(2) + dv * dv;
+                if d2 < r2 && self.elevation_r[ri] < e_ref {
                     e_ref = self.elevation_r[ri];
                 }
             }
@@ -592,7 +626,8 @@ impl World {
             for &rid in &candidates {
                 let ri = rid as usize;
                 let p = mesh.pos_of_r(ri);
-                let d2 = (p[0] - cx).powi(2) + (p[1] - cy).powi(2);
+                let dv = self.elevation_r[ri] * bexag - bhy; // 3D sphere: vertical term
+                let d2 = (p[0] - cx).powi(2) + (p[1] - cy).powi(2) + dv * dv;
                 if d2 >= r2 {
                     continue;
                 }
@@ -674,12 +709,14 @@ impl World {
         }
         let r2 = radius * radius;
         let candidates = self.brush_candidates(cx, cy, radius);
+        let (bexag, bhy) = (self.brush_exag, self.brush_hit_y);
         let mesh = self.mesh.as_ref().unwrap();
         let mut touched = Vec::new();
         for &rid in &candidates {
             let ri = rid as usize;
             let p = mesh.pos_of_r(ri);
-            if (p[0] - cx).powi(2) + (p[1] - cy).powi(2) < r2 {
+            let dv = self.elevation_r[ri] * bexag - bhy; // 3D sphere: vertical term
+            if (p[0] - cx).powi(2) + (p[1] - cy).powi(2) + dv * dv < r2 {
                 self.biome_r[ri] = biome_id;
                 if ri < self.biome_locked.len() {
                     self.biome_locked[ri] = true; // manual paint — protect from reclassify
@@ -766,13 +803,15 @@ impl World {
         }
         let r2 = radius * radius;
         let candidates = self.brush_candidates(cx, cy, radius);
+        let (bexag, bhy) = (self.brush_exag, self.brush_hit_y);
         let mut touched = Vec::new();
         {
             let mesh = self.mesh.as_ref().unwrap();
             for &rid in &candidates {
                 let ri = rid as usize;
                 let p = mesh.pos_of_r(ri);
-                let d2 = (p[0] - cx).powi(2) + (p[1] - cy).powi(2);
+                let dv = self.elevation_r[ri] * bexag - bhy; // 3D sphere: vertical term
+                let d2 = (p[0] - cx).powi(2) + (p[1] - cy).powi(2) + dv * dv;
                 if d2 >= r2 {
                     continue;
                 }
@@ -815,13 +854,15 @@ impl World {
         let tr = biomes::default_traits_for(biome_id);
         let r2 = radius * radius;
         let candidates = self.brush_candidates(cx, cy, radius);
+        let (bexag, bhy) = (self.brush_exag, self.brush_hit_y);
         let mut touched = Vec::new();
         {
             let mesh = self.mesh.as_ref().unwrap();
             for &rid in &candidates {
                 let ri = rid as usize;
                 let p = mesh.pos_of_r(ri);
-                if (p[0] - cx).powi(2) + (p[1] - cy).powi(2) >= r2 {
+                let dv = self.elevation_r[ri] * bexag - bhy; // 3D sphere: vertical term
+                if (p[0] - cx).powi(2) + (p[1] - cy).powi(2) + dv * dv >= r2 {
                     continue;
                 }
                 if ri < self.jaggedness_r.len() {
@@ -1546,12 +1587,13 @@ impl World {
         };
         let nr = mesh.num_regions();
         let nt = mesh.num_triangles();
-        // Square grid sized so each tile holds ~TARGET_REGIONS_PER_CHUNK regions.
-        let axis = ((nr as f64 / TARGET_REGIONS_PER_CHUNK as f64).sqrt().ceil() as usize).max(1);
-        let cols = axis;
-        let rows = axis;
-        let sx = (self.width / cols as f64).max(1.0);
-        let sy = (self.height / rows as f64).max(1.0);
+        // Fixed-size tiles: a chunk is CHUNK_SIZE_M on a side, so a 20 km world is ~39×39 small tiles
+        // rather than a handful of huge ones. The grid covers the whole map (ceil); the last row/col
+        // may be a partial tile when the world isn't an exact multiple. `sx`/`sy` ARE the tile size.
+        let cols = (self.width / self.chunk_size_m).ceil().max(1.0) as usize;
+        let rows = (self.height / self.chunk_size_m).ceil().max(1.0) as usize;
+        let sx = self.chunk_size_m;
+        let sy = self.chunk_size_m;
         let mut chunk_tris: Vec<Vec<u32>> = vec![Vec::new(); cols * rows];
         let mut region_chunks: Vec<Vec<u32>> = vec![Vec::new(); nr];
         for t in 0..nt {
@@ -1607,6 +1649,17 @@ impl World {
         }
     }
 
+    /// Set the rendering-chunk edge length (world metres), clamped to a sane minimum. Call **before**
+    /// [`build`] — the chunk grid is partitioned during build. Smaller tiles ⇒ finer, lighter
+    /// streaming (and more, but cheaper, tiles). The world size should be a whole multiple of this.
+    pub fn set_chunk_size_m(&mut self, m: f64) {
+        self.chunk_size_m = m.max(MIN_CHUNK_SIZE_M);
+    }
+    /// Current rendering-chunk edge length, in world metres.
+    pub fn chunk_size_m(&self) -> f64 {
+        self.chunk_size_m
+    }
+
     /// Number of rendering chunks.
     pub fn chunk_count(&self) -> usize {
         self.chunk_tris.len()
@@ -1626,9 +1679,9 @@ impl World {
         if cols == 0 || rows == 0 {
             return Vec::new();
         }
-        // Same tile size the partitioner used (see `build_chunks`).
-        let sx = (self.width / cols as f64).max(1.0);
-        let sy = (self.height / rows as f64).max(1.0);
+        // Same fixed tile size the partitioner used (see `build_chunks`).
+        let sx = self.chunk_size_m;
+        let sy = self.chunk_size_m;
         let mut out = Vec::with_capacity(cols * rows * 2);
         for gy in 0..rows {
             for gx in 0..cols {

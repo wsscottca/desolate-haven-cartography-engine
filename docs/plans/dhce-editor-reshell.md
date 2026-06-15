@@ -82,18 +82,34 @@ editor camera streams chunks. `dotnet build` clean.
 **Files:** `crates/dhce-core/src/world.rs` (+ test), `crates/dhce-godot/src/lib.rs`,
 `addons/dhce/DhcePlugin.cs`, `addons/dhce/ToolState.cs` (ported).
 
-- `forward_3d_gui_input(Camera3D camera, InputEvent e)`: build the ray from the **editor camera**
-  (`camera.ProjectRayOrigin/Normal`) → `raycast_terrain` → apply the active tool at the hit; return
-  `AfterGuiInput.Stop` while painting so the editor doesn't also select/move. Brush gizmo drawn via an
-  overlay `MeshInstance3D` (as today).
-- **Directional-brush fix (§7.6):** make the core brush falloff a **3D sphere** — distance includes the
-  vertical `(elev[r] − hit_elev) · exaggeration` term, not just horizontal XY. `paint_terrain` /
-  `paint_course` / `paint_liquid` / `paint_trait` take the hit elevation + exaggeration and compute
-  `d3²`. The brush then bites the surface under the cursor from **any** view angle (today's 2-D
-  cylinder is why it's wrong off-top-down). Determinism-safe (multiply/add/sqrt).
+- **Directional-brush fix (§7.6) — ✅ core done (2026-06-15).** The footprint brushes gate cells by a
+  **3D sphere**: distance now includes the vertical `elev·exaggeration − hit_y` term, not just
+  horizontal XZ, so the brush bites the surface under the cursor from any view angle (the flat 2-D
+  cylinder is why it was wrong off-top-down). Implemented as transient `World` state set per stroke via
+  `set_brush_sphere(hit_y, exaggeration)` (mirrors `set_view_mode`; `(0,0)` ⇒ flat 2-D, the default —
+  so every existing test/call is unchanged) rather than threading two params through six signatures.
+  **Applied to all six footprint brushes** (sculpt / liquid / course / trait / biome / region-traits),
+  not just the four originally listed — consistent behaviour, same mechanical edit. Determinism-safe
+  (multiply/add/sqrt). Core test `brush_sphere_bounds_the_footprint_vertically` green.
+- **⏳ remaining:** `forward_3d_gui_input(Camera3D camera, InputEvent e)` — build the ray from the
+  **editor camera** (`camera.ProjectRayOrigin/Normal`) → `raycast_terrain` → `set_brush_sphere(hit.Y,
+  exaggeration)` → apply the active tool at the hit; return `AfterGuiInput.Stop` while painting so the
+  editor doesn't also select/move. Brush gizmo drawn via an overlay `MeshInstance3D`. Port `ToolState`.
 
 **Gate:** core test — a 3D-sphere brush at an angled hit touches a vertically-bounded footprint (not an
-infinite column). Visual: sculpt lands under the cursor from a side view. `cargo test` + smoke green.
+infinite column) ✅. Visual: sculpt lands under the cursor from a side view (with the picking, below).
+
+### R3.5 — Fixed-size chunk streaming *(Rust core + C#; landed with R3 core, 2026-06-15)*
+User-requested mid-reshell: chunks are now a **fixed physical size** (`DEFAULT_CHUNK_SIZE_M = 256 m`,
+tunable via `set_chunk_size_m` / the `DhceWorld.ChunkSizeM` export) instead of being sized from the
+region count (~12 k regions/tile → a handful of huge tiles). A 20 km world becomes ~78×78 small tiles;
+`DhceWorld` **snaps** the world to a whole number of tiles (so 20 km → 19.968 km at 256 m) and creates
+chunk nodes **lazily** — only the in-render-distance ring is instantiated, so the live node count
+tracks the visible area (a few hundred) not the ~6 000 tile *slots*. `RenderDistance`/`ChunksPerFrame`
+defaults retuned (8/8) for the smaller tiles. The runtime `CartographerSpike` (pre-creates every node;
+retired at R6) is pinned to coarse `set_chunk_size_m(1600)` so the new default doesn't blow it up.
+Rationale: finer, lighter, smoother show/hide as the camera moves. Core tests
+`chunk_size_is_settable_and_resizes_the_grid` + the updated partition test green.
 
 ### R4 — Dock UI parity *(C#)*
 **Files:** `addons/dhce/ToolUi*.cs` (ported from `tool/scripts/ToolUi.cs`), `DhcePlugin.cs`.

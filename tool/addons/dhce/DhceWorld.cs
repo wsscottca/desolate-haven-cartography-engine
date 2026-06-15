@@ -15,13 +15,14 @@ namespace DesolateHaven.Cartography;
 [GlobalClass]
 public partial class DhceWorld : Node3D
 {
-    [Export] public float WorldSizeKm = 20f;   // square map size; cost scales with AREA
+    [Export] public float WorldSizeKm = 20f;   // requested size; snapped to a whole number of chunks
     [Export] public float SpacingM = 12f;      // metres between regions (~1.7M @ 20 km / 12 m)
     [Export] public int Seed = 12345;
     [Export] public int Octaves = 6;
     [Export] public float TerrainHeightKm = 2.4f;
-    [Export] public int RenderDistance = 3;    // chunk tiles (Chebyshev) kept meshed around the focus
-    [Export] public int ChunksPerFrame = 4;    // chunks tessellated per streaming tick
+    [Export] public float ChunkSizeM = 256f;   // fixed chunk edge (m); smaller ⇒ finer, lighter streaming
+    [Export] public int RenderDistance = 8;    // chunk tiles (Chebyshev) kept meshed around the focus
+    [Export] public int ChunksPerFrame = 8;    // chunks tessellated per streaming tick
 
     /// Normalized-elevation span the core clamps to (ELEV_MAX − ELEV_MIN in world.rs).
     private const float ElevSpan = 3.0f;
@@ -81,7 +82,13 @@ public partial class DhceWorld : Node3D
         if (_engine == null) return;
         ClearChunks();
         _exaggeration = TerrainHeightKm * 1000f / ElevSpan;
-        _widthM = _heightM = WorldSizeKm * 1000f;
+
+        // Fixed-size chunks: snap the world to a whole number of ChunkSizeM tiles (so the requested
+        // 20 km becomes e.g. 19.968 km at 256 m), giving even tiles and no thin partial edge.
+        float chunk = Mathf.Max(ChunkSizeM, 32f);
+        int perSide = Mathf.Max(1, Mathf.RoundToInt(WorldSizeKm * 1000f / chunk));
+        _widthM = _heightM = perSide * chunk;
+        _engine.Call("set_chunk_size_m", (double)chunk);
 
         var sw = Stopwatch.StartNew();
         _engine.Call("build", _widthM, _heightM, SpacingM, (float)Seed, Octaves);
@@ -94,30 +101,18 @@ public partial class DhceWorld : Node3D
         Vector2I grid = _engine.Call("chunk_grid").As<Vector2I>();
         _cols = grid.X;
         _rows = grid.Y;
-        _sx = _cols > 0 ? _widthM / _cols : _widthM;
-        _sy = _rows > 0 ? _heightM / _rows : _heightM;
+        _sx = _sy = (float)_engine.Call("chunk_size_m").As<double>(); // fixed tile size
         int n = _engine.Call("chunk_count").As<int>();
-        GD.Print($"[DHCE] regions={_engine.Call("region_count")} chunks={n} grid={_cols}x{_rows} gen {genMs:0} ms");
+        GD.Print($"[DHCE] regions={_engine.Call("region_count")} chunks={n} grid={_cols}x{_rows} tile={_sx:0}m gen {genMs:0} ms");
 
+        // Lazy nodes: only the in-range ring is instantiated (in BuildChunk), so the live node count
+        // tracks the visible area, not the whole map — a 20 km world at 256 m is ~6 000 tile *slots*
+        // but only a few hundred ever exist at once. Arrays hold nulls until a chunk streams in.
         _chunks = new MeshInstance3D[n];
         _chunkMeshes = new ArrayMesh[n];
         _liquidChunks = new MeshInstance3D[n];
         _liquidChunkMeshes = new ArrayMesh[n];
         _built = new bool[n];
-        for (int i = 0; i < n; i++)
-        {
-            var am = new ArrayMesh();
-            var mi = new MeshInstance3D { Mesh = am, MaterialOverride = CurrentViewMat() };
-            AddChild(mi); // owner left null → ephemeral preview, not serialized into the scene
-            _chunks[i] = mi;
-            _chunkMeshes[i] = am;
-
-            var lam = new ArrayMesh();
-            var lmi = new MeshInstance3D { Mesh = lam, MaterialOverride = _liquidMat };
-            AddChild(lmi);
-            _liquidChunks[i] = lmi;
-            _liquidChunkMeshes[i] = lam;
-        }
         _genDone = true;
         UpdateStreaming(WorldCenter); // seed the centre so something shows immediately
     }
@@ -161,6 +156,14 @@ public partial class DhceWorld : Node3D
 
     private void BuildChunk(int i)
     {
+        if (_chunks[i] == null) // lazy: instantiate the tile node the first time it streams in
+        {
+            var m = new ArrayMesh();
+            var mi = new MeshInstance3D { Mesh = m, MaterialOverride = CurrentViewMat() };
+            AddChild(mi); // owner left null → ephemeral preview, not serialized into the scene
+            _chunks[i] = mi;
+            _chunkMeshes[i] = m;
+        }
         _engine.Call("tessellate_chunk", i, _exaggeration);
         ArrayMesh am = _chunkMeshes[i];
         am.ClearSurfaces();
@@ -184,10 +187,18 @@ public partial class DhceWorld : Node3D
     {
         if (_liquidChunkMeshes == null) return;
         _engine.Call("tessellate_liquid_chunk", i, (double)_exaggeration);
+        var positions = _engine.Call("liquid_chunk_positions").As<Vector3[]>();
+        if (positions.Length == 0) { _liquidChunkMeshes[i]?.ClearSurfaces(); return; } // dry — clear any prior water
+        if (_liquidChunks[i] == null) // lazy: only wet tiles get a water node
+        {
+            var lam = new ArrayMesh();
+            var lmi = new MeshInstance3D { Mesh = lam, MaterialOverride = _liquidMat };
+            AddChild(lmi);
+            _liquidChunks[i] = lmi;
+            _liquidChunkMeshes[i] = lam;
+        }
         ArrayMesh am = _liquidChunkMeshes[i];
         am.ClearSurfaces();
-        var positions = _engine.Call("liquid_chunk_positions").As<Vector3[]>();
-        if (positions.Length == 0) return; // dry chunk — left cleared
         var normals = _engine.Call("liquid_chunk_normals").As<Vector3[]>();
         var types = _engine.Call("liquid_chunk_types").As<float[]>();
         var indices = _engine.Call("liquid_chunk_indices").As<int[]>();
@@ -205,8 +216,12 @@ public partial class DhceWorld : Node3D
 
     private void FreeChunk(int i)
     {
-        _chunkMeshes[i].ClearSurfaces();
-        _liquidChunkMeshes[i].ClearSurfaces();
+        _chunks[i]?.QueueFree();
+        _chunks[i] = null;
+        _chunkMeshes[i] = null;
+        _liquidChunks[i]?.QueueFree();
+        _liquidChunks[i] = null;
+        _liquidChunkMeshes[i] = null;
         _built[i] = false;
     }
 

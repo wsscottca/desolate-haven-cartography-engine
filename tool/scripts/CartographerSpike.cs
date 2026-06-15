@@ -210,6 +210,10 @@ public partial class CartographerSpike : Node3D
     /// and `_Process` tessellates them around the camera.
     private void GenerateWorld()
     {
+        // This runtime app pre-creates every chunk node up front, so keep tiles coarse: the core now
+        // defaults to small 256 m chunks for the editor's *lazy* streaming, which this path predates.
+        // (CartographerSpike is retired at reshell R6; the in-editor DhceWorld is the streaming model.)
+        _engine.Call("set_chunk_size_m", 1600.0);
         var sw = Stopwatch.StartNew();
         _engine.Call("build", _widthM, _heightM, SpacingM, (float)Seed, Octaves);
         sw.Stop();

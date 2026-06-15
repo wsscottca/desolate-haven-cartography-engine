@@ -46,6 +46,43 @@ fn paint_terrain_reports_and_raises_its_footprint() {
 }
 
 #[test]
+fn brush_sphere_bounds_the_footprint_vertically() {
+    // The directional-brush fix (ADR 0005 §R3): with a vertical exaggeration set, the footprint
+    // brushes gate cells by 3D distance, so on varied terrain the brush is a sphere under the cursor
+    // — not the infinite vertical column a flat 2D radius selects when viewed off-top-down.
+    let mut w = built();
+    let (cx, cy) = (500.0, 500.0);
+    let radius = 300.0;
+    let exag = 1.0e6; // huge: any real elevation difference becomes a large vertical distance
+
+    let hit_e = w.height_at(cx, cy).expect("centre is on-map");
+    let hit_y = hit_e * exag;
+
+    // Flat (2D) footprint: the whole horizontal disc (the buggy off-top-down behaviour).
+    w.set_brush_sphere(0.0, 0.0);
+    let flat = w.paint_trait(cx, cy, radius, 4, 0.5); // trait 4 = temperature (no elevation change)
+    assert!(flat.len() > 1, "the disc should cover many cells");
+
+    // 3D sphere centred on the hit: cells whose elevation puts them > radius away vertically drop out.
+    w.set_brush_sphere(hit_y, exag);
+    let sphere = w.paint_trait(cx, cy, radius, 4, 0.5);
+
+    assert!(!sphere.is_empty(), "the cell under the cursor (dv≈0) stays in the sphere");
+    assert!(
+        sphere.len() < flat.len(),
+        "the 3D sphere must clip vertically-distant cells the flat brush keeps ({} vs {})",
+        sphere.len(), flat.len()
+    );
+
+    // Everything the sphere kept is within the brush radius in 3D ⇒ within `radius` vertically too.
+    let elev = w.elevation_export();
+    for &r in &sphere {
+        let dv = (elev[r as usize] as f64 * exag - hit_y).abs();
+        assert!(dv <= radius, "kept cell {r} is {dv} m above/below the hit, beyond r={radius}");
+    }
+}
+
+#[test]
 fn minimap_is_rgba_and_non_empty() {
     let w = built();
     let n = 64;
@@ -368,18 +405,44 @@ fn chunk_grid_and_centers_match_the_partition() {
     assert_eq!(cols, rows, "the chunk grid is square");
     assert_eq!(cols * rows, w.chunk_count(), "the grid covers every chunk exactly");
 
+    // Tiles are a fixed physical size: the grid is `ceil(dim / chunk_size_m)` each side.
+    let tile = w.chunk_size_m();
+    assert_eq!(cols, (width / tile).ceil() as usize, "cols = ceil(width / chunk size)");
+
     let centers = w.chunk_centers();
     assert_eq!(centers.len(), w.chunk_count() * 2, "one (x, y) per chunk id");
 
-    // Each center sits on its tile's half-step and stays inside the world bounds — this is
+    // Each center sits on its fixed tile's half-step and stays inside the world bounds — this is
     // the exact mapping the front-end relies on to turn a camera position into visible tiles.
-    let sx = width / cols as f64;
-    let sy = height / rows as f64;
     for id in 0..w.chunk_count() {
         let (gx, gy) = (id % cols, id / cols);
         let (cx, cy) = (centers[2 * id], centers[2 * id + 1]);
-        assert!((cx - (gx as f64 + 0.5) * sx).abs() < 1e-6, "center x is the tile mid-point");
-        assert!((cy - (gy as f64 + 0.5) * sy).abs() < 1e-6, "center y is the tile mid-point");
+        assert!((cx - (gx as f64 + 0.5) * tile).abs() < 1e-6, "center x is the tile mid-point");
+        assert!((cy - (gy as f64 + 0.5) * tile).abs() < 1e-6, "center y is the tile mid-point");
         assert!(cx > 0.0 && cx < width && cy > 0.0 && cy < height, "center is in-bounds");
     }
+}
+
+#[test]
+fn chunk_size_is_settable_and_resizes_the_grid() {
+    let (width, height) = (4000.0, 4000.0);
+    let coarse = {
+        let mut w = World::new();
+        w.set_chunk_size_m(1000.0);
+        w.build(width, height, 30.0, 7, 4);
+        assert_eq!(w.chunk_size_m(), 1000.0);
+        w.chunk_count()
+    };
+    let fine = {
+        let mut w = World::new();
+        w.set_chunk_size_m(256.0);
+        w.build(width, height, 30.0, 7, 4);
+        w.chunk_count()
+    };
+    assert!(fine > coarse, "a smaller chunk size yields more (smaller) tiles ({fine} vs {coarse})");
+
+    // Absurd inputs clamp to the floor rather than exploding the grid.
+    let mut w = World::new();
+    w.set_chunk_size_m(0.0);
+    assert!(w.chunk_size_m() >= 32.0, "chunk size clamps to a sane minimum");
 }
