@@ -2,10 +2,28 @@
 //! These lock cohesion-by-shared-structure, snow-by-temperature, vegetation tinting, and
 //! determinism — and that the Region presets carry sensible default trait bundles.
 
-use dhce_core::biomes::{self, base_palettes, resolve_color};
+use dhce_core::biomes::{self, base_palettes, biome_label, resolve_color, veg};
 
 fn luma(c: [f32; 3]) -> f32 {
     0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]
+}
+
+#[test]
+fn biome_label_describes_the_trait_composition() {
+    // climate · cover · landform on land.
+    let warm_forest = biome_label(0.30, 0.2, 0.6, 0.50, 0.60, veg::FOREST);
+    assert!(warm_forest.contains("forest") && warm_forest.contains("hills"), "{warm_forest}");
+    assert!(warm_forest.starts_with("temperate"), "{warm_forest}");
+
+    // cold, sharp, high → frozen jagged peaks.
+    let frozen_peak = biome_label(0.80, 0.8, 0.5, 0.10, 0.50, veg::BARREN);
+    assert!(frozen_peak.contains("frozen") && frozen_peak.contains("jagged peaks"), "{frozen_peak}");
+
+    // hot + dry → arid; submerged → a water phrase (no cover/landform).
+    let arid = biome_label(0.10, 0.2, 0.2, 0.85, 0.10, veg::SCRUB);
+    assert!(arid.starts_with("arid"), "{arid}");
+    let water = biome_label(-0.40, 0.0, 0.0, 0.50, 0.50, veg::GRASS);
+    assert!(water.contains("water") && !water.contains("grass"), "{water}");
 }
 
 #[test]

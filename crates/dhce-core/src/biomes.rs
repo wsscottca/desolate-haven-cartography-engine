@@ -319,3 +319,60 @@ pub fn classify(elevation: f64, moisture: f64, dist_center: f64) -> u8 {
     }
     5 // Open Plains
 }
+
+/// Compose a human descriptor for the **emergent biome** from a cell's traits — the "biome
+/// describes" tier of the trait model (ADR 0004), off the render path (HUD / cursor readout).
+/// `climate · cover · landform` for land; a water phrase when submerged. This is mechanical
+/// *description* generated from the dials — **not** canon place lore (that lives in the guide; the
+/// 14 named places are Regions, not this). Threshold-only, so it's deterministic and allocation is
+/// the only cost.
+pub fn biome_label(
+    elevation: f64,
+    jaggedness: f64,
+    relief: f64,
+    temperature: f64,
+    moisture: f64,
+    vegetation: u8,
+) -> String {
+    let climate = if temperature < 0.30 {
+        "frozen"
+    } else if temperature > 0.72 {
+        if moisture < 0.35 { "arid" } else { "tropical" }
+    } else if moisture > 0.66 {
+        "humid"
+    } else if moisture < 0.30 {
+        "parched"
+    } else {
+        "temperate"
+    };
+
+    // Submerged cells read as water (cover/landform don't apply below the surface).
+    if elevation < -0.25 {
+        return format!("{climate} deep water");
+    }
+    if elevation < -0.05 {
+        return format!("{climate} shallows");
+    }
+
+    let cover = match vegetation {
+        veg::GRASS => "grassland",
+        veg::SCRUB => "scrub",
+        veg::FOREST => "forest",
+        veg::EVERGREEN => "taiga",
+        veg::MARSH => "marsh",
+        veg::THORN => "thornland",
+        _ => "barrens", // BARREN / unknown
+    };
+
+    let landform = if elevation > 0.55 {
+        if jaggedness > 0.55 { "jagged peaks" } else { "highlands" }
+    } else if elevation > 0.25 {
+        if relief > 0.5 { "hills" } else { "uplands" }
+    } else if elevation > 0.05 {
+        if relief > 0.55 { "downs" } else { "lowlands" }
+    } else {
+        "flats"
+    };
+
+    format!("{climate} {cover} {landform}")
+}

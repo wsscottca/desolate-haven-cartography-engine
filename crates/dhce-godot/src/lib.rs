@@ -323,6 +323,12 @@ impl DhceEngine {
     fn trait_at(&self, x: f64, y: f64, trait_id: i64) -> f64 {
         self.world.trait_at(x, y, trait_id.max(0) as u32).unwrap_or(f64::NAN)
     }
+    /// Human descriptor of the emergent biome at world `(x, y)` (e.g. "temperate forest hills"); ""
+    /// off-map. The "biome describes" tier (ADR 0004) — for the HUD/cursor readout.
+    #[func]
+    fn biome_label_at(&self, x: f64, y: f64) -> GString {
+        GString::from(self.world.biome_label_at(x, y).unwrap_or_default().as_str())
+    }
     /// One slot of base palette `family` as `[r,g,b]`. `slot`: 0 water_deep, 1 water_shallow,
     /// 2 low, 3 rock, 4 cap_warm, 5 cap_cold.
     #[func]

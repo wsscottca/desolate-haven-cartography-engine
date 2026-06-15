@@ -1137,6 +1137,20 @@ impl World {
         self.region_at(x, y).map(|r| self.elevation_r[r])
     }
 
+    /// Human descriptor of the emergent biome at world `(x, y)` (the nearest cell's traits), e.g.
+    /// "temperate forest hills". `None` outside the map. See [`biomes::biome_label`].
+    pub fn biome_label_at(&self, x: f64, y: f64) -> Option<String> {
+        let r = self.region_at(x, y)?;
+        Some(biomes::biome_label(
+            self.elevation_r[r],
+            self.jaggedness_r.get(r).copied().unwrap_or(0.0),
+            self.relief_r.get(r).copied().unwrap_or(0.0),
+            self.temperature_r.get(r).copied().unwrap_or(0.5),
+            self.moisture_r.get(r).copied().unwrap_or(0.5),
+            self.vegetation_r.get(r).copied().unwrap_or(0),
+        ))
+    }
+
     /// March a ray (Godot space, Y-up) against the rendered heightfield and return the
     /// surface hit `[x, y, z]` (Godot space), or `None` on a miss. The terrain surface is
     /// `Y = height_at(x, z) * exaggeration` (core ground = Godot XZ). Used by the brush so a

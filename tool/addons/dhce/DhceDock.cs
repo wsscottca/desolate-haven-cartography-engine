@@ -17,6 +17,7 @@ public partial class DhceDock : ScrollContainer
     private bool _wasGenDone;         // edge-detect gen completion to reload engine-backed values
 
     private Label _status;
+    private Label _biomeReadout;
     private VBoxContainer _col;
     private readonly ButtonGroup _toolGroup = new();
     private readonly List<Button> _toolButtons = new();
@@ -85,6 +86,12 @@ public partial class DhceDock : ScrollContainer
     /// Editor-camera ground focus → the minimap marker (fed by the plugin each frame).
     public void SetMapFocus(Vector3 f) => _minimap?.SetFocus(f);
 
+    /// Live emergent-biome descriptor under the cursor (fed by the plugin's hover raycast).
+    public void SetBiomeReadout(string label)
+    {
+        if (_biomeReadout != null) _biomeReadout.Text = string.IsNullOrEmpty(label) ? "Biome: —" : $"Biome: {label}";
+    }
+
     private bool HasWorld => _world != null && _world.Engine != null;
     private GodotObject Eng => _world.Engine;
 
@@ -101,6 +108,8 @@ public partial class DhceDock : ScrollContainer
         _col.AddChild(gen);
         _status = new Label { Text = "Add a DhceWorld, set params, Generate.", AutowrapMode = TextServer.AutowrapMode.WordSmart };
         _col.AddChild(_status);
+        _biomeReadout = Dim("Biome: —"); // emergent descriptor under the cursor (Stage 2)
+        _col.AddChild(_biomeReadout);
 
         Header("SAVE / LOAD");
         Button(_col, "Save world", () => { if (_world != null) SetStatus(_world.SaveToDisk()); });

@@ -53,17 +53,26 @@ high *hot*; vegetation tints the cover; deterministic; `world` colours vary and 
 **Gate:** `cargo test -p dhce-core` green; DLL rebuilt + swapped (user closes Godot); headless
 smoke clean; user F5.
 
-## Stage 2 — Biome classifier *(Rust core + DLL)*
+## Stage 2 — Biome classifier *(Rust core + DLL)* — ✅ done (2026-06-15, in-editor)
 
-**Files:** `biomes.rs` (+ test), `world.rs`, `crates/dhce-godot/src/lib.rs`.
+**Files:** `biomes.rs` (+ test), `world.rs`, `crates/dhce-godot/src/lib.rs`, `addons/dhce/DhceDock.cs`,
+`addons/dhce/DhcePlugin.cs`.
 
-- `fn classify_biome(traits) -> u16` (or a small descriptor id) over coarse buckets of
-  vegetation × landform (elevation+jaggedness+relief) × climate (temperature+moisture), plus a
-  human label table. Off the render path.
-- `biome_locked` carries forward: a painted biome-preset pins a label; else it's derived.
-- Expose `biome_label_at(cell)` / counts via the GDExtension for the HUD/editor.
+- `biomes::biome_label(elevation, jaggedness, relief, temperature, moisture, vegetation) -> String`
+  composes a descriptor from coarse buckets — **climate** (temperature × moisture) · **cover**
+  (vegetation) · **landform** (elevation + jaggedness + relief), with a water phrase when submerged
+  (e.g. "temperate forest hills", "frozen jagged peaks", "arid scrub flats", "frozen deep water").
+  Threshold-only (determinism-safe), off the render path. It is mechanical *description* generated
+  from the dials — **not** canon place lore (the 14 named places are Regions; lore lives in the guide).
+- `World::biome_label_at(x, y)` + GDExtension `biome_label_at(x, y) -> GString`.
+- In-editor surface (adapted from "HUD"): the dock shows a live **"Biome: …"** readout under the
+  cursor, fed by the plugin's existing hover raycast (the brush-gizmo cast) — no extra picking.
 
-**Tests:** representative trait bundles classify to the expected label; locked cells keep theirs.
+> **Deferred (review):** locked-label pinning + per-biome counts weren't needed for the readout; the
+> emergent label is recomputed from live traits each hover. Colouring `VIEW_BIOME` by the classified
+> label (vs the current Region-accent view) can follow if wanted.
+
+**Tests:** `biome_label_describes_the_trait_composition` (representative bundles → expected words).
 
 ## Stage 3 — Brush + transition buffer + blend pass *(Rust core + C#)* — ✅ done (2026-06-14)
 

@@ -90,6 +90,9 @@ public partial class DhcePlugin : EditorPlugin
         var hits = world.Engine.Call("raycast_terrain", origin, dir, (double)world.Exaggeration).As<Vector3[]>();
         bool onTerrain = hits.Length > 0;
         UpdateGizmo(world, onTerrain ? hits[0] : Vector3.Zero, onTerrain);
+        _dock?.SetBiomeReadout(onTerrain
+            ? world.Engine.Call("biome_label_at", hits[0].X, hits[0].Z).AsString()
+            : null);
 
         if (@event is InputEventMouseButton mb)
         {
