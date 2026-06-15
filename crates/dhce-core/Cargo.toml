@@ -15,3 +15,13 @@ crate-type = ["rlib"]
 # Permissive Delaunay (MIT-elect / ISC — validated by the license gate). We own the
 # dual half-edge wrapper on top; PRNG + noise + Poisson sampling are our own.
 delaunator = "1"
+
+# Data-parallelism for the embarrassingly-parallel gen maps — NATIVE ONLY. Excluded on wasm32
+# (no threads there) so the frozen `dhce-wasm` determinism cross-check stays serial; parallel maps
+# are pure (index→value) so native-parallel output is bit-identical to wasm-serial. (rayon: MIT/Apache-2.0.)
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+rayon = "1"
+
+[dev-dependencies]
+# Native-only tests drive rayon thread pools to prove the parallel gen == serial gen (bit-identical).
+rayon = "1"

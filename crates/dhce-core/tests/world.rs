@@ -449,6 +449,24 @@ fn region_tier_assigns_via_polygon_and_persists() {
 }
 
 #[test]
+fn build_is_invariant_to_thread_count() {
+    // The gen path is parallelised (rayon) only on pure index→value maps, so output must be
+    // *bit-identical* regardless of thread count — this is the property that keeps saved worlds from
+    // desyncing (parallel == serial). Build under a 1-thread pool (≡ serial) vs a 4-thread pool.
+    let one = rayon::ThreadPoolBuilder::new().num_threads(1).build().unwrap();
+    let many = rayon::ThreadPoolBuilder::new().num_threads(4).build().unwrap();
+    let a = one.install(built);
+    let b = many.install(built);
+    let bits = |v: Vec<f32>| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+    assert_eq!(bits(a.elevation_export()), bits(b.elevation_export()), "elevation identical across thread counts");
+    assert_eq!(a.biome_export(), b.biome_export(), "biomes identical across thread counts");
+    // Colour cache (region_color, incl. the parallel smoothing) goes through the surface producer.
+    let sa = a.surface(100.0).expect("surface");
+    let sb = b.surface(100.0).expect("surface");
+    assert_eq!(bits(sa.colors), bits(sb.colors), "colours identical across thread counts");
+}
+
+#[test]
 fn surface_nets_sphere_is_a_closed_manifold() {
     // N5 Layer B: Surface Nets must extract a watertight isosurface (every edge shared by exactly two
     // triangles). A solid ball density field, well inside the grid, is the canonical check — it catches

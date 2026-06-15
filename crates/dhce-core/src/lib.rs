@@ -12,6 +12,8 @@
 //! - floating math is done in `f64` and narrowed to `f32` only at storage boundaries,
 //! - no `f32::mul_add`/fast-math, no nondeterministic ordering.
 
+pub(crate) mod util;
+
 pub mod prng;
 pub mod noise;
 pub mod points;

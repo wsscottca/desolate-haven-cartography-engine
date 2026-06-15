@@ -21,8 +21,9 @@ pub fn assign_region_elevation(
     seed: u64,
     octaves: u32,
 ) -> Vec<f64> {
-    let mut e = vec![0.0f64; mesh.num_regions()];
-    for r in 0..mesh.num_regions() {
+    // Pure per-region map (each `e[r]` depends only on `r`'s position + the seed) → parallel-safe:
+    // `par_map` preserves index order, so the result is bit-identical to the serial loop.
+    crate::util::par_map(mesh.num_regions(), |r| {
         let p = mesh.pos_of_r(r);
         let u = p[0] / width;
         let v = p[1] / height;
@@ -32,7 +33,6 @@ pub fn assign_region_elevation(
         let cy = v - 0.5;
         let d = (cx * cx + cy * cy).sqrt() * 2.0;
         h -= d * d * FALLOFF;
-        e[r] = h.clamp(-1.0, 1.0);
-    }
-    e
+        h.clamp(-1.0, 1.0)
+    })
 }

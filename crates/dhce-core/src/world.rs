@@ -266,45 +266,30 @@ impl World {
         let cx = width * 0.5;
         let cy = height * 0.5;
         let max_d = 0.5 * (width * width + height * height).sqrt();
-        let mut biome_r = vec![0u8; nr];
-        let mut moisture_r = vec![0.0f64; nr];
-        for r in 0..nr {
+        // Pure per-region map → parallel (bit-identical to serial; `mb[r]` depends only on `r`).
+        let elev = &self.elevation_r;
+        let mb: Vec<(f64, u8)> = crate::util::par_map(nr, |r| {
             let p = mesh.pos_of_r(r);
             let dist = ((p[0] - cx).powi(2) + (p[1] - cy).powi(2)).sqrt() / max_d;
             let moist = biomes::moisture_at(p[0], p[1], width, height, seed);
-            moisture_r[r] = moist;
-            biome_r[r] = biomes::classify(self.elevation_r[r], moist, dist);
-        }
-        self.biome_r = biome_r;
+            (moist, biomes::classify(elev[r], moist, dist))
+        });
+        self.moisture_r = mb.iter().map(|m| m.0).collect();
+        self.biome_r = mb.iter().map(|m| m.1).collect();
         self.region_r = vec![0u8; nr]; // named-Region tier starts unassigned; authored via paint_region
-        self.moisture_r = moisture_r;
 
         // Seed the per-cell trait fields from each cell's classified Region preset (the author
         // paints/edits over this). `moisture_r` keeps its noise value (more varied than the preset).
-        let mut jag = vec![0.0f64; nr];
-        let mut rel = vec![0.0f64; nr];
-        let mut foot = vec![0.0f64; nr];
-        let mut ero = vec![0.0f64; nr];
-        let mut temp = vec![0.0f64; nr];
-        let mut vegc = vec![0u8; nr];
-        let mut famc = vec![0u8; nr];
-        for r in 0..nr {
-            let tr = biomes::default_traits_for(self.biome_r[r]);
-            jag[r] = tr.jaggedness as f64;
-            rel[r] = tr.relief as f64;
-            foot[r] = tr.foothill_falloff as f64;
-            ero[r] = tr.erosion as f64;
-            temp[r] = tr.temperature as f64;
-            vegc[r] = tr.vegetation;
-            famc[r] = tr.palette_family;
-        }
-        self.jaggedness_r = jag;
-        self.relief_r = rel;
-        self.foothill_falloff_r = foot;
-        self.erosion_r = ero;
-        self.temperature_r = temp;
-        self.vegetation_r = vegc;
-        self.palette_family_r = famc;
+        // Pure per-region preset lookup → parallel; the per-field split below is cheap serial.
+        let biome = &self.biome_r;
+        let tr: Vec<biomes::CellTraits> = crate::util::par_map(nr, |r| biomes::default_traits_for(biome[r]));
+        self.jaggedness_r = tr.iter().map(|t| t.jaggedness as f64).collect();
+        self.relief_r = tr.iter().map(|t| t.relief as f64).collect();
+        self.foothill_falloff_r = tr.iter().map(|t| t.foothill_falloff as f64).collect();
+        self.erosion_r = tr.iter().map(|t| t.erosion as f64).collect();
+        self.temperature_r = tr.iter().map(|t| t.temperature as f64).collect();
+        self.vegetation_r = tr.iter().map(|t| t.vegetation).collect();
+        self.palette_family_r = tr.iter().map(|t| t.palette_family).collect();
         // The painted base starts equal to the seeded fields (nothing painted yet); the brushes
         // keep base + live in step, and `blend_traits` diffuses live from base.
         self.jaggedness_base = self.jaggedness_r.clone();
@@ -1709,52 +1694,53 @@ impl World {
     /// with a subtle deterministic brightness jitter to break up flatness.
     fn region_color(&self) -> Vec<f32> {
         let nr = self.elevation_r.len();
+        // Each pass below is a pure index→value map (the smoothing reads the *previous* buffer, never
+        // the one it writes) → parallelised bit-identically to the serial version. Held as `[f32;3]`
+        // per cell, flattened once at the end.
+        let mut cols: Vec<[f32; 3]> = crate::util::par_map(nr, |r| self.cell_color(r));
+
+        // Data views show the raw field — no neighbour smoothing or jitter (heatmap stays exact).
+        if self.view_mode == VIEW_NATURAL {
+            // Light-touch Laplacian smoothing toward the neighbour mean (double-buffered per iter).
+            if self.neighbors.len() == nr {
+                for _ in 0..COLOR_SMOOTH_ITERS {
+                    let next: Vec<[f32; 3]> = crate::util::par_map(nr, |r| {
+                        let mut sum = [0.0f32; 3];
+                        let mut cnt = 0.0f32;
+                        for &nb in &self.neighbors[r] {
+                            let nb = nb as usize;
+                            sum[0] += cols[nb][0];
+                            sum[1] += cols[nb][1];
+                            sum[2] += cols[nb][2];
+                            cnt += 1.0;
+                        }
+                        let mut out = cols[r];
+                        if cnt > 0.0 {
+                            for k in 0..3 {
+                                let mean = sum[k] / cnt;
+                                out[k] = cols[r][k] + (mean - cols[r][k]) * COLOR_SMOOTH_W;
+                            }
+                        }
+                        out
+                    });
+                    cols = next;
+                }
+            }
+            // Subtle per-region brightness variation (deterministic hash of the index).
+            let jittered: Vec<[f32; 3]> = crate::util::par_map(nr, |r| {
+                let h = hash_u32(r as u32);
+                let f = 1.0 + ((h & 0xffff) as f32 / 65535.0 - 0.5) * 2.0 * COLOR_VAR; // [-VAR, VAR]
+                let cr = cols[r];
+                [(cr[0] * f).clamp(0.0, 1.0), (cr[1] * f).clamp(0.0, 1.0), (cr[2] * f).clamp(0.0, 1.0)]
+            });
+            cols = jittered;
+        }
+
         let mut c = vec![0.0f32; nr * 3];
         for r in 0..nr {
-            let col = self.cell_color(r);
-            c[3 * r] = col[0];
-            c[3 * r + 1] = col[1];
-            c[3 * r + 2] = col[2];
-        }
-
-        // Data views show the raw field — no neighbour smoothing or jitter, so the heatmap is exact.
-        if self.view_mode != VIEW_NATURAL {
-            return c;
-        }
-
-        // Light-touch Laplacian smoothing toward the neighbour mean.
-        if self.neighbors.len() == nr {
-            for _ in 0..COLOR_SMOOTH_ITERS {
-                let mut next = c.clone();
-                for r in 0..nr {
-                    let mut sum = [0.0f32; 3];
-                    let mut cnt = 0.0f32;
-                    for &nb in &self.neighbors[r] {
-                        let nb = nb as usize;
-                        sum[0] += c[3 * nb];
-                        sum[1] += c[3 * nb + 1];
-                        sum[2] += c[3 * nb + 2];
-                        cnt += 1.0;
-                    }
-                    if cnt > 0.0 {
-                        for k in 0..3 {
-                            let mean = sum[k] / cnt;
-                            next[3 * r + k] = c[3 * r + k] + (mean - c[3 * r + k]) * COLOR_SMOOTH_W;
-                        }
-                    }
-                }
-                c = next;
-            }
-        }
-
-        // Subtle per-region brightness variation (deterministic hash of the index).
-        for r in 0..nr {
-            let h = hash_u32(r as u32);
-            let v = ((h & 0xffff) as f32 / 65535.0 - 0.5) * 2.0 * COLOR_VAR; // [-VAR, VAR]
-            let f = 1.0 + v;
-            for k in 0..3 {
-                c[3 * r + k] = (c[3 * r + k] * f).clamp(0.0, 1.0);
-            }
+            c[3 * r] = cols[r][0];
+            c[3 * r + 1] = cols[r][1];
+            c[3 * r + 2] = cols[r][2];
         }
         c
     }
