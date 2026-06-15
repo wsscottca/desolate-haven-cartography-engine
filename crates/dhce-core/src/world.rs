@@ -606,6 +606,34 @@ impl World {
         }
     }
 
+    /// Set one landform component (`idx`: 0 jaggedness, 1 relief, 2 foothill_falloff, 3 erosion)
+    /// of region `region_id`, and stamp it onto every cell currently in that region (live + painted
+    /// base), so a later [`shape_terrain`] reshapes that region's whole area. This ties the landform
+    /// dials to the Regions rather than a per-cell brush. Invisible until shaping bakes it, so no
+    /// recolour here. (Cells re-classified into the region after this won't carry the value until
+    /// re-applied — same caveat as the rest of the auto-classify path.)
+    pub fn set_region_landform(&mut self, region_id: u8, idx: usize, value: f64) {
+        if idx >= 4 {
+            return;
+        }
+        if let Some(a) = self.biome_landform.get_mut(region_id as usize) {
+            a[idx] = value as f32;
+        }
+        let n = self.biome_r.len();
+        for r in 0..n {
+            if self.biome_r[r] != region_id {
+                continue;
+            }
+            match idx {
+                0 => { self.jaggedness_r[r] = value; self.jaggedness_base[r] = value; }
+                1 => { self.relief_r[r] = value; self.relief_base[r] = value; }
+                2 => { self.foothill_falloff_r[r] = value; self.foothill_falloff_base[r] = value; }
+                3 => { self.erosion_r[r] = value; self.erosion_base[r] = value; }
+                _ => {}
+            }
+        }
+    }
+
     // --- traits (the trait-composition model; ADR 0004) ---
 
     /// Paint one trait into the brush footprint. `trait_id`: 0 jaggedness, 1 relief,

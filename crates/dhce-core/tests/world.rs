@@ -245,6 +245,18 @@ fn shaping_roughens_with_jaggedness_and_is_idempotent() {
 }
 
 #[test]
+fn region_landform_applies_to_a_regions_cells() {
+    // Setting a region's jaggedness should write it onto every cell of that region (so a later
+    // shape pass reshapes the whole region) — the region-tied replacement for the landform brush.
+    let mut w = built();
+    let r = w.region_at(500.0, 500.0).expect("centre region");
+    let region_id = w.biome_at(r);
+    w.set_region_landform(region_id, 0, 0.9); // idx 0 = jaggedness
+    let t = w.trait_at(500.0, 500.0, 0).expect("centre cell jaggedness");
+    assert!((t - 0.9).abs() < 1e-9, "region jaggedness applied to its cells: {t}");
+}
+
+#[test]
 fn shaping_strength_zero_is_a_no_op() {
     let mut w = built();
     w.paint_trait(500.0, 500.0, 5000.0, 0, 1.0);

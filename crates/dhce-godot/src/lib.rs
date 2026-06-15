@@ -241,6 +241,13 @@ impl DhceEngine {
     fn set_biome_water(&mut self, id: i64, idx: i64, v: f64) {
         self.world.set_biome_water(id.max(0) as usize, idx.max(0) as usize, v as f32);
     }
+    /// Set a region's landform component (`idx`: 0 jaggedness, 1 relief, 2 foothill_falloff,
+    /// 3 erosion) and stamp it onto that region's cells, so the next `shape_terrain` reshapes the
+    /// whole region. Ties the landform dials to the Regions instead of a per-cell brush.
+    #[func]
+    fn set_region_landform(&mut self, region_id: i64, idx: i64, value: f64) {
+        self.world.set_region_landform(region_id.max(0) as u8, idx.max(0) as usize, value);
+    }
 
     // --- traits (trait-composition model; ADR 0004) ---
 

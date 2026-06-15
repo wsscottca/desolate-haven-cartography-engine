@@ -36,16 +36,22 @@ public partial class ToolUi : CanvasLayer
     private Label _viewBrushLabel, _viewEditHint;
     private double _shapeStrength = 1.0; // global gain for Apply shaping
 
+    // Per-region landform editor (numeric inputs; replaces the landform trait brushes).
+    private OptionButton _landRegion;
+    private SpinBox[] _landSpins;
+    private bool _loadingLandform;
+
     private static readonly float[] BrushFractions = { 0.03f, 0.06f, 0.12f, 0.25f, 0.5f };
     private static readonly int[] DotFontSizes = { 9, 12, 16, 20, 25 };
 
-    // Trait dropdown order → engine trait id (0 jag,1 relief,2 foothill,3 erosion,4 temp,5 moist,
-    // 6 vegetation,7 palette_family). Enum traits (6,7) use the dropdown; the rest use the slider.
-    // Temperature/Moisture are NOT here — they're painted from the contextual brush under the VIEW
-    // select (those two traits have dedicated data views; see SelectView).
-    private static readonly int[] TraitEngineId = { 6, 7, 0, 1, 2, 3 };
-    private static readonly string[] TraitNames =
-        { "Vegetation", "Palette family", "Jaggedness", "Relief", "Foothill falloff", "Erosion" };
+    // Cover-trait brush: the two enum traits only (engine ids 6 vegetation, 7 palette_family).
+    // Temperature/Moisture paint from the contextual brush under the VIEW select; the landform
+    // dials (jaggedness/relief/foothill/erosion) are set per-Region in the REGION LANDFORM editor
+    // (set_region_landform), not painted.
+    private static readonly int[] TraitEngineId = { 6, 7 };
+    private static readonly string[] TraitNames = { "Vegetation", "Palette family" };
+    // Region landform components, in set_region_landform idx order.
+    private static readonly string[] LandNames = { "Jaggedness", "Relief", "Foothill falloff", "Erosion" };
     private static readonly string[] VegNames =
         { "Barren", "Grass", "Scrub", "Forest", "Evergreen", "Marsh", "Thorn" };
     private static readonly string[] FamilyNames =
@@ -219,6 +225,8 @@ public partial class ToolUi : CanvasLayer
         _traitEnum.ItemSelected += idx => { Root.Tool.TraitValue = (int)idx; Root.Tool.Active = ToolKind.Trait; };
         col.AddChild(_traitEnum);
 
+        BuildRegionLandform(col);
+
         // Bake the landform dials (Jaggedness/Relief/Foothill falloff/Erosion) into the terrain.
         // One-shot + idempotent: the core restores the previous shaping, then reapplies from the
         // current dial fields, so re-running (or changing strength) never compounds.
@@ -243,6 +251,51 @@ public partial class ToolUi : CanvasLayer
         col.AddChild(shape);
 
         SelectTrait(0); // default to Vegetation
+    }
+
+    /// Per-region landform editor: pick a Region, then set its jaggedness / relief / foothill /
+    /// erosion via numeric inputs (bounds 0..1). Each change stamps onto that region's cells
+    /// (set_region_landform); Apply shaping bakes it. Replaces the old per-cell landform brushes.
+    private void BuildRegionLandform(VBoxContainer col)
+    {
+        col.AddChild(ToolTheme.Header("REGION LANDFORM"));
+        var hint = DimLabel("Set a region's terrain character, then Apply shaping below.");
+        hint.AutowrapMode = TextServer.AutowrapMode.WordSmart;
+        col.AddChild(hint);
+
+        _landRegion = new OptionButton();
+        for (int id = 1; id <= BiomeNames.Length; id++) _landRegion.AddItem(BiomeNames[id - 1], id);
+        _landRegion.Selected = 0;
+        _landRegion.ItemSelected += _ => LoadRegionLandform();
+        col.AddChild(_landRegion);
+
+        _landSpins = new SpinBox[LandNames.Length];
+        for (int i = 0; i < LandNames.Length; i++)
+        {
+            int idx = i;
+            var sb = SpinRow(col, LandNames[i], 0, 1, 0.05, 0);
+            sb.ValueChanged += v => OnRegionLandform(idx, v);
+            _landSpins[i] = sb;
+        }
+        LoadRegionLandform();
+    }
+
+    private int SelectedLandRegion() => _landRegion.GetItemId(_landRegion.Selected);
+
+    private void LoadRegionLandform()
+    {
+        _loadingLandform = true; // setting .Value fires ValueChanged — don't write back while loading
+        var a = Root.Engine.Call("biome_landform_of", SelectedLandRegion()).As<float[]>();
+        for (int i = 0; i < _landSpins.Length && i < a.Length; i++) _landSpins[i].Value = a[i];
+        _loadingLandform = false;
+    }
+
+    private void OnRegionLandform(int idx, double v)
+    {
+        if (_loadingLandform) return;
+        int id = SelectedLandRegion();
+        Root.Engine.Call("set_region_landform", id, idx, v);
+        SetStatus($"{BiomeNames[id - 1]}: {LandNames[idx].ToLower()} {v:0.##} — Apply shaping to bake");
     }
 
     /// Point the Trait brush at the trait chosen in the dropdown, swapping the scalar slider for

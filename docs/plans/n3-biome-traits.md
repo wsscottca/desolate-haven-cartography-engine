@@ -130,11 +130,16 @@ Closes the gap flagged in Stage 3: the landform dials now reshape the terrain.
 **Tests (world.rs):** `shaping_roughens_with_jaggedness_and_is_idempotent`,
 `shaping_strength_zero_is_a_no_op`.
 
-### UI layout (this pass)
+### UI layout
 - The Temperature/Moisture brushes moved out of the Biomes-tab trait dropdown to a **contextual
-  paint slider under the VIEW select** (pick the view → paint that field in place, no tab hop). The
-  trait dropdown keeps Vegetation / Palette family / Jaggedness / Relief / Foothill / Erosion.
+  paint slider under the VIEW select** (pick the view → paint that field in place, no tab hop).
 - **Blend borders** (+ Width) moved to **under the map** in the right panel.
+- The landform dials (jaggedness / relief / foothill / erosion) are now **set per-Region** via a
+  **REGION LANDFORM** editor (numeric SpinBox inputs, 0..1) — `set_region_landform(region, idx,
+  value)` stamps onto that region's cells; Apply shaping bakes. They're no longer a per-cell brush,
+  so the trait brush keeps only Vegetation / Palette family. (True free-form "sections" arrive with
+  the Stage 4 border/territory tooling; until then the 14 Regions are the grouping.)
+- Vertical relief doubled: `TerrainHeightKm` default 1.2 → 2.4 km (live via the Height slider).
 
 ## Stage 4 — Border tool (scopes) + Region tier *(Rust core + C#)*
 

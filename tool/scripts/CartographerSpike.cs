@@ -35,7 +35,7 @@ public partial class CartographerSpike : Node3D
     /// Vertical relief in km. The core clamps normalized elevation to ~[-1.5, 1.5] (span
     /// `ElevSpan`), so the on-screen exaggeration is `TerrainHeightKm * 1000 / ElevSpan`
     /// (0.9 km ⇒ 300, the N0 baseline look).
-    [Export] public float TerrainHeightKm = 1.2f;
+    [Export] public float TerrainHeightKm = 2.4f;
     [Export] public float BrushRadiusM = 350f; // brush footprint radius, metres
     [Export] public float BrushStrength = 0.06f;
 
