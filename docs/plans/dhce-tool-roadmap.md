@@ -170,4 +170,9 @@ the per-dab timing line still prints.
 
 ## Pending housekeeping
 - Migrate the build-time license gate from `scripts/check-licenses.mjs` (Node) to `cargo-deny`.
+- **Attribution (MIT/Apache "proper use"):** the gate only checks *permissiveness* — when the **game**
+  ships (it links `dhce-godot` → `dhce-core`), bundle a third-party-licenses/NOTICE file carrying the
+  copyright + license text for the permissive deps: **rayon** (MIT/Apache-2.0, added 2026-06-15 for
+  parallel gen), `delaunator` (MIT), plus `gdext` (MPL-2.0) and `godot`. Easiest via `cargo-about`
+  (pairs with the cargo-deny migration). Done in the **game repo** at ship time, not here.
 - The frozen `dhce-wasm` should stay building (determinism cross-check) — don't delete it.
