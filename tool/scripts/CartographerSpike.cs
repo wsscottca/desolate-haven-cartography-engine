@@ -112,6 +112,8 @@ public partial class CartographerSpike : Node3D
     private bool _hasLastPaint;
     private bool _painting;
     private bool _strokeTouchedLiquid;
+    private bool _minimapDirty;
+    private int _minimapTick;
 
     // Brush preview gizmo (ring + translucent disc; green additive / red subtractive).
     private Node3D _brush;
@@ -193,7 +195,11 @@ public partial class CartographerSpike : Node3D
         }
 
         // A stroke released over a UI panel won't reach _UnhandledInput — settle here too.
-        if (_painting && !Input.IsMouseButtonPressed(MouseButton.Left)) { _painting = false; EndStroke(); _ui?.RefreshMinimap(); }
+        if (_painting && !Input.IsMouseButtonPressed(MouseButton.Left)) { _painting = false; EndStroke(); }
+
+        // Repaint the minimap shortly after the world changes (debounced; never mid-stroke).
+        if (_minimapDirty && !_painting && ++_minimapTick >= 12) { _minimapTick = 0; _minimapDirty = false; _ui?.RefreshMinimap(); }
+
         UpdateBrushGizmo();
     }
 
@@ -363,6 +369,7 @@ public partial class CartographerSpike : Node3D
     public void RebuildLiquid()
     {
         if (_liquidMesh == null) return;
+        _minimapDirty = true; // liquid changed → repaint the map
         _engine.Call("tessellate_liquid", (double)_exaggeration);
         _liquidMesh.ClearSurfaces();
         var positions = _engine.Call("liquid_positions").As<Vector3[]>();
@@ -519,7 +526,7 @@ public partial class CartographerSpike : Node3D
             else
             {
                 _sunDragging = false;
-                if (_painting) { _painting = false; EndStroke(); _ui?.RefreshMinimap(); }
+                if (_painting) { _painting = false; EndStroke(); }
             }
             return;
         }
@@ -582,6 +589,7 @@ public partial class CartographerSpike : Node3D
         int dirtyCount = 0;
         if (res.HasFlag(EditResult.Terrain)) dirtyCount = RepaintDirtyTerrain();
         if (res.HasFlag(EditResult.Liquid)) { _strokeTouchedLiquid = true; RebuildLiquid(); }
+        if (res != EditResult.None) _minimapDirty = true; // map repaints shortly after the stroke
         double ms = (Time.GetTicksUsec() - t0) / 1000.0;
 
         _totalMs += ms;
