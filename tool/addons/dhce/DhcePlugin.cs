@@ -4,14 +4,21 @@ using Godot;
 namespace DesolateHaven.Cartography;
 
 /// In-editor entry point for the DHCE authoring tool — the editor-plugin reshell (ADR 0005).
-/// Editor-only (`#if TOOLS`): a dock with a Generate button, and per-frame streaming of the scene's
-/// `DhceWorld` around the editor viewport camera. R2; later stages add viewport picking + the
-/// 3D-sphere brush (R3), the full tool dock (R4), and `DhceWorldState` persistence (R5).
+/// Editor-only (`#if TOOLS`): a dock (Generate + a minimal tool/brush slice) and per-frame streaming
+/// of the scene's `DhceWorld` around the editor viewport camera. When a `DhceWorld` is selected the
+/// plugin forwards 3D viewport input (`_Forward3DGuiInput`) into a brush stroke: ray from the editor
+/// camera → `raycast_terrain` → `ToolState.Apply` (which sets the 3D-sphere brush, R3). The full tool
+/// dock is R4; `DhceWorldState` persistence is R5.
 [Tool]
 public partial class DhcePlugin : EditorPlugin
 {
     private Control _dock;
     private Label _status;
+    private OptionButton _toolPick;
+
+    private readonly ToolState _tool = new();
+    private DhceWorld _edited;   // the DhceWorld currently selected/edited (drives picking)
+    private bool _painting;      // a left-drag stroke is in progress
 
     public override void _EnterTree()
     {
@@ -38,6 +45,69 @@ public partial class DhcePlugin : EditorPlugin
         if (cam != null) world.UpdateStreaming(GroundFocus(cam, world));
     }
 
+    // --- viewport picking: only active while a DhceWorld is selected ---
+
+    public override bool _Handles(GodotObject @object) => @object is DhceWorld;
+
+    public override void _Edit(GodotObject @object)
+    {
+        _edited = @object as DhceWorld;
+        _painting = false;
+    }
+
+    public override void _MakeVisible(bool visible)
+    {
+        if (!visible) { _edited = null; _painting = false; }
+    }
+
+    /// Turn a left-drag in the 3D viewport into a brush stroke on the selected world. Uses the editor
+    /// camera's own ray so the brush lands under the cursor from any angle; the 3D-sphere falloff
+    /// (set inside `ToolState.Apply`) keeps it biting the surface, not a vertical column.
+    public override int _Forward3DGuiInput(Camera3D camera, InputEvent @event)
+    {
+        int pass = (int)EditorPlugin.AfterGuiInput.Pass;
+        int stop = (int)EditorPlugin.AfterGuiInput.Stop;
+
+        var world = _edited;
+        if (world == null || !world.GenDone || world.Engine == null || camera == null)
+            return pass;
+
+        Vector2 mouse;
+        if (@event is InputEventMouseButton mb)
+        {
+            if (mb.ButtonIndex != MouseButton.Left) return pass;
+            if (!mb.Pressed)
+            {
+                bool was = _painting;
+                _painting = false;
+                return was ? stop : pass;
+            }
+            mouse = mb.Position;
+        }
+        else if (@event is InputEventMouseMotion mm)
+        {
+            if (!_painting || !mm.ButtonMask.HasFlag(MouseButtonMask.Left)) return pass;
+            mouse = mm.Position;
+        }
+        else return pass;
+
+        Vector3 origin = camera.ProjectRayOrigin(mouse);
+        Vector3 dir = camera.ProjectRayNormal(mouse);
+        var hits = world.Engine.Call("raycast_terrain", origin, dir, (double)world.Exaggeration).As<Vector3[]>();
+        if (hits.Length == 0)
+        {
+            _painting = false; // missed terrain → let the editor select/navigate normally
+            return pass;
+        }
+        _painting = true;
+        EditResult res = _tool.Apply(world.Engine, hits[0], world.Exaggeration);
+        if ((res & EditResult.Terrain) != 0) world.RepaintDirtyTerrain();
+        if ((res & EditResult.Liquid) != 0) world.RebuildLiquid();
+        return stop;
+    }
+
+    // --- dock ---
+
     private Control BuildDock()
     {
         var root = new VBoxContainer { Name = "DHCE" };
@@ -55,7 +125,29 @@ public partial class DhcePlugin : EditorPlugin
             AutowrapMode = TextServer.AutowrapMode.WordSmart,
         };
         root.AddChild(_status);
+
+        root.AddChild(new HSeparator());
+        root.AddChild(new Label { Text = "Brush (select a DhceWorld, left-drag to paint)" });
+
+        _toolPick = new OptionButton();
+        foreach (var name in System.Enum.GetNames<ToolKind>()) _toolPick.AddItem(name);
+        _toolPick.Selected = (int)_tool.Active;
+        _toolPick.ItemSelected += idx => _tool.Active = (ToolKind)idx;
+        root.AddChild(_toolPick);
+
+        AddSlider(root, "Radius (m)", 50f, 2000f, _tool.RadiusM, v => _tool.RadiusM = v);
+        AddSlider(root, "Strength (m)", 1f, 300f, _tool.StrengthM, v => _tool.StrengthM = v);
         return root;
+    }
+
+    /// A labelled HSlider whose live value drives `set`. The label tracks the value as it moves.
+    private static void AddSlider(Control parent, string name, float min, float max, float value, System.Action<float> set)
+    {
+        var label = new Label { Text = $"{name}: {value:0}" };
+        parent.AddChild(label);
+        var s = new HSlider { MinValue = min, MaxValue = max, Value = value, Step = 1 };
+        s.ValueChanged += v => { set((float)v); label.Text = $"{name}: {v:0}"; };
+        parent.AddChild(s);
     }
 
     private void OnGenerate()
@@ -68,7 +160,7 @@ public partial class DhcePlugin : EditorPlugin
         }
         _status.Text = "Generating… (the editor pauses for a few seconds)";
         world.Generate();
-        _status.Text = $"Generated a {world.WorldSizeKm:0} km world. Fly the viewport to stream it in.";
+        _status.Text = $"Generated ~{world.WorldWidthM / 1000f:0.0} km. Select the DhceWorld and left-drag to paint.";
     }
 
     /// The DhceWorld in the currently-edited scene (root or first descendant), or null.

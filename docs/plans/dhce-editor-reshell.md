@@ -91,13 +91,21 @@ editor camera streams chunks. `dotnet build` clean.
   **Applied to all six footprint brushes** (sculpt / liquid / course / trait / biome / region-traits),
   not just the four originally listed — consistent behaviour, same mechanical edit. Determinism-safe
   (multiply/add/sqrt). Core test `brush_sphere_bounds_the_footprint_vertically` green.
-- **⏳ remaining:** `forward_3d_gui_input(Camera3D camera, InputEvent e)` — build the ray from the
-  **editor camera** (`camera.ProjectRayOrigin/Normal`) → `raycast_terrain` → `set_brush_sphere(hit.Y,
-  exaggeration)` → apply the active tool at the hit; return `AfterGuiInput.Stop` while painting so the
-  editor doesn't also select/move. Brush gizmo drawn via an overlay `MeshInstance3D`. Port `ToolState`.
+- **Viewport picking — ✅ done (2026-06-15).** `DhcePlugin` overrides `_Handles`/`_Edit`/`_MakeVisible`
+  + `_Forward3DGuiInput(Camera3D, InputEvent) -> int` (the 4.6 C# binding returns `int`, not the
+  `AfterGuiInput` enum the docs show — cast). A left-drag on a selected `DhceWorld` builds the ray from
+  the **editor camera** (`ProjectRayOrigin`/`ProjectRayNormal`) → `raycast_terrain` → `ToolState.Apply`
+  (which calls `set_brush_sphere(hit.Y, exaggeration)` first, so the runtime app's angled-camera brush
+  is fixed too) → `RepaintDirtyTerrain`/`RebuildLiquid`. Returns `Stop` while painting, `Pass` on a
+  miss so normal selection/navigation still works. `ToolState` is reused from the shared assembly (no
+  copy). A minimal tool slice landed in the dock (tool `OptionButton` + radius/strength sliders) so the
+  brush is exercisable now; the full panel parity is R4.
+- **⏳ deferred to R4:** the brush gizmo (overlay `MeshInstance3D` ring under the cursor) for visual
+  feedback, and the rest of the dock panels.
 
 **Gate:** core test — a 3D-sphere brush at an angled hit touches a vertically-bounded footprint (not an
-infinite column) ✅. Visual: sculpt lands under the cursor from a side view (with the picking, below).
+infinite column) ✅. `dotnet build` clean + headless editor smoke loads the plugin ✅. Visual: sculpt
+lands under the cursor from a side view — **user editor check**.
 
 ### R3.5 — Fixed-size chunk streaming *(Rust core + C#; landed with R3 core, 2026-06-15)*
 User-requested mid-reshell: chunks are now a **fixed physical size** (`DEFAULT_CHUNK_SIZE_M = 256 m`,

@@ -36,6 +36,9 @@ public sealed class ToolState
     {
         double x = hit.X, z = hit.Z, r = RadiusM;
         double s = StrengthM / Mathf.Max(exaggeration, 1f); // metres → normalized elevation
+        // 3D-sphere brush (directional fix): bite a sphere centred on the hit, not a vertical column.
+        // hit.Y is the surface height under the cursor (= normalized elev × exaggeration).
+        engine.Call("set_brush_sphere", (double)hit.Y, (double)exaggeration);
         switch (Active)
         {
             case ToolKind.Raise: engine.Call("paint_terrain", x, z, r, s, 0); return EditResult.Terrain;
