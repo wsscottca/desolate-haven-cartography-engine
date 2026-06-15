@@ -107,6 +107,13 @@ beauty pass. Revisit after the sim is chunked + fast (above).
 Environment-first. **Track 2** can start immediately (shell-independent, fixes the live pain).
 **Track 1** is the larger effort and the headline. **Track 3** waits for the gameplay phase.
 
+## Future — per-region levels *(direction, post-reshell)*
+The game is **not open-world**: regions become their **own level scenes**, gated between each other.
+Workflow: author/landscape the **whole world** first (this tool), then a later phase **slices it
+per-Region into level scenes** (each Region's terrain + traits + scatter → a scene), with gates at
+the borders. The whole-world `DhceWorldState` stays the source of truth; the slice is an export step.
+This reinforces the Stage 4 Region tier (spatial region assignment) as the seam the slicer cuts on.
+
 ## Out of scope
 - Replacing the heightfield hydrology with SPH (rejected — ADR 0005).
 - Rapier inside `dhce-core` (it stays at the Godot server layer in the game).
