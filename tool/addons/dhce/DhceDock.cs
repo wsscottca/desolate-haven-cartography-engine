@@ -20,6 +20,7 @@ public partial class DhceDock : ScrollContainer
     private Label _biomeReadout;
     private Label _regionReadout;
     private Label _traitReadout;
+    private Label _scaleReadout;
     private OptionButton _regionPick;
     private VBoxContainer _col;
     private readonly ButtonGroup _toolGroup = new();
@@ -39,7 +40,7 @@ public partial class DhceDock : ScrollContainer
     private OptionButton _slotPick;
     private LineEdit _slotName, _slotMesh, _slotProxy;
     private HSlider _slotDensity;
-    private SpinBox _slotScaleMin, _slotScaleMax, _slotElevMin, _slotElevMax;
+    private SpinBox _slotScaleMin, _slotScaleMax, _slotElevMin, _slotElevMax, _slotVisEnd;
     private CheckBox[] _slotVeg;
     private CheckButton _scatterPreview;
     private CheckBox _slotInstances;
@@ -101,6 +102,16 @@ public partial class DhceDock : ScrollContainer
     /// Editor-camera ground focus → the minimap marker (fed by the plugin each frame).
     public void SetMapFocus(Vector3 f) => _minimap?.SetFocus(f);
 
+    /// Context-aware scale bar (LOD): the world span the viewport covers at the focus, unit-switched
+    /// cm → m → km. Fed by the plugin each frame from the editor camera.
+    public void SetViewScale(double metresAcross)
+    {
+        if (_scaleReadout == null) return;
+        _scaleReadout.Text = metresAcross < 1.0 ? $"View: ~{metresAcross * 100.0:0} cm across"
+            : metresAcross < 1000.0 ? $"View: ~{metresAcross:0} m across"
+            : $"View: ~{metresAcross / 1000.0:0.0} km across";
+    }
+
     /// Live emergent-biome descriptor under the cursor (fed by the plugin's hover raycast).
     public void SetBiomeReadout(string label)
     {
@@ -148,6 +159,8 @@ public partial class DhceDock : ScrollContainer
         _col.AddChild(_regionReadout);
         _traitReadout = Dim("Temp/Moist: —"); // numeric trait inspector under the cursor (Stage 5)
         _col.AddChild(_traitReadout);
+        _scaleReadout = Dim("View: —"); // context-aware scale bar (LOD): viewport span at the focus
+        _col.AddChild(_scaleReadout);
 
         Header("SAVE / LOAD");
         Button(_col, "Save world", () => { if (_world != null) SetStatus(_world.SaveToDisk()); });
@@ -498,6 +511,8 @@ public partial class DhceDock : ScrollContainer
         _slotElevMin.ValueChanged += v => { var s = SelectedSlot(); if (s != null && !_loadingSlot) s.ElevMin = (float)v; };
         _slotElevMax = SpinRow("Elev max", -2, 2, 0.02, 1.5);
         _slotElevMax.ValueChanged += v => { var s = SelectedSlot(); if (s != null && !_loadingSlot) s.ElevMax = (float)v; };
+        _slotVisEnd = SpinRow("Cull distance (m, 0=never)", 0, 20000, 50, 0);
+        _slotVisEnd.ValueChanged += v => { var s = SelectedSlot(); if (s != null && !_loadingSlot) s.VisibilityEndM = (float)v; };
 
         _col.AddChild(Dim("Appears on vegetation (none ticked = any):"));
         var vegGrid = new GridContainer { Columns = 2 };
@@ -594,6 +609,7 @@ public partial class DhceDock : ScrollContainer
         _slotElevMax.Value = s.ElevMax;
         for (int i = 0; i < _slotVeg.Length; i++) _slotVeg[i].ButtonPressed = (s.VegetationMask & (1 << i)) != 0;
         _slotInstances.ButtonPressed = s.BakeAsInstances;
+        _slotVisEnd.Value = s.VisibilityEndM;
         _loadingSlot = false;
     }
 

@@ -55,6 +55,9 @@ public partial class DhcePlugin : EditorPlugin
             Vector3 focus = GroundFocus(cam, world);
             world.UpdateStreaming(focus);
             _dock?.SetMapFocus(focus);
+            // Scale bar: the world span the viewport covers at the focus depth.
+            float dist = cam.GlobalPosition.DistanceTo(focus);
+            _dock?.SetViewScale(2.0 * dist * Mathf.Tan(Mathf.DegToRad(cam.Fov) * 0.5));
         }
     }
 

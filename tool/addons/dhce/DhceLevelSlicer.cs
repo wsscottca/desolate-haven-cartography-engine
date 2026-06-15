@@ -227,6 +227,7 @@ public static class DhceLevelSlicer
                 {
                     var mi = new MeshInstance3D { Name = $"Scatter_{name}_{k}", Mesh = mesh, Transform = kv.Value[k] };
                     if (!string.IsNullOrEmpty(slot.MeshPath)) mi.SetMeta("mesh_path", slot.MeshPath);
+                    ApplyLod(mi, slot);
                     nodes.Add(mi);
                 }
             }
@@ -236,6 +237,7 @@ public static class DhceLevelSlicer
                 for (int k = 0; k < kv.Value.Count; k++) mm.SetInstanceTransform(k, kv.Value[k]);
                 var mmi = new MultiMeshInstance3D { Name = $"Scatter_{name}", Multimesh = mm };
                 if (slot != null && !string.IsNullOrEmpty(slot.MeshPath)) mmi.SetMeta("mesh_path", slot.MeshPath);
+                ApplyLod(mmi, slot);
                 nodes.Add(mmi);
             }
         }
@@ -267,6 +269,15 @@ public static class DhceLevelSlicer
     }
 
     private static BoxMesh FallbackProxyMesh() => new BoxMesh { Size = Vector3.One };
+
+    /// Distance-cull a scatter node past the slot's `VisibilityEndM` (0 = never) — scatter LOD.
+    private static void ApplyLod(GeometryInstance3D node, DhceScatterSlot slot)
+    {
+        if (slot == null || slot.VisibilityEndM <= 0f) return;
+        node.VisibilityRangeEnd = slot.VisibilityEndM;
+        node.VisibilityRangeEndMargin = slot.VisibilityEndM * 0.1f;
+        node.VisibilityRangeFadeMode = GeometryInstance3D.VisibilityRangeFadeModeEnum.Self;
+    }
 
     private static string Sanitize(string s)
     {

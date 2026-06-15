@@ -29,4 +29,8 @@ public partial class DhceScatterSlot : Resource
     /// Bake as individual selectable `MeshInstance3D` nodes (hand-editable in the game) instead of one
     /// instanced `MultiMesh`. Heavy for dense cover — capped at export; leave off for ground cover.
     [Export] public bool BakeAsInstances = false;
+
+    /// Distance (m) past which this slot's instances are culled (LOD); 0 = never. Keeps dense cover
+    /// cheap far away. Applied to the preview + the baked nodes as a `VisibilityRangeEnd`.
+    [Export] public float VisibilityEndM = 0f;
 }

@@ -12,6 +12,11 @@ background_mode = 2
 sky = SubResource("Sky_dhce")
 ambient_light_source = 3
 tonemap_mode = 2
+fog_enabled = true
+fog_light_color = Color(0.62, 0.69, 0.78, 1)
+fog_density = 0.0006
+fog_aerial_perspective = 0.5
+fog_sky_affect = 0.2
 
 [node name="DhceHost" type="Node3D"]
 
