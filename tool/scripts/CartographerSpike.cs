@@ -63,8 +63,8 @@ public partial class CartographerSpike : Node3D
     private StandardMaterial3D _mat;
     private StandardMaterial3D _dataMat; // unshaded material for data views (colours are the raw field)
     private int _viewMode;               // 0 Natural; see SetViewMode / DhceEngine view_mode
-    private MeshInstance3D _liquid;
-    private ArrayMesh _liquidMesh;
+    private MeshInstance3D[] _liquidChunks;     // per-chunk liquid, streamed with the terrain chunks
+    private ArrayMesh[] _liquidChunkMeshes;
     private StandardMaterial3D _liquidMat;
     private static readonly Color WaterColor = new Color(0.20f, 0.45f, 0.75f, 0.6f);
     private static readonly Color LavaColor = new Color(0.95f, 0.35f, 0.10f, 0.9f);
@@ -231,6 +231,8 @@ public partial class CartographerSpike : Node3D
 
         _chunks = new MeshInstance3D[n];
         _chunkMeshes = new ArrayMesh[n];
+        _liquidChunks = new MeshInstance3D[n];
+        _liquidChunkMeshes = new ArrayMesh[n];
         _built = new bool[n];
         for (int i = 0; i < n; i++)
         {
@@ -239,11 +241,14 @@ public partial class CartographerSpike : Node3D
             AddChild(mi);
             _chunks[i] = mi;
             _chunkMeshes[i] = am;
-        }
 
-        _liquidMesh = new ArrayMesh();
-        _liquid = new MeshInstance3D { Mesh = _liquidMesh, MaterialOverride = _liquidMat };
-        AddChild(_liquid);
+            // Liquid chunk node, parallel to the terrain chunk; built/freed alongside it.
+            var lam = new ArrayMesh();
+            var lmi = new MeshInstance3D { Mesh = lam, MaterialOverride = _liquidMat };
+            AddChild(lmi);
+            _liquidChunks[i] = lmi;
+            _liquidChunkMeshes[i] = lam;
+        }
 
         HideSplash();
         _genDone = true;
@@ -349,14 +354,43 @@ public partial class CartographerSpike : Node3D
         arrays[(int)Mesh.ArrayType.Color] = colors;
         arrays[(int)Mesh.ArrayType.Index] = indices;
         am.AddSurfaceFromArrays(Mesh.PrimitiveType.Triangles, arrays);
+        BuildLiquidChunk(i); // liquid streams with its terrain chunk
         _built[i] = true;
     }
 
-    /// Release a chunk's GPU surface when it leaves render distance (the node stays; it just
-    /// goes empty until the chunk comes back into range and re-tessellates).
+    /// Re-pack one chunk's liquid sub-mesh (only its wet triangles). Empty ⇒ cleared (dry chunk).
+    /// The core caches the smoothed surface once per liquid change; this only marshals + uploads.
+    private void BuildLiquidChunk(int i)
+    {
+        if (_liquidChunkMeshes == null) return;
+        _engine.Call("tessellate_liquid_chunk", i, (double)_exaggeration);
+        ArrayMesh am = _liquidChunkMeshes[i];
+        am.ClearSurfaces();
+        var positions = _engine.Call("liquid_chunk_positions").As<Vector3[]>();
+        if (positions.Length == 0) return; // no water in this chunk — leave it cleared
+        var normals = _engine.Call("liquid_chunk_normals").As<Vector3[]>();
+        var types = _engine.Call("liquid_chunk_types").As<float[]>();
+        var indices = _engine.Call("liquid_chunk_indices").As<int[]>();
+
+        var colors = new Color[positions.Length];
+        for (int k = 0; k < positions.Length; k++)
+            colors[k] = (k < types.Length && types[k] > 0.5f) ? LavaColor : WaterColor;
+
+        var arrays = new Godot.Collections.Array();
+        arrays.Resize((int)Mesh.ArrayType.Max);
+        arrays[(int)Mesh.ArrayType.Vertex] = positions;
+        arrays[(int)Mesh.ArrayType.Normal] = normals;
+        arrays[(int)Mesh.ArrayType.Color] = colors;
+        arrays[(int)Mesh.ArrayType.Index] = indices;
+        am.AddSurfaceFromArrays(Mesh.PrimitiveType.Triangles, arrays);
+    }
+
+    /// Release a chunk's GPU surfaces (terrain + liquid) when it leaves render distance (the nodes
+    /// stay; they just go empty until the chunk comes back into range and re-tessellates).
     private void FreeChunk(int i)
     {
         _chunkMeshes[i].ClearSurfaces();
+        _liquidChunkMeshes[i].ClearSurfaces();
         _built[i] = false;
     }
 
@@ -388,32 +422,16 @@ public partial class CartographerSpike : Node3D
 
     private StandardMaterial3D CurrentViewMat() => _viewMode == 0 ? _mat : _dataMat;
 
-    /// Re-tessellate the whole liquid surface and re-upload it. Whole-surface (water is sparse);
-    /// chunked liquid is a deferred optimization. Vertex colour comes from liquid_types
-    /// (0 water → blue, 1 lava → orange-red).
+    /// Re-tessellate only the liquid chunks the last edit/sim changed that are currently in render
+    /// range (out-of-range dirty chunks re-tessellate when they next stream in). Replaces the old
+    /// whole-surface rebuild + full re-upload that ran every tick — the slow path.
     public void RebuildLiquid()
     {
-        if (_liquidMesh == null) return;
+        if (_liquidChunkMeshes == null) return;
         _minimapDirty = true; // liquid changed → repaint the map
-        _engine.Call("tessellate_liquid", (double)_exaggeration);
-        _liquidMesh.ClearSurfaces();
-        var positions = _engine.Call("liquid_positions").As<Vector3[]>();
-        if (positions.Length == 0) return; // no liquid — empty surface
-        var normals = _engine.Call("liquid_normals").As<Vector3[]>();
-        var types = _engine.Call("liquid_types").As<float[]>();
-        var indices = _engine.Call("liquid_indices").As<int[]>();
-
-        var colors = new Color[positions.Length];
-        for (int i = 0; i < positions.Length; i++)
-            colors[i] = (i < types.Length && types[i] > 0.5f) ? LavaColor : WaterColor;
-
-        var arrays = new Godot.Collections.Array();
-        arrays.Resize((int)Mesh.ArrayType.Max);
-        arrays[(int)Mesh.ArrayType.Vertex] = positions;
-        arrays[(int)Mesh.ArrayType.Normal] = normals;
-        arrays[(int)Mesh.ArrayType.Color] = colors;
-        arrays[(int)Mesh.ArrayType.Index] = indices;
-        _liquidMesh.AddSurfaceFromArrays(Mesh.PrimitiveType.Triangles, arrays);
+        int[] dirty = _engine.Call("take_dirty_liquid_chunks").As<int[]>();
+        foreach (int ci in dirty)
+            if (ci >= 0 && ci < _liquidChunkMeshes.Length && _built[ci]) BuildLiquidChunk(ci);
     }
 
     /// Rebuild the world from the current Seed/Octaves/WorldSizeKm/SpacingM (set by the UI).
@@ -421,8 +439,9 @@ public partial class CartographerSpike : Node3D
     public void Regenerate()
     {
         if (_chunks != null) foreach (var mi in _chunks) mi?.QueueFree();
+        if (_liquidChunks != null) foreach (var mi in _liquidChunks) mi?.QueueFree();
         _chunks = null; _chunkMeshes = null; _built = null;
-        _liquid?.QueueFree(); _liquid = null; _liquidMesh = null;
+        _liquidChunks = null; _liquidChunkMeshes = null;
         _genDone = false;
 
         _widthM = _heightM = WorldSizeKm * 1000f;

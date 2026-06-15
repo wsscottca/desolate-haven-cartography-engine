@@ -131,6 +131,33 @@ fn chunks_partition_all_triangles_and_track_edits() {
     assert!(w.take_dirty_chunks().is_empty(), "taking dirty chunks clears them");
 }
 
+#[test]
+fn liquid_chunks_partition_the_wet_surface() {
+    // The chunked liquid surface must cover exactly the same wet triangles as the whole-surface
+    // build (so streaming per chunk loses nothing) — the basis of the chunked-liquid perf win.
+    let mut w = World::new();
+    w.build(3000.0, 3000.0, 12.0, 7, 5); // dense enough for several chunks
+    w.set_sea_level(0.5); // flood a substantial area
+    let _ = w.take_dirty_liquid_chunks(); // drain the sea-fill's flag-all so the edit check is clean
+
+    let whole = w.liquid_surface(100.0).expect("liquid surface").indices.len() / 3;
+    assert!(whole > 0, "the sea fill should produce wet triangles");
+
+    let mut chunked = 0usize;
+    for c in 0..w.chunk_count() {
+        if let Some(s) = w.liquid_chunk_surface(c, 100.0) {
+            chunked += s.indices.len() / 3;
+        }
+    }
+    assert_eq!(chunked, whole, "liquid chunks partition the wet surface exactly once");
+
+    // A liquid edit flags liquid chunks (reading chunk surfaces above does not); taking clears them.
+    assert!(w.take_dirty_liquid_chunks().is_empty(), "reads don't flag liquid chunks");
+    w.paint_liquid(1500.0, 1500.0, 200.0, 0.2, 0);
+    assert!(!w.take_dirty_liquid_chunks().is_empty(), "a liquid edit flags its chunks");
+    assert!(w.take_dirty_liquid_chunks().is_empty(), "taking liquid-dirty chunks clears them");
+}
+
 fn avg_luma(colors: &[f32]) -> f32 {
     let n = colors.len() / 3;
     let mut s = 0.0f32;

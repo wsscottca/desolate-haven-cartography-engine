@@ -18,14 +18,14 @@ const WET: f64 = 1.0e-4; // a region with at least this much liquid renders as w
 /// A region needs at least this much liquid to contribute render geometry. Slightly
 /// above [`WET`] so the very thinnest films (which read as jagged shards on slopes)
 /// drop out of the surface mesh.
-const MIN_RENDER_DEPTH: f64 = 5.0e-4;
+pub const MIN_RENDER_DEPTH: f64 = 5.0e-4;
 
 /// Rendering-only smoothing of the liquid surface (passes + blend toward the wet
 /// neighbour mean). The sim itself is untouched and still mass-conserving; this only
 /// calms the *rendered* surface so pooled water reads as a level sheet instead of a
 /// field of per-cell spikes during the settle.
-const RENDER_SMOOTH_ITERS: usize = 3;
-const RENDER_SMOOTH_W: f64 = 0.5;
+pub const RENDER_SMOOTH_ITERS: usize = 3;
+pub const RENDER_SMOOTH_W: f64 = 0.5;
 
 /// Per-region liquid state.
 pub struct LiquidField {

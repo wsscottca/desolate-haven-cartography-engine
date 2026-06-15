@@ -129,6 +129,14 @@ pub struct World {
     /// Active data-view mode (see the `VIEW_*` consts). Off `Natural`, the colour cache holds a
     /// direct readout of one field instead of the composed terrain colour.
     view_mode: u8,
+    /// Liquid render caches (parallel to the terrain chunk system): the smoothed liquid-surface
+    /// height + wet mask per region, recomputed lazily when liquid changes (`liquid_cache_dirty`),
+    /// plus a per-chunk dirty flag. The front-end streams + re-tessellates only in-range, changed
+    /// liquid chunks — the whole surface was rebuilt + re-uploaded every tick before (the slow path).
+    liquid_surf_cache: Vec<f64>,
+    liquid_wet_cache: Vec<bool>,
+    liquid_cache_dirty: bool,
+    liquid_chunk_dirty: Vec<bool>,
 }
 
 impl Default for World {
@@ -195,6 +203,10 @@ impl World {
             chunk_rows: 0,
             color_cache: Vec::new(),
             view_mode: VIEW_NATURAL,
+            liquid_surf_cache: Vec::new(),
+            liquid_wet_cache: Vec::new(),
+            liquid_cache_dirty: true,
+            liquid_chunk_dirty: Vec::new(),
         }
     }
 
@@ -288,6 +300,10 @@ impl World {
         // Partition into rendering chunks and cache smoothed colors for them.
         self.build_chunks();
         self.color_cache = self.region_color();
+        // Liquid render caches (smoothed surface + wet mask), recomputed lazily on first request.
+        self.liquid_surf_cache = vec![0.0; nr];
+        self.liquid_wet_cache = vec![false; nr];
+        self.liquid_cache_dirty = true;
     }
 
     pub fn region_count(&self) -> usize {
@@ -327,11 +343,13 @@ impl World {
     pub fn set_sea_level(&mut self, level: f64) {
         self.sea_level = level;
         fluid::sea_fill(&mut self.field, &self.elevation_r, level);
+        self.mark_all_liquid_changed();
     }
 
     /// Add a uniform `amount` of rainfall to land above the current sea level.
     pub fn rain(&mut self, amount: f64) {
         fluid::add_rain(&mut self.field, &self.elevation_r, self.sea_level, amount);
+        self.mark_all_liquid_changed();
     }
 
     /// Advance the hydraulic solver `substeps` relaxation steps.
@@ -339,11 +357,15 @@ impl World {
         for _ in 0..substeps {
             fluid::relax_step(&mut self.field, &self.elevation_r, &self.neighbors, flow_rate, evaporation);
         }
+        // v2.1: flag all liquid chunks; the front-end still only re-tessellates in-range ones (the
+        // win). Stage 2.2 (active-set) will narrow this to the regions that actually moved.
+        self.mark_all_liquid_changed();
     }
 
     /// Remove all liquid.
     pub fn clear_liquid(&mut self) {
         self.field.clear();
+        self.mark_all_liquid_changed();
     }
 
     // --- brush tools ---
@@ -411,6 +433,7 @@ impl World {
         // coloring tracks the new terrain (manually painted cells stay locked).
         self.reclassify(&touched);
         self.after_edit(&touched);
+        self.mark_liquid_changed(&touched); // risen land displaced the water it rose through
         touched
     }
 
@@ -422,21 +445,26 @@ impl World {
         }
         let r2 = radius * radius;
         let candidates = self.brush_candidates(cx, cy, radius);
-        let mesh = self.mesh.as_ref().unwrap();
-        for &rid in &candidates {
-            let ri = rid as usize;
-            let p = mesh.pos_of_r(ri);
-            let d2 = (p[0] - cx).powi(2) + (p[1] - cy).powi(2);
-            if d2 >= r2 {
-                continue;
-            }
-            let t = 1.0 - (d2 / r2).sqrt();
-            let add = amount * t * t * (3.0 - 2.0 * t);
-            if add > 0.0 {
-                self.field.depth[ri] += add;
-                self.field.kind[ri] = kind;
+        let mut touched = Vec::new();
+        {
+            let mesh = self.mesh.as_ref().unwrap();
+            for &rid in &candidates {
+                let ri = rid as usize;
+                let p = mesh.pos_of_r(ri);
+                let d2 = (p[0] - cx).powi(2) + (p[1] - cy).powi(2);
+                if d2 >= r2 {
+                    continue;
+                }
+                let t = 1.0 - (d2 / r2).sqrt();
+                let add = amount * t * t * (3.0 - 2.0 * t);
+                if add > 0.0 {
+                    self.field.depth[ri] += add;
+                    self.field.kind[ri] = kind;
+                    touched.push(rid);
+                }
             }
         }
+        self.mark_liquid_changed(&touched);
     }
 
     /// Course tool: carve a river channel under `(cx, cy)` while laying thin water, and
@@ -497,6 +525,7 @@ impl World {
         }
         self.reclassify(&touched);
         self.after_edit(&touched);
+        self.mark_liquid_changed(&touched);
         touched
     }
 
@@ -542,6 +571,7 @@ impl World {
         let idx: Vec<u32> = (0..n).filter(|&r| res.is_stream[r]).map(|r| r as u32).collect();
         self.reclassify(&idx);
         self.after_edit(&idx);
+        self.mark_all_liquid_changed(); // streams carve channels + lay water across the map
     }
 
     // --- biomes ---
@@ -1454,6 +1484,7 @@ impl World {
         self.chunk_tris = chunk_tris;
         self.region_chunks = region_chunks;
         self.chunk_dirty = vec![false; cols * rows];
+        self.liquid_chunk_dirty = vec![false; cols * rows];
         self.chunk_cols = cols;
         self.chunk_rows = rows;
     }
@@ -1620,6 +1651,176 @@ impl World {
             colors,
             indices,
         })
+    }
+
+    // --- liquid rendering chunks (mirror the terrain chunk path) ---
+
+    /// Mark the liquid render caches stale and flag the chunks of `regions` for re-tessellation.
+    fn mark_liquid_changed(&mut self, regions: &[u32]) {
+        self.liquid_cache_dirty = true;
+        for &rid in regions {
+            if let Some(chunks) = self.region_chunks.get(rid as usize) {
+                for &c in chunks {
+                    if let Some(d) = self.liquid_chunk_dirty.get_mut(c as usize) {
+                        *d = true;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Mark the liquid caches stale and flag every liquid chunk (for global liquid ops).
+    fn mark_all_liquid_changed(&mut self) {
+        self.liquid_cache_dirty = true;
+        for d in self.liquid_chunk_dirty.iter_mut() {
+            *d = true;
+        }
+    }
+
+    /// Recompute the smoothed liquid-surface height + wet mask caches (lazy — only when stale). This
+    /// is the render-side calm that used to live inside [`fluid::liquid_surface`], hoisted so chunked
+    /// tessellation reads one shared cache instead of re-smoothing per chunk.
+    fn ensure_liquid_cache(&mut self) {
+        if !self.liquid_cache_dirty {
+            return;
+        }
+        let nr = self.elevation_r.len();
+        let mut surf = vec![0.0f64; nr];
+        let mut wet = vec![false; nr];
+        for r in 0..nr {
+            surf[r] = self.elevation_r[r] + self.field.depth[r];
+            wet[r] = self.field.depth[r] > fluid::MIN_RENDER_DEPTH;
+        }
+        if self.neighbors.len() == nr {
+            for _ in 0..fluid::RENDER_SMOOTH_ITERS {
+                let mut next = surf.clone();
+                for r in 0..nr {
+                    if !wet[r] {
+                        continue;
+                    }
+                    let mut sum = 0.0;
+                    let mut cnt = 0.0;
+                    for &nb in &self.neighbors[r] {
+                        let nb = nb as usize;
+                        if wet[nb] {
+                            sum += surf[nb];
+                            cnt += 1.0;
+                        }
+                    }
+                    if cnt > 0.0 {
+                        let mean = sum / cnt;
+                        next[r] = surf[r] + (mean - surf[r]) * fluid::RENDER_SMOOTH_W;
+                    }
+                }
+                surf = next;
+            }
+        }
+        for r in 0..nr {
+            if surf[r] < self.elevation_r[r] {
+                surf[r] = self.elevation_r[r];
+            }
+        }
+        self.liquid_surf_cache = surf;
+        self.liquid_wet_cache = wet;
+        self.liquid_cache_dirty = false;
+    }
+
+    /// Pack one chunk's liquid sub-mesh from the (lazily recomputed) liquid caches: a local vertex
+    /// array of the chunk's wet regions at their smoothed surface height, area-weighted normals from
+    /// this chunk's wet triangles, and per-vertex liquid type. Returns an empty surface (not `None`)
+    /// for a chunk with no wet triangles, so the front-end can clear a chunk that dried up. `None`
+    /// only on a bad index / unbuilt mesh.
+    pub fn liquid_chunk_surface(&mut self, chunk: usize, exaggeration: f64) -> Option<LiquidSurface> {
+        self.ensure_liquid_cache();
+        let mesh = self.mesh.as_ref()?;
+        let tris = self.chunk_tris.get(chunk)?;
+        let mut local_of: HashMap<u32, u32> = HashMap::new();
+        let mut globals: Vec<u32> = Vec::new();
+        let mut indices: Vec<u32> = Vec::new();
+        for &t in tris {
+            let a = mesh.r_begin_s(3 * t as usize) as u32;
+            let b = mesh.r_begin_s(3 * t as usize + 1) as u32;
+            let c = mesh.r_begin_s(3 * t as usize + 2) as u32;
+            if !self.liquid_wet_cache[a as usize]
+                || !self.liquid_wet_cache[b as usize]
+                || !self.liquid_wet_cache[c as usize]
+            {
+                continue;
+            }
+            for &r in &[a, b, c] {
+                let li = *local_of.entry(r).or_insert_with(|| {
+                    let idx = globals.len() as u32;
+                    globals.push(r);
+                    idx
+                });
+                indices.push(li);
+            }
+        }
+        let n = globals.len();
+        let mut positions = vec![0.0f32; n * 3];
+        let mut types = vec![0.0f32; n];
+        for (li, &r) in globals.iter().enumerate() {
+            let ru = r as usize;
+            let p = mesh.pos_of_r(ru);
+            positions[3 * li] = p[0] as f32;
+            positions[3 * li + 1] = p[1] as f32;
+            positions[3 * li + 2] = (self.liquid_surf_cache[ru] * exaggeration) as f32;
+            types[li] = self.field.kind[ru] as f32;
+        }
+        let mut accum = vec![0.0f64; n * 3];
+        for tri in indices.chunks_exact(3) {
+            let (la, lb, lc) = (tri[0] as usize, tri[1] as usize, tri[2] as usize);
+            let ax = positions[3 * la] as f64;
+            let ay = positions[3 * la + 1] as f64;
+            let az = positions[3 * la + 2] as f64;
+            let bx = positions[3 * lb] as f64;
+            let by = positions[3 * lb + 1] as f64;
+            let bz = positions[3 * lb + 2] as f64;
+            let cx = positions[3 * lc] as f64;
+            let cy = positions[3 * lc + 1] as f64;
+            let cz = positions[3 * lc + 2] as f64;
+            let (ux, uy, uz) = (bx - ax, by - ay, bz - az);
+            let (vx, vy, vz) = (cx - ax, cy - ay, cz - az);
+            let mut nx = uy * vz - uz * vy;
+            let mut ny = uz * vx - ux * vz;
+            let mut nz = ux * vy - uy * vx;
+            if nz < 0.0 {
+                nx = -nx;
+                ny = -ny;
+                nz = -nz;
+            }
+            for &li in &[la, lb, lc] {
+                accum[3 * li] += nx;
+                accum[3 * li + 1] += ny;
+                accum[3 * li + 2] += nz;
+            }
+        }
+        let mut normals = vec![0.0f32; n * 3];
+        for li in 0..n {
+            let (nx, ny, nz) = (accum[3 * li], accum[3 * li + 1], accum[3 * li + 2]);
+            let len = (nx * nx + ny * ny + nz * nz).sqrt();
+            if len > 1e-12 {
+                normals[3 * li] = (nx / len) as f32;
+                normals[3 * li + 1] = (ny / len) as f32;
+                normals[3 * li + 2] = (nz / len) as f32;
+            } else {
+                normals[3 * li + 2] = 1.0;
+            }
+        }
+        Some(LiquidSurface { positions, normals, types, indices })
+    }
+
+    /// Liquid chunk ids changed since the last call (cleared by this call); re-tessellate exactly
+    /// these (intersected with what's in render range on the front-end).
+    pub fn take_dirty_liquid_chunks(&mut self) -> Vec<u32> {
+        let mut out = Vec::new();
+        for (i, d) in self.liquid_chunk_dirty.iter_mut().enumerate() {
+            if *d {
+                *d = false;
+                out.push(i as u32);
+            }
+        }
+        out
     }
 }
 

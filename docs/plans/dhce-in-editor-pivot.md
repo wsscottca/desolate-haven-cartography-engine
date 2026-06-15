@@ -50,9 +50,11 @@ stays responsive; `dotnet build` + headless smoke where applicable.
 Makes live terraform water responsive. Today `RebuildLiquid` re-tessellates + re-uploads the **whole**
 liquid surface every tick/edit (liquid is one un-chunked mesh).
 
-- **2.1 Chunked liquid tessellation** *(biggest win).* `liquid_chunk_surface(chunk, exag)` packing
-  only a chunk's wet triangles (reusing the terrain chunk partition); liquid edits flag liquid-dirty
-  chunks; C# keeps per-chunk liquid meshes and re-tessellates only dirty + in-range ones.
+- **2.1 Chunked liquid tessellation** *(biggest win)* — ✅ done (2026-06-15). `liquid_chunk_surface`
+  packs only a chunk's wet triangles from a lazily-recomputed smoothed-surface cache; liquid edits
+  flag liquid-dirty chunks (`mark_liquid_changed` / `mark_all_liquid_changed`); C# streams per-chunk
+  liquid meshes alongside terrain and re-tessellates only dirty + in-range ones. Whole-surface
+  `liquid_surface` retained for export only.
 - **2.2 Active-set (sleeping) relaxation.** `relax_step` iterates only regions that changed last
   substep (+ neighbours); settled water drops out; edits re-activate their footprint. Mass conserved.
 - **2.3 Deterministic parallelism.** Rewrite `relax_step` + surface build as a **gather** (each cell

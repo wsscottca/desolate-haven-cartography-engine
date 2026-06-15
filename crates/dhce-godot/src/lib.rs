@@ -26,6 +26,7 @@ struct DhceEngine {
     surface: Option<Surface>,
     chunk_cache: Option<Surface>,
     liquid: Option<LiquidSurface>,
+    liquid_chunk_cache: Option<LiquidSurface>,
     scatter_buf: Vec<f32>,
     scatter_n: usize,
     base: Base<RefCounted>,
@@ -39,6 +40,7 @@ impl IRefCounted for DhceEngine {
             surface: None,
             chunk_cache: None,
             liquid: None,
+            liquid_chunk_cache: None,
             scatter_buf: Vec::new(),
             scatter_n: 0,
             base,
@@ -190,6 +192,36 @@ impl DhceEngine {
     #[func]
     fn liquid_indices(&self) -> PackedInt32Array {
         self.liquid.as_ref().map(|s| u32_to_packed(&s.indices)).unwrap_or_default()
+    }
+
+    // --- liquid chunks (mirror the terrain chunk path: stream + re-tessellate only in-range tiles) ---
+
+    /// Pack liquid chunk `chunk` at `exaggeration` into the liquid chunk cache, then read the getters.
+    #[func]
+    fn tessellate_liquid_chunk(&mut self, chunk: i64, exaggeration: f64) {
+        self.liquid_chunk_cache = self.world.liquid_chunk_surface(chunk.max(0) as usize, exaggeration);
+    }
+    #[func]
+    fn liquid_chunk_positions(&self) -> PackedVector3Array {
+        self.liquid_chunk_cache.as_ref().map(|s| to_vec3_yup(&s.positions)).unwrap_or_default()
+    }
+    #[func]
+    fn liquid_chunk_normals(&self) -> PackedVector3Array {
+        self.liquid_chunk_cache.as_ref().map(|s| to_vec3_yup(&s.normals)).unwrap_or_default()
+    }
+    #[func]
+    fn liquid_chunk_types(&self) -> PackedFloat32Array {
+        self.liquid_chunk_cache.as_ref().map(|s| PackedFloat32Array::from(s.types.as_slice())).unwrap_or_default()
+    }
+    #[func]
+    fn liquid_chunk_indices(&self) -> PackedInt32Array {
+        self.liquid_chunk_cache.as_ref().map(|s| u32_to_packed(&s.indices)).unwrap_or_default()
+    }
+    /// Liquid chunk ids changed by the last edit/sim (cleared by this call); re-tessellate exactly
+    /// these that are in render range.
+    #[func]
+    fn take_dirty_liquid_chunks(&mut self) -> PackedInt32Array {
+        u32_to_packed(&self.world.take_dirty_liquid_chunks())
     }
 
     // --- brush tools (return touched region ids for partial mesh updates) ---
