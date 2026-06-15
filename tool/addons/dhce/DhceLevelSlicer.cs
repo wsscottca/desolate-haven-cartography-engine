@@ -112,7 +112,46 @@ public static class DhceLevelSlicer
             int scount = engine.Call("scatter_count").As<int>();
             if (scount > 0) Adopt(root, new MultiMeshInstance3D { Name = "ScatterProxy", Multimesh = BuildScatter(engine.Call("scatter_data").As<float[]>(), scount) });
         }
+
+        BakeCaves(world, engine, root, id, exag);
         return root;
+    }
+
+    /// Carve the authored volumetric features whose centre lands in this Region into a Surface-Nets
+    /// mesh (+ trimesh collider), embedded in the level scene. v1 note: the carved patch overlays the
+    /// flat region terrain at the opening (no hole cut yet) — a later refinement.
+    private static void BakeCaves(DhceWorld world, GodotObject engine, Node3D root, int id, float exag)
+    {
+        if (world.Caves == null || world.Caves.Count == 0) return;
+        var mine = new List<Vector4>();
+        foreach (Vector4 c in world.Caves)
+            if ((int)engine.Call("region_id_at", c.X, c.Z).AsInt64() == id) mine.Add(c);
+        if (mine.Count == 0) return;
+
+        var flat = new float[mine.Count * 4];
+        for (int i = 0; i < mine.Count; i++) { flat[i * 4] = mine[i].X; flat[i * 4 + 1] = mine[i].Y; flat[i * 4 + 2] = mine[i].Z; flat[i * 4 + 3] = mine[i].W; }
+        engine.Call("tessellate_caves", flat, (double)exag, 3.0);
+        var pos = engine.Call("cave_positions").As<Vector3[]>();
+        if (pos.Length == 0) return;
+        var norm = engine.Call("cave_normals").As<Vector3[]>();
+        var idx = engine.Call("cave_indices").As<int[]>();
+        var col = new Color[pos.Length];
+        for (int k = 0; k < pos.Length; k++) col[k] = new Color(0.40f, 0.38f, 0.36f); // rock
+        var mesh = BuildMesh(pos, norm, col, idx);
+
+        Adopt(root, new MeshInstance3D { Name = "Caves", Mesh = mesh, MaterialOverride = CaveMat() });
+        var body = new StaticBody3D { Name = "CaveCollider" };
+        Adopt(root, body);
+        var shape = new CollisionShape3D { Shape = mesh.CreateTrimeshShape() };
+        body.AddChild(shape);
+        shape.Owner = root;
+    }
+
+    private static StandardMaterial3D CaveMat()
+    {
+        var m = new StandardMaterial3D { VertexColorUseAsAlbedo = true, Roughness = 0.95f };
+        m.Set("cull_mode", 2); // CULL_DISABLED — Surface-Nets winding isn't guaranteed outward
+        return m;
     }
 
     // --- mesh/material/multimesh helpers ---

@@ -12,6 +12,7 @@
 use dhce_core::fluid::LiquidSurface;
 use dhce_core::geometry::Surface;
 use dhce_core::scatter::{Instance, ScatterRule};
+use dhce_core::volumetric::VolumeMesh;
 use dhce_core::world::World;
 use godot::prelude::*;
 
@@ -28,6 +29,7 @@ struct DhceEngine {
     chunk_cache: Option<Surface>,
     region_cache: Option<Surface>,
     region_liquid_cache: Option<LiquidSurface>,
+    cave_cache: Option<VolumeMesh>,
     liquid: Option<LiquidSurface>,
     liquid_chunk_cache: Option<LiquidSurface>,
     scatter_buf: Vec<f32>,
@@ -44,6 +46,7 @@ impl IRefCounted for DhceEngine {
             chunk_cache: None,
             region_cache: None,
             region_liquid_cache: None,
+            cave_cache: None,
             liquid: None,
             liquid_chunk_cache: None,
             scatter_buf: Vec::new(),
@@ -228,6 +231,33 @@ impl DhceEngine {
     #[func]
     fn region_liquid_indices(&self) -> PackedInt32Array {
         self.region_liquid_cache.as_ref().map(|s| u32_to_packed(&s.indices)).unwrap_or_default()
+    }
+
+    // --- volumetric caves (N5): carve the authored spheres into a Surface-Nets mesh (Godot space) ---
+
+    /// Cache the carved cave mesh. `caves_flat` = 4 floats per sphere `[x, y, z, radius]` (Godot
+    /// space); `cell` = sample spacing (smaller = finer, the grid is capped). Read via `cave_*` below.
+    #[func]
+    fn tessellate_caves(&mut self, caves_flat: PackedFloat32Array, exaggeration: f64, cell: f64) {
+        let v = caves_flat.to_vec();
+        let mut caves: Vec<[f64; 4]> = Vec::with_capacity(v.len() / 4);
+        for c in v.chunks_exact(4) {
+            caves.push([c[0] as f64, c[1] as f64, c[2] as f64, c[3] as f64]);
+        }
+        self.cave_cache = Some(self.world.volumetric_mesh(&caves, exaggeration, cell));
+    }
+    /// Carved cave mesh positions — already Godot space (no Y-up remap).
+    #[func]
+    fn cave_positions(&self) -> PackedVector3Array {
+        self.cave_cache.as_ref().map(|m| to_vec3_direct(&m.positions)).unwrap_or_default()
+    }
+    #[func]
+    fn cave_normals(&self) -> PackedVector3Array {
+        self.cave_cache.as_ref().map(|m| to_vec3_direct(&m.normals)).unwrap_or_default()
+    }
+    #[func]
+    fn cave_indices(&self) -> PackedInt32Array {
+        self.cave_cache.as_ref().map(|m| u32_to_packed(&m.indices)).unwrap_or_default()
     }
     /// Fill the scatter buffer (read via `scatter_data`/`scatter_count`) with Region `region_id`'s
     /// proxy instances: flat `[x, y, z, scale, species]` (core ground x/y, height z) per instance.
@@ -683,6 +713,17 @@ fn to_vec3_yup(flat: &[f32]) -> PackedVector3Array {
     let mut v = Vec::with_capacity(n);
     for i in 0..n {
         v.push(Vector3::new(flat[3 * i], flat[3 * i + 2], flat[3 * i + 1]));
+    }
+    PackedVector3Array::from(v.as_slice())
+}
+
+/// Pack a flat `[x, y, z, ...]` f32 buffer that's **already in Godot space** (no Y-up remap) — used
+/// for the cave mesh, whose positions come from the Surface-Nets pass in Godot coords.
+fn to_vec3_direct(flat: &[f32]) -> PackedVector3Array {
+    let n = flat.len() / 3;
+    let mut v = Vec::with_capacity(n);
+    for i in 0..n {
+        v.push(Vector3::new(flat[3 * i], flat[3 * i + 1], flat[3 * i + 2]));
     }
     PackedVector3Array::from(v.as_slice())
 }

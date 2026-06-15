@@ -45,6 +45,8 @@ public partial class DhceWorld : Node3D
     private bool _genDone;
     private readonly List<(int dist, int ci)> _pending = new();
     private readonly List<Node> _scatterPreview = new(); // ephemeral N3d scatter preview nodes
+    private MeshInstance3D _cavePreview;        // ephemeral N5 carved-cave preview
+    private StandardMaterial3D _caveMat;
 
     private static readonly Color WaterColor = new Color(0.20f, 0.45f, 0.75f, 0.6f);
     private static readonly Color LavaColor = new Color(0.95f, 0.35f, 0.10f, 0.9f);
@@ -124,6 +126,7 @@ public partial class DhceWorld : Node3D
     private void ClearChunks()
     {
         PreviewScatter(false); // drop any scatter preview before discarding the world
+        PreviewCaves(false);
         if (_chunks != null) foreach (var mi in _chunks) mi?.QueueFree();
         if (_liquidChunks != null) foreach (var mi in _liquidChunks) mi?.QueueFree();
         _chunks = null;
@@ -276,6 +279,30 @@ public partial class DhceWorld : Node3D
     public void AddCave(Vector3 centre, float radius) => Caves.Add(new Vector4(centre.X, centre.Y, centre.Z, Mathf.Max(radius, 0.5f)));
     public void ClearCaves() => Caves.Clear();
     public int CaveCount => Caves.Count;
+
+    /// Toggle an in-editor preview of the **carved** cave geometry (Surface-Nets over all carve
+    /// volumes) — the same mesh the slicer bakes per level. No-op without caves / before gen.
+    public void PreviewCaves(bool on)
+    {
+        if (_cavePreview != null && GodotObject.IsInstanceValid(_cavePreview)) _cavePreview.QueueFree();
+        _cavePreview = null;
+        if (!on || _engine == null || !_genDone || Caves.Count == 0) return;
+        var flat = new float[Caves.Count * 4];
+        for (int i = 0; i < Caves.Count; i++) { var c = Caves[i]; flat[i * 4] = c.X; flat[i * 4 + 1] = c.Y; flat[i * 4 + 2] = c.Z; flat[i * 4 + 3] = c.W; }
+        _engine.Call("tessellate_caves", flat, (double)_exaggeration, 3.0);
+        var pos = _engine.Call("cave_positions").As<Vector3[]>();
+        if (pos.Length == 0) return;
+        var arrays = new Godot.Collections.Array();
+        arrays.Resize((int)Mesh.ArrayType.Max);
+        arrays[(int)Mesh.ArrayType.Vertex] = pos;
+        arrays[(int)Mesh.ArrayType.Normal] = _engine.Call("cave_normals").As<Vector3[]>();
+        arrays[(int)Mesh.ArrayType.Index] = _engine.Call("cave_indices").As<int[]>();
+        var am = new ArrayMesh();
+        am.AddSurfaceFromArrays(Mesh.PrimitiveType.Triangles, arrays);
+        if (_caveMat == null) { _caveMat = new StandardMaterial3D { AlbedoColor = new Color(0.40f, 0.38f, 0.36f), Roughness = 0.95f }; _caveMat.Set("cull_mode", 2); }
+        _cavePreview = new MeshInstance3D { Mesh = am, MaterialOverride = _caveMat };
+        AddChild(_cavePreview); // owner left null → ephemeral preview
+    }
 
     /// Toggle the in-editor scatter preview: per-slot MultiMesh (low-poly proxy/import-LOD), capped.
     /// The full real-mesh bake happens at export (the slicer). No-op without a library / before gen.

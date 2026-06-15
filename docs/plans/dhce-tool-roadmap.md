@@ -142,16 +142,21 @@ the per-dab timing line still prints.
   export path defaults **tool-local** (`res://exports`), so the tool never writes into another project
   (the owner copies levels over by hand). Export **granularity** = per-Region (the slicing model is the
   answer). *(Optional later: a single merged-mesh-per-level mode — not needed now.)*
-- **N5 — Volumetric features — 🚧 IN PROGRESS.** Authored caves / overhangs / tunnels.
+- **N5 — Volumetric features — ✅ DONE (v1).** Authored caves / overhangs / tunnels.
   - **Layer A ✅ (2026-06-15) — carve-volume authoring tooling.** `DhceWorld.Caves` (Vector4 spheres:
     xyz centre + radius, persisted with the scene); a **Cave tool** (click the terrain to drop a carve
     sphere, radius = the Brush radius; chain for tunnels/overhangs) with translucent **sphere gizmos**;
     dock **CAVES (volumetric)** section (Cave tool + Clear caves).
-  - **Layer B ⏳ next — carve geometry + export merge.** Turn the carve volumes into real volumetric
-    geometry at export: evaluate **Godot CSG** (engine-native boolean on a local terrain patch, bake to
-    mesh — risk: CSG computes in-tree) vs a **core marching-cubes** pass over an SDF (`density(p) =
-    terrainY − p.y`, min carve-sphere SDFs; deterministic, tree-independent). Merge the carved patch
-    into the affected level scene(s). See [ADR 0003](../adr/0003-edit-streaming-and-godot-export.md) §5.
+  - **Layer B ✅ (2026-06-15) — carve geometry + export merge.** Core `volumetric::surface_nets`
+    (naive Surface Nets — table-free, determinism-safe, watertight per a closed-manifold test) over
+    `density(p) = terrainY − p.y` min the carve-sphere SDFs; `World::volumetric_mesh` (grid-capped).
+    Bound (`tessellate_caves` + `cave_positions/normals/indices`, direct Godot-space packing). The
+    slicer **bakes** each Region's caves into a `Caves` MeshInstance + trimesh collider in the level;
+    a dock **Preview carved caves** toggle shows the same mesh in-editor.
+    - **v1 limitation (review):** the carved patch **overlays** the flat region terrain at the opening
+      (no hole cut in the heightfield yet) → possible z-fighting at the entrance. Refinement: remove
+      region terrain triangles within the cave bbox + stitch. Surface-Nets winding isn't guaranteed
+      outward → cave material is double-sided for now.
 - **Later — ❌ outstanding bucket** — generation-streaming / LOD (only if a world outgrows RAM),
   **Atmospheric Fog**, **Scatter Tool polish**, the **scale bar** (context-aware cm→m→km readout) and
   zoomable-minimap LOD (n3-tooling-design §5). Plus the cross-repo **gates + game-side level loading**

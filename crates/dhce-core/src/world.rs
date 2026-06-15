@@ -14,7 +14,7 @@
 use crate::fluid::{self, LiquidField, LiquidSurface};
 use crate::mesh::Mesh;
 use crate::scatter::Instance;
-use crate::{biomes, elevation, geometry, scatter, streams};
+use crate::{biomes, elevation, geometry, scatter, streams, volumetric};
 use std::collections::HashMap;
 
 /// Channel-carve depth per unit tool intensity (Course tool).
@@ -2101,6 +2101,64 @@ impl World {
             Some(mesh) => scatter::scatter_by_rules(seed, mesh, &self.elevation_r, &self.vegetation_r, &self.region_r, rules, exaggeration),
             None => Vec::new(),
         }
+    }
+
+    /// Carve the authored volumetric features (N5) into a Surface-Nets mesh: `density = terrainY − y`
+    /// (rock below the surface) minus the union of carve spheres, over the spheres' bounding box. Each
+    /// cave is `[x, y, z, radius]` in **Godot space**; the result is a self-contained mesh (Godot
+    /// coords). Empty without caves. The grid is capped (`MAX_DIM`) — a huge brush widens the cell
+    /// rather than exploding the sample count.
+    pub fn volumetric_mesh(&self, caves: &[[f64; 4]], exaggeration: f64, cell_size: f64) -> volumetric::VolumeMesh {
+        let empty = volumetric::VolumeMesh { positions: Vec::new(), normals: Vec::new(), indices: Vec::new() };
+        if caves.is_empty() || self.mesh.is_none() {
+            return empty;
+        }
+        let mut mn = [f64::INFINITY; 3];
+        let mut mx = [f64::NEG_INFINITY; 3];
+        for c in caves {
+            for a in 0..3 {
+                mn[a] = mn[a].min(c[a] - c[3]);
+                mx[a] = mx[a].max(c[a] + c[3]);
+            }
+        }
+        let margin = cell_size.max(0.5) * 2.0;
+        for a in 0..3 {
+            mn[a] -= margin;
+            mx[a] += margin;
+        }
+        const MAX_DIM: usize = 96;
+        let mut cell = cell_size.max(0.5);
+        let mut dims = [2usize; 3];
+        loop {
+            let mut ok = true;
+            for a in 0..3 {
+                dims[a] = (((mx[a] - mn[a]) / cell).ceil() as usize + 1).max(2);
+                if dims[a] > MAX_DIM {
+                    ok = false;
+                }
+            }
+            if ok {
+                break;
+            }
+            cell *= 1.5;
+        }
+        let caves_owned: Vec<[f64; 4]> = caves.to_vec();
+        let density = |x: f64, y: f64, z: f64| -> f64 {
+            let terr = match self.region_at(x, z) {
+                Some(r) => self.elevation_r[r] * exaggeration,
+                None => return f64::NEG_INFINITY, // off-map ⇒ air
+            };
+            let mut dens = terr - y; // > 0 below the surface (rock)
+            for c in &caves_owned {
+                let (dx, dy, dz) = (x - c[0], y - c[1], z - c[2]);
+                let sd = (dx * dx + dy * dy + dz * dz).sqrt() - c[3]; // sphere SDF (< 0 inside)
+                if sd < dens {
+                    dens = sd; // carve: union of spheres becomes air
+                }
+            }
+            dens
+        };
+        volumetric::surface_nets(mn, dims, cell, &density)
     }
 
     /// Rule-based scatter filtered to named Region `region_id` (for baking that Region's level).

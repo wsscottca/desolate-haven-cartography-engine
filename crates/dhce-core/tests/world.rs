@@ -449,6 +449,32 @@ fn region_tier_assigns_via_polygon_and_persists() {
 }
 
 #[test]
+fn surface_nets_sphere_is_a_closed_manifold() {
+    // N5 Layer B: Surface Nets must extract a watertight isosurface (every edge shared by exactly two
+    // triangles). A solid ball density field, well inside the grid, is the canonical check — it catches
+    // any quad-connectivity/winding mistake without needing visual inspection.
+    use dhce_core::volumetric::surface_nets;
+    use std::collections::HashMap;
+    let r = 3.0;
+    let density = |x: f64, y: f64, z: f64| r - (x * x + y * y + z * z).sqrt(); // > 0 inside the ball
+    let m = surface_nets([-5.0, -5.0, -5.0], [21, 21, 21], 0.5, &density);
+
+    assert!(!m.positions.is_empty() && !m.indices.is_empty(), "the ball yields a surface");
+    assert_eq!(m.indices.len() % 3, 0, "triangles");
+    let vtx = (m.positions.len() / 3) as u32;
+    assert!(m.indices.iter().all(|&i| i < vtx), "indices reference real vertices");
+
+    let mut edges: HashMap<(u32, u32), u32> = HashMap::new();
+    for tri in m.indices.chunks_exact(3) {
+        for &(a, b) in &[(tri[0], tri[1]), (tri[1], tri[2]), (tri[2], tri[0])] {
+            *edges.entry(if a < b { (a, b) } else { (b, a) }).or_insert(0) += 1;
+        }
+    }
+    let open = edges.values().filter(|&&c| c != 2).count();
+    assert_eq!(open, 0, "closed manifold — {open} edges not shared by exactly two triangles");
+}
+
+#[test]
 fn rule_scatter_respects_vegetation_and_elevation() {
     use dhce_core::scatter::ScatterRule;
     let mut w = built();

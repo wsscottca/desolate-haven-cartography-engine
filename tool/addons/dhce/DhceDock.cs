@@ -526,6 +526,9 @@ public partial class DhceDock : ScrollContainer
         _col.AddChild(Dim("Cave tool: click the terrain to drop a carve sphere (radius = the Brush radius). Chain them for tunnels/overhangs. Carved into real geometry on export (N5 layer B)."));
         Button(_col, "Cave tool", () => { _tool.Active = ToolKind.Cave; SetStatus("Cave tool — click to place carve spheres"); });
         Button(_col, "Clear caves", () => { _world?.ClearCaves(); SetStatus("cleared caves"); });
+        var cavePreview = new CheckButton { Text = "Preview carved caves" };
+        cavePreview.Toggled += on => _world?.PreviewCaves(on);
+        _col.AddChild(cavePreview);
     }
 
     private DhceScatterSlot SelectedSlot()
