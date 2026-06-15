@@ -628,9 +628,11 @@ public partial class CartographerSpike : Node3D
     /// into basins instead of standing in columns where it was poured.
     private void EndStroke()
     {
-        if (!_strokeTouchedLiquid) return;
-        _strokeTouchedLiquid = false;
-        _engine.Call("step_fluid", 0.45, 0.0, SettleSubsteps);
-        RebuildLiquid();
+        if (_strokeTouchedLiquid)
+        {
+            _strokeTouchedLiquid = false;
+            _engine.Call("step_fluid", 0.45, 0.0, SettleSubsteps); // settle poured/river water
+        }
+        RebuildLiquid(); // reflect drained water (raising land displaces it) or settling
     }
 }

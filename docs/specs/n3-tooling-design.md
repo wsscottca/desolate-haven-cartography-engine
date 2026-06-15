@@ -223,8 +223,12 @@ rule changes.
 - **Water physics needs a tuning revisit** (deferred 2026-06-14, user request): flow/settle feel
   + amounts/look aren't dialled in yet. Functional but not final; tune after the biome slice.
 - **Overview = zoomable topographic minimap** (not 3D coarse LOD): the 3D view is capped to
-  near-detail render distance for perf; a `World::minimap(n)` RGBA render (biome colour + NW
-  hill-shade + contour lines + painted-liquid overlay) drives a zoomable, click-to-fly map panel.
+  near-detail render distance for perf; a `World::minimap(n, light_x, light_y)` RGBA render (biome
+  colour + sun-direction hill-shade + contour lines + painted-liquid overlay) drives a zoomable,
+  click-to-fly map panel. Hill-shade light comes from the 3D `WorldSun` (a draggable sky sphere).
+- **Scale bar (LOD phase, user request 2026-06-15):** a context-aware scale readout with two
+  layers that swap units cm → m → km by zoom, always showing the two units relevant at the
+  current zoom level. Defer to the LOD/zoom polish.
 
 ## 6. Build sequence (ordered)
 

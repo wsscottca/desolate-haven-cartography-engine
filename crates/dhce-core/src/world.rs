@@ -276,15 +276,23 @@ impl World {
                 }
                 let t = 1.0 - (d2 / r2).sqrt(); // 1 at center → 0 at the rim
                 let w = t * t * (3.0 - 2.0 * t); // smoothstep falloff
-                let e = &mut self.elevation_r[ri];
+                let old_e = self.elevation_r[ri];
+                let mut ne = old_e;
                 match mode {
-                    0 => *e += strength * w,
-                    1 => *e -= strength * w,
-                    2 => *e += (center_e - *e) * w * 0.5,
-                    3 => *e += strength * (t * t * t) * 2.5, // sharper, peaked
+                    0 => ne += strength * w,
+                    1 => ne -= strength * w,
+                    2 => ne += (center_e - ne) * w * 0.5,
+                    3 => ne += strength * (t * t * t) * 2.5, // sharper, peaked
                     _ => {}
                 }
-                *e = e.clamp(ELEV_MIN, ELEV_MAX);
+                ne = ne.clamp(ELEV_MIN, ELEV_MAX);
+                self.elevation_r[ri] = ne;
+                // Raising land displaces the water it rises through, so terrain lifted above the
+                // surface reads as dry land instead of a submerged blue patch.
+                let rise = ne - old_e;
+                if rise > 0.0 && self.field.depth[ri] > 0.0 {
+                    self.field.depth[ri] = (self.field.depth[ri] - rise).max(0.0);
+                }
                 touched.push(rid);
             }
         }
