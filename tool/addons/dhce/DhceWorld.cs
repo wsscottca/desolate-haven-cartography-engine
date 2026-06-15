@@ -24,6 +24,7 @@ public partial class DhceWorld : Node3D
     [Export] public int RenderDistance = 8;    // chunk tiles (Chebyshev) kept meshed around the focus
     [Export] public int ChunksPerFrame = 8;    // chunks tessellated per streaming tick
     [Export] public DhceWorldState State;      // persisted snapshot; regenerated from on open (R5)
+    [Export] public DhceScatterLibrary Scatter; // authored scatter model slots + rules (N3d)
 
     /// Normalized-elevation span the core clamps to (ELEV_MAX − ELEV_MIN in world.rs).
     private const float ElevSpan = 3.0f;
@@ -42,6 +43,7 @@ public partial class DhceWorld : Node3D
     private float _widthM, _heightM;
     private bool _genDone;
     private readonly List<(int dist, int ci)> _pending = new();
+    private readonly List<Node> _scatterPreview = new(); // ephemeral N3d scatter preview nodes
 
     private static readonly Color WaterColor = new Color(0.20f, 0.45f, 0.75f, 0.6f);
     private static readonly Color LavaColor = new Color(0.95f, 0.35f, 0.10f, 0.9f);
@@ -120,6 +122,7 @@ public partial class DhceWorld : Node3D
 
     private void ClearChunks()
     {
+        PreviewScatter(false); // drop any scatter preview before discarding the world
         if (_chunks != null) foreach (var mi in _chunks) mi?.QueueFree();
         if (_liquidChunks != null) foreach (var mi in _liquidChunks) mi?.QueueFree();
         _chunks = null;
@@ -266,6 +269,23 @@ public partial class DhceWorld : Node3D
     }
 
     private StandardMaterial3D CurrentViewMat() => _viewMode == 0 ? _mat : _dataMat;
+
+    /// Toggle the in-editor scatter preview: per-slot MultiMesh (low-poly proxy/import-LOD), capped.
+    /// The full real-mesh bake happens at export (the slicer). No-op without a library / before gen.
+    public void PreviewScatter(bool on)
+    {
+        foreach (var n in _scatterPreview) if (GodotObject.IsInstanceValid(n)) n.QueueFree();
+        _scatterPreview.Clear();
+        if (!on || Scatter == null || Scatter.Slots.Count == 0 || _engine == null || !_genDone) return;
+        _engine.Call("tessellate_scatter_rules", Scatter.ToRulesFlat(), (double)_exaggeration, (double)Seed);
+        var data = _engine.Call("scatter_data").As<float[]>();
+        int count = _engine.Call("scatter_count").As<int>();
+        foreach (var node in DhceLevelSlicer.BuildScatterMeshes(Scatter, data, count, 30000, preferProxy: true))
+        {
+            AddChild(node); // owner left null → ephemeral preview, not serialized
+            _scatterPreview.Add(node);
+        }
+    }
 
     // --- persistence (R5): regenerate from a compact DhceWorldState, no mesh bake ---
 

@@ -34,6 +34,15 @@ public partial class DhceDock : ScrollContainer
     private CheckButton _simulate;
     private DhceMinimap _minimap;
     private LineEdit _exportPath;
+
+    // Scatter (N3d) model-slot editor.
+    private OptionButton _slotPick;
+    private LineEdit _slotName, _slotMesh, _slotProxy;
+    private HSlider _slotDensity;
+    private SpinBox _slotScaleMin, _slotScaleMax, _slotElevMin, _slotElevMax;
+    private CheckBox[] _slotVeg;
+    private CheckButton _scatterPreview;
+    private bool _loadingSlot;
     private bool _loadingPalette, _loadingLandform;
 
     private double _shapeStrength = 1.0, _transitionWidthM = 200, _simFlow = 0.45, _simEvap = 0.001;
@@ -76,6 +85,7 @@ public partial class DhceDock : ScrollContainer
         if (world != null && (changed || (gen && !_wasGenDone)))
         {
             PullWorldParams();
+            if (changed) { RefreshSlots(); LoadSlot(); } // reflect the new world's scatter library
             if (gen)
             {
                 LoadPaletteColors();
@@ -157,6 +167,8 @@ public partial class DhceDock : ScrollContainer
         _col.AddChild(_exportPath);
         Button(_col, "Slice into levels", () => { if (_world != null) SetStatus(DhceLevelSlicer.Slice(_world, _exportPath.Text)); });
         _col.AddChild(Dim("Bakes each assigned Region → levels/<Name>.tscn + world_master.res + regions.json."));
+
+        BuildScatterSection();
 
         Header("TOOLS");
         var grid = new GridContainer { Columns = 3 };
@@ -455,6 +467,132 @@ public partial class DhceDock : ScrollContainer
         if (tool == _tool.Active) b.ButtonPressed = true;
         parent.AddChild(b);
         _toolButtons.Add(b);
+    }
+
+    // --- scatter (N3d) model-slot editor ---
+
+    private void BuildScatterSection()
+    {
+        Header("SCATTER (models)");
+        _col.AddChild(Dim("Define model slots (mesh + placement rule). Preview is low-poly; export bakes the real mesh."));
+
+        _slotPick = new OptionButton();
+        _slotPick.ItemSelected += _ => LoadSlot();
+        _col.AddChild(_slotPick);
+        var slotBtns = new HBoxContainer();
+        AddPlainButton(slotBtns, "Add slot", AddSlot);
+        AddPlainButton(slotBtns, "Remove", RemoveSlot);
+        _col.AddChild(slotBtns);
+
+        _slotName = ScatterLine("Name", v => { var s = SelectedSlot(); if (s != null) { s.Name = v; RefreshSlotNames(); } });
+        _slotMesh = ScatterLine("Mesh path (.glb/.res)", v => { var s = SelectedSlot(); if (s != null) s.MeshPath = v; });
+        _slotProxy = ScatterLine("Proxy mesh (optional)", v => { var s = SelectedSlot(); if (s != null) s.ProxyMeshPath = v; });
+        _slotDensity = Slider("Density", 0, 1, 0.01, 0.3, v => { var s = SelectedSlot(); if (s != null && !_loadingSlot) s.Density = (float)v; });
+        _slotScaleMin = SpinRow("Scale min (m)", 0.1, 200, 0.1, 3);
+        _slotScaleMin.ValueChanged += v => { var s = SelectedSlot(); if (s != null && !_loadingSlot) s.ScaleMin = (float)v; };
+        _slotScaleMax = SpinRow("Scale max (m)", 0.1, 200, 0.1, 8);
+        _slotScaleMax.ValueChanged += v => { var s = SelectedSlot(); if (s != null && !_loadingSlot) s.ScaleMax = (float)v; };
+        _slotElevMin = SpinRow("Elev min", -2, 2, 0.02, 0.02);
+        _slotElevMin.ValueChanged += v => { var s = SelectedSlot(); if (s != null && !_loadingSlot) s.ElevMin = (float)v; };
+        _slotElevMax = SpinRow("Elev max", -2, 2, 0.02, 1.5);
+        _slotElevMax.ValueChanged += v => { var s = SelectedSlot(); if (s != null && !_loadingSlot) s.ElevMax = (float)v; };
+
+        _col.AddChild(Dim("Appears on vegetation (none ticked = any):"));
+        var vegGrid = new GridContainer { Columns = 2 };
+        _slotVeg = new CheckBox[VegNames.Length];
+        for (int i = 0; i < VegNames.Length; i++)
+        {
+            var cb = new CheckBox { Text = VegNames[i] };
+            cb.Toggled += _ => { var s = SelectedSlot(); if (s != null && !_loadingSlot) s.VegetationMask = VegMaskFromChecks(); };
+            _slotVeg[i] = cb;
+            vegGrid.AddChild(cb);
+        }
+        _col.AddChild(vegGrid);
+
+        _scatterPreview = new CheckButton { Text = "Preview scatter (low-poly)" };
+        _scatterPreview.Toggled += on => _world?.PreviewScatter(on);
+        _col.AddChild(_scatterPreview);
+    }
+
+    private DhceScatterSlot SelectedSlot()
+    {
+        var lib = _world?.Scatter;
+        if (lib == null || _slotPick == null || _slotPick.Selected < 0 || _slotPick.Selected >= lib.Slots.Count) return null;
+        return lib.Slots[_slotPick.Selected];
+    }
+
+    private int VegMaskFromChecks()
+    {
+        int m = 0;
+        for (int i = 0; i < _slotVeg.Length; i++) if (_slotVeg[i].ButtonPressed) m |= 1 << i;
+        return m;
+    }
+
+    private void AddSlot()
+    {
+        if (_world == null) return;
+        _world.Scatter ??= new DhceScatterLibrary();
+        _world.Scatter.Slots.Add(new DhceScatterSlot { Name = $"slot{_world.Scatter.Slots.Count + 1}" });
+        RefreshSlots();
+        _slotPick.Selected = _world.Scatter.Slots.Count - 1;
+        LoadSlot();
+    }
+
+    private void RemoveSlot()
+    {
+        var lib = _world?.Scatter;
+        if (lib == null || _slotPick.Selected < 0 || _slotPick.Selected >= lib.Slots.Count) return;
+        lib.Slots.RemoveAt(_slotPick.Selected);
+        RefreshSlots();
+        LoadSlot();
+    }
+
+    private void RefreshSlots()
+    {
+        if (_slotPick == null) return;
+        _slotPick.Clear();
+        var lib = _world?.Scatter;
+        if (lib != null) for (int i = 0; i < lib.Slots.Count; i++) _slotPick.AddItem(lib.Slots[i]?.Name ?? $"slot{i}", i);
+    }
+
+    private void RefreshSlotNames()
+    {
+        int sel = _slotPick.Selected;
+        RefreshSlots();
+        if (sel >= 0 && sel < _slotPick.ItemCount) _slotPick.Selected = sel;
+    }
+
+    private void LoadSlot()
+    {
+        var s = SelectedSlot();
+        if (s == null) return;
+        _loadingSlot = true;
+        _slotName.Text = s.Name;
+        _slotMesh.Text = s.MeshPath;
+        _slotProxy.Text = s.ProxyMeshPath;
+        _slotDensity.Value = s.Density;
+        _slotScaleMin.Value = s.ScaleMin;
+        _slotScaleMax.Value = s.ScaleMax;
+        _slotElevMin.Value = s.ElevMin;
+        _slotElevMax.Value = s.ElevMax;
+        for (int i = 0; i < _slotVeg.Length; i++) _slotVeg[i].ButtonPressed = (s.VegetationMask & (1 << i)) != 0;
+        _loadingSlot = false;
+    }
+
+    private LineEdit ScatterLine(string label, System.Action<string> onChange)
+    {
+        _col.AddChild(Dim(label));
+        var le = new LineEdit();
+        le.TextChanged += t => { if (!_loadingSlot) onChange(t); };
+        _col.AddChild(le);
+        return le;
+    }
+
+    private static void AddPlainButton(Container parent, string text, System.Action onPress)
+    {
+        var b = new Button { Text = text, SizeFlagsHorizontal = SizeFlags.ExpandFill };
+        b.Pressed += onPress;
+        parent.AddChild(b);
     }
 
     private void AddModeButton(Container parent, string text, ToolKind tool)

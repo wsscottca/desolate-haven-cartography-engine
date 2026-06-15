@@ -189,6 +189,19 @@ only that biome's territory (with N3b transitions at its borders); region-select
 
 ### N3d — scatter rules + model slots + proxy preview (C#, possibly a small core add)
 
+> **✅ implemented (2026-06-15), in-editor + with export bake.** Core: deterministic
+> `scatter::scatter_by_rules` (per-cell, gated by elevation + vegetation mask + region mask, density
+> + scale range; `Instance::species` = slot index) + `World::scatter_by_rules`/`region_scatter_by_rules`
+> + bindings `tessellate_scatter_rules`/`tessellate_region_scatter_rules`. C#: `DhceScatterSlot` +
+> `DhceScatterLibrary` resources (mesh path + optional low-poly proxy + rule), referenced by
+> `DhceWorld`; a dock **SCATTER (models)** slot editor (add/remove, mesh path, density, scale, elev,
+> vegetation mask) + a capped **Preview scatter** toggle (low-poly proxy/import-LOD MultiMesh); the
+> slicer bakes a per-slot MultiMesh with the **real** mesh into each level (fallback to the legacy
+> biome proxy when no library), recording `mesh_path` metadata for the game to re-bind.
+> **Deferred (review):** cross-project asset resolution (tool vs game `res://`); region-mask UI (mask
+> defaults to "any"); the "update vegetation from manual scatter" reconcile button; real `.glb` bake
+> = the slot's mesh if it resolves in the tool project, else a primitive proxy.
+
 - **Per-biome scatter rules** (model-slot, density, slope/elevation limits) authored in the biome
   editor and saved with the project.
   **Caveat:** the core today exposes only `scatter(seed, …, density)` with species 0 tree / 1 rock

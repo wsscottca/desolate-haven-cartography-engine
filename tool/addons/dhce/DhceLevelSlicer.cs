@@ -97,13 +97,20 @@ public static class DhceLevelSlicer
             Adopt(root, new MeshInstance3D { Name = "Water", Mesh = wmesh, MaterialOverride = WaterMat() });
         }
 
-        // Scatter proxies (placeholder markers; real art is a later pass).
-        engine.Call("tessellate_region_scatter", id, (double)exag, 0.5, (double)world.Seed);
-        int scount = engine.Call("scatter_count").As<int>();
-        if (scount > 0)
+        // Scatter: bake the authored library (per-slot MultiMesh with the real mesh) if present,
+        // else the legacy biome proxy markers.
+        var lib = world.Scatter;
+        if (lib != null && lib.Slots.Count > 0)
         {
-            var mmi = new MultiMeshInstance3D { Name = "ScatterProxy", Multimesh = BuildScatter(engine.Call("scatter_data").As<float[]>(), scount) };
-            Adopt(root, mmi);
+            engine.Call("tessellate_region_scatter_rules", id, lib.ToRulesFlat(), (double)exag, (double)world.Seed);
+            foreach (var node in BuildScatterMeshes(lib, engine.Call("scatter_data").As<float[]>(), engine.Call("scatter_count").As<int>(), int.MaxValue, preferProxy: false))
+                Adopt(root, node);
+        }
+        else
+        {
+            engine.Call("tessellate_region_scatter", id, (double)exag, 0.5, (double)world.Seed);
+            int scount = engine.Call("scatter_count").As<int>();
+            if (scount > 0) Adopt(root, new MultiMeshInstance3D { Name = "ScatterProxy", Multimesh = BuildScatter(engine.Call("scatter_data").As<float[]>(), scount) });
         }
         return root;
     }
@@ -141,6 +148,71 @@ public static class DhceLevelSlicer
             mm.SetInstanceColor(k, species > 0.5f ? RockColor : TreeColor);
         }
         return mm;
+    }
+
+    /// Build one MultiMeshInstance3D per slot from packed scatter `[x, y(core), z(height), scale,
+    /// slot]` data. `preferProxy` picks the slot's low-poly proxy (editor) over its real mesh (bake);
+    /// the chosen `MeshPath` is recorded as `mesh_path` metadata so the game can re-bind its own asset.
+    /// `cap` limits total instances (editor preview). Shared by the slicer bake + the editor preview.
+    public static List<MultiMeshInstance3D> BuildScatterMeshes(DhceScatterLibrary lib, float[] data, int count, int cap, bool preferProxy)
+    {
+        var nodes = new List<MultiMeshInstance3D>();
+        if (count <= 0 || lib == null) return nodes;
+        int use = Mathf.Min(count, cap);
+        var bySlot = new Dictionary<int, List<Transform3D>>();
+        for (int k = 0; k < use; k++)
+        {
+            float x = data[k * 5], gy = data[k * 5 + 1], h = data[k * 5 + 2], scale = data[k * 5 + 3];
+            int slot = (int)data[k * 5 + 4];
+            var basis = new Basis(Quaternion.Identity).Scaled(Vector3.One * Mathf.Max(scale, 0.1f));
+            if (!bySlot.TryGetValue(slot, out var list)) { list = new List<Transform3D>(); bySlot[slot] = list; }
+            list.Add(new Transform3D(basis, new Vector3(x, h, gy)));
+        }
+        foreach (var kv in bySlot)
+        {
+            var slot = kv.Key >= 0 && kv.Key < lib.Slots.Count ? lib.Slots[kv.Key] : null;
+            string path = slot == null ? "" : preferProxy && !string.IsNullOrEmpty(slot.ProxyMeshPath) ? slot.ProxyMeshPath : slot.MeshPath;
+            Mesh mesh = LoadMesh(path) ?? (preferProxy ? null : LoadMesh(slot?.ProxyMeshPath)) ?? FallbackProxyMesh();
+            var mm = new MultiMesh { TransformFormat = MultiMesh.TransformFormatEnum.Transform3D, Mesh = mesh, InstanceCount = kv.Value.Count };
+            for (int k = 0; k < kv.Value.Count; k++) mm.SetInstanceTransform(k, kv.Value[k]);
+            var mmi = new MultiMeshInstance3D { Name = $"Scatter_{Sanitize(slot?.Name ?? kv.Key.ToString())}", Multimesh = mm };
+            if (slot != null && !string.IsNullOrEmpty(slot.MeshPath)) mmi.SetMeta("mesh_path", slot.MeshPath);
+            nodes.Add(mmi);
+        }
+        return nodes;
+    }
+
+    /// Load a `Mesh` from a path: a Mesh resource directly, or the first MeshInstance3D's mesh in a
+    /// PackedScene (`.glb`/`.gltf`). Null if the path is empty or unresolvable in this project.
+    public static Mesh LoadMesh(string path)
+    {
+        if (string.IsNullOrEmpty(path) || !ResourceLoader.Exists(path)) return null;
+        var res = ResourceLoader.Load(path);
+        if (res is Mesh m) return m;
+        if (res is PackedScene ps)
+        {
+            var inst = ps.Instantiate();
+            var found = FindMesh(inst);
+            inst.QueueFree();
+            return found;
+        }
+        return null;
+    }
+
+    private static Mesh FindMesh(Node n)
+    {
+        if (n is MeshInstance3D mi && mi.Mesh != null) return mi.Mesh;
+        foreach (var c in n.GetChildren()) { var f = FindMesh(c); if (f != null) return f; }
+        return null;
+    }
+
+    private static BoxMesh FallbackProxyMesh() => new BoxMesh { Size = Vector3.One };
+
+    private static string Sanitize(string s)
+    {
+        var sb = new System.Text.StringBuilder();
+        foreach (char c in s) sb.Append(char.IsLetterOrDigit(c) ? c : '_');
+        return sb.Length == 0 ? "slot" : sb.ToString();
     }
 
     private static StandardMaterial3D TerrainMat()
