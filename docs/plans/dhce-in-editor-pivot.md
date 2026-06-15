@@ -62,7 +62,10 @@ liquid surface every tick/edit (liquid is one un-chunked mesh).
   (`mark_all_liquid_changed`). Mass conserved (same anti-overshoot math as `relax_step`, kept for the
   fluid tests). Note: full convergence to the sleep threshold is solver-bound (slow spatial modes);
   the win is that *level/idle* water sleeps and the frontier shrinks.
-- **2.3 Incremental liquid cache** *(re-scoped from rayon).* See note below.
+- **2.3 Incremental liquid cache** — ⏸ deferred (decision below). 2.1+2.2+2.4 delivered the perf; the
+  residual whole-map smooth is a secondary, Simulate-only cost, and both viable optimizations
+  (incremental stencil, cfg-gated rayon) carry risk disproportionate to it right before the reshell
+  re-baselines performance.
 - **2.4 Idle skip** — ✅ done (2026-06-15). `liquid_active_count()` exposed; the Simulate tick skips
   entirely when it's 0 (settled). Per-edit/tick uploads were already dirty-driven (2.1).
 
