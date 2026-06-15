@@ -6,6 +6,12 @@ owner: wsscottca
 
 # DHCE — per-Region level slicing (design of record)
 
+> **Implemented 2026-06-15.** Core extraction (`region_terrain_surface` / `region_liquid_surface` /
+> `region_scatter_instances` / `region_adjacency` / `region_cell_count`) + `DhceLevelSlicer` (baked
+> per-Region `.tscn` with mesh + trimesh collider + water + scatter proxies, master `DhceWorldState`,
+> `regions.json` manifest) + the dock **SLICE LEVELS** section (selectable path). Gates/game-loading
+> remain future (gameplay phase). Running an actual slice (file output) is the user's visual check.
+
 Slice the authored whole-world `DhceWorldState` into **per-Region level scenes** for the (not
 open-world) *Desolate Haven* game: each canon Region (the Stage 4 `region_r` tier) becomes its own
 gated level. The Region tier is the seam; this is the export step that cuts on it.

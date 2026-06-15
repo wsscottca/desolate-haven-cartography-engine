@@ -32,6 +32,7 @@ public partial class DhceDock : ScrollContainer
     private SpinBox[] _landSpins;
     private CheckButton _simulate;
     private DhceMinimap _minimap;
+    private LineEdit _exportPath;
     private bool _loadingPalette, _loadingLandform;
 
     private double _shapeStrength = 1.0, _transitionWidthM = 200, _simFlow = 0.45, _simEvap = 0.001;
@@ -138,6 +139,12 @@ public partial class DhceDock : ScrollContainer
             _minimap.Bind(Eng, _world.WorldWidthM, _world.WorldHeightM);
             _minimap.Refresh();
         });
+
+        Header("SLICE LEVELS");
+        _exportPath = new LineEdit { Text = DhceLevelSlicer.DefaultExportDir(), TooltipText = "Export folder; a 'levels' subfolder is created here" };
+        _col.AddChild(_exportPath);
+        Button(_col, "Slice into levels", () => { if (_world != null) SetStatus(DhceLevelSlicer.Slice(_world, _exportPath.Text)); });
+        _col.AddChild(Dim("Bakes each assigned Region → levels/<Name>.tscn + world_master.res + regions.json."));
 
         Header("TOOLS");
         var grid = new GridContainer { Columns = 3 };

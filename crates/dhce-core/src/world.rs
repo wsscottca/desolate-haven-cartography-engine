@@ -2058,6 +2058,42 @@ impl World {
         self.region_r.iter().filter(|&&r| r == region_id).count()
     }
 
+    /// Liquid submesh for named Region `region_id` — the wet triangles whose three cells are all in
+    /// the Region, compacted (reusing the smoothed whole-surface so it matches the editor water).
+    pub fn region_liquid_surface(&self, region_id: u8, exaggeration: f64) -> Option<LiquidSurface> {
+        let full = self.liquid_surface(exaggeration)?;
+        let want = |r: usize| self.region_r.get(r).copied() == Some(region_id);
+        let mut remap = vec![u32::MAX; full.positions.len() / 3];
+        let mut positions: Vec<f32> = Vec::new();
+        let mut normals: Vec<f32> = Vec::new();
+        let mut types: Vec<f32> = Vec::new();
+        let mut indices: Vec<u32> = Vec::new();
+        for tri in full.indices.chunks_exact(3) {
+            let (a, b, c) = (tri[0] as usize, tri[1] as usize, tri[2] as usize);
+            if !(want(a) && want(b) && want(c)) {
+                continue;
+            }
+            for &g in &[a, b, c] {
+                if remap[g] == u32::MAX {
+                    remap[g] = (positions.len() / 3) as u32;
+                    positions.extend_from_slice(&full.positions[3 * g..3 * g + 3]);
+                    normals.extend_from_slice(&full.normals[3 * g..3 * g + 3]);
+                    types.push(full.types[g]);
+                }
+                indices.push(remap[g]);
+            }
+        }
+        Some(LiquidSurface { positions, normals, types, indices })
+    }
+
+    /// Decoration instances (proxy scatter) whose ground position falls in named Region `region_id`.
+    pub fn region_scatter_instances(&self, region_id: u8, exaggeration: f64, density: f64, seed: u64) -> Vec<Instance> {
+        self.scatter_instances(exaggeration, density, seed)
+            .into_iter()
+            .filter(|i| self.region_at(i.x as f64, i.y as f64).map(|c| self.region_of(c) == region_id).unwrap_or(false))
+            .collect()
+    }
+
     // --- liquid rendering chunks (mirror the terrain chunk path) ---
 
     /// Mark the liquid render caches stale and flag the chunks of `regions` for re-tessellation.

@@ -26,6 +26,7 @@ struct DhceEngine {
     surface: Option<Surface>,
     chunk_cache: Option<Surface>,
     region_cache: Option<Surface>,
+    region_liquid_cache: Option<LiquidSurface>,
     liquid: Option<LiquidSurface>,
     liquid_chunk_cache: Option<LiquidSurface>,
     scatter_buf: Vec<f32>,
@@ -41,6 +42,7 @@ impl IRefCounted for DhceEngine {
             surface: None,
             chunk_cache: None,
             region_cache: None,
+            region_liquid_cache: None,
             liquid: None,
             liquid_chunk_cache: None,
             scatter_buf: Vec::new(),
@@ -204,6 +206,39 @@ impl DhceEngine {
     #[func]
     fn region_cell_count(&self, region_id: i64) -> i64 {
         self.world.region_cell_count(region_id.max(0) as u8) as i64
+    }
+    /// Cache the compact liquid submesh for named Region `region_id`; read via region_liquid_* below.
+    #[func]
+    fn slice_region_liquid(&mut self, region_id: i64, exaggeration: f64) {
+        self.region_liquid_cache = self.world.region_liquid_surface(region_id.max(0) as u8, exaggeration);
+    }
+    #[func]
+    fn region_liquid_positions(&self) -> PackedVector3Array {
+        self.region_liquid_cache.as_ref().map(|s| to_vec3_yup(&s.positions)).unwrap_or_default()
+    }
+    #[func]
+    fn region_liquid_normals(&self) -> PackedVector3Array {
+        self.region_liquid_cache.as_ref().map(|s| to_vec3_yup(&s.normals)).unwrap_or_default()
+    }
+    #[func]
+    fn region_liquid_types(&self) -> PackedFloat32Array {
+        self.region_liquid_cache.as_ref().map(|s| PackedFloat32Array::from(s.types.as_slice())).unwrap_or_default()
+    }
+    #[func]
+    fn region_liquid_indices(&self) -> PackedInt32Array {
+        self.region_liquid_cache.as_ref().map(|s| u32_to_packed(&s.indices)).unwrap_or_default()
+    }
+    /// Fill the scatter buffer (read via `scatter_data`/`scatter_count`) with Region `region_id`'s
+    /// proxy instances: flat `[x, y, z, scale, species]` (core ground x/y, height z) per instance.
+    #[func]
+    fn tessellate_region_scatter(&mut self, region_id: i64, exaggeration: f64, density: f64, seed: f64) {
+        let inst = self.world.region_scatter_instances(region_id.max(0) as u8, exaggeration, density, seed as u64);
+        let mut data = Vec::with_capacity(inst.len() * 5);
+        for i in &inst {
+            data.extend_from_slice(&[i.x, i.y, i.z, i.scale, i.species]);
+        }
+        self.scatter_n = inst.len();
+        self.scatter_buf = data;
     }
 
     // --- liquid simulation + render surface ---
