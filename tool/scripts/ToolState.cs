@@ -17,8 +17,9 @@ public enum EditResult { None = 0, Terrain = 1, Liquid = 2 }
 public sealed class ToolState
 {
     public ToolKind Active = ToolKind.Raise;
-    public float RadiusM = 350f;       // brush footprint radius, metres
-    public float StrengthM = 50f;      // sculpt step in METRES (→ normalized via exaggeration)
+    public float RadiusFraction = 0.12f; // brush radius as a fraction of the camera→cursor distance
+    public float RadiusM = 350f;         // effective radius (m); recomputed each dab from the fraction
+    public float StrengthM = 50f;        // sculpt step in METRES (→ normalized via exaggeration)
     public int BiomeId = 1;            // 1..=14 for the Biome tool
     public int LiquidKind = 0;         // 0 water, 1 lava (River + Flood)
     public float CourseIntensity = 0.05f; // small: course water/carve gains are large in the core

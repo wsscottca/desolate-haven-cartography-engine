@@ -24,11 +24,11 @@ public partial class ToolUi : CanvasLayer
     private SpinBox _seed, _oct, _size, _spacing;
     private ToolKind _lastTerrainTool = ToolKind.Raise;
 
-    private static readonly float[] BrushSizes = { 60f, 150f, 350f, 700f, 1400f };
+    private static readonly float[] BrushFractions = { 0.03f, 0.06f, 0.12f, 0.25f, 0.5f };
     private static readonly int[] DotFontSizes = { 9, 12, 16, 20, 25 };
 
-    private double _simFlow = 0.25, _simEvap = 0.001;
-    private int _simSubsteps = 2, _simTick;
+    private double _simFlow = 0.45, _simEvap = 0.001;
+    private int _simSubsteps = 10, _simTick;
     private CheckButton _simulate;
     private const int SimEveryNFrames = 6;
 
@@ -48,7 +48,7 @@ public partial class ToolUi : CanvasLayer
         BuildLeftDock(rootCtl);
         BuildRightPanel(rootCtl);
 
-        Root.Tool.RadiusM = BrushSizes[2];
+        Root.Tool.RadiusFraction = BrushFractions[2];
         SetTab(true);
     }
 
@@ -62,9 +62,13 @@ public partial class ToolUi : CanvasLayer
         var col = new VBoxContainer();
         dock.AddChild(col);
 
-        var title = new Label { Text = "Sundered Vale" };
-        title.AddThemeColorOverride("font_color", ToolTheme.Gold);
-        title.AddThemeFontSizeOverride("font_size", 27);
+        var brand = new Label { Text = "DESOLATE HAVEN" };
+        brand.AddThemeColorOverride("font_color", ToolTheme.Gold);
+        brand.AddThemeFontSizeOverride("font_size", 11);
+        col.AddChild(brand);
+        var title = new Label { Text = "The Loom" };
+        title.AddThemeColorOverride("font_color", ToolTheme.Ink);
+        title.AddThemeFontSizeOverride("font_size", 30);
         if (ToolTheme.Display != null) title.AddThemeFontOverride("font", ToolTheme.Display);
         col.AddChild(title);
         var sub = new Label { Text = "cartographer's table" };
@@ -80,7 +84,7 @@ public partial class ToolUi : CanvasLayer
 
         col.AddChild(ToolTheme.Header("BRUSH SIZE"));
         var dots = new HBoxContainer();
-        for (int i = 0; i < BrushSizes.Length; i++) dots.AddChild(SizeDot(i));
+        for (int i = 0; i < BrushFractions.Length; i++) dots.AddChild(SizeDot(i));
         col.AddChild(dots);
 
         _terrainTab = new VBoxContainer();
@@ -180,7 +184,7 @@ public partial class ToolUi : CanvasLayer
         Slider(col, "Sea level", -1.0, 1.0, 0.01, 0.0, v => { Root.Engine.Call("set_sea_level", v); Root.RebuildLiquid(); });
         Slider(col, "Flow rate", 0.0, 0.5, 0.01, _simFlow, v => _simFlow = v);
         Slider(col, "Evaporation", 0.0, 0.02, 0.0005, _simEvap, v => _simEvap = v);
-        Slider(col, "Substeps", 1, 8, 1, _simSubsteps, v => _simSubsteps = (int)v);
+        Slider(col, "Substeps", 1, 40, 1, _simSubsteps, v => _simSubsteps = (int)v);
 
         var rain = GhostButton("Rain");
         rain.Pressed += () => { Root.Engine.Call("rain", 0.05); Root.RebuildLiquid(); };
@@ -251,11 +255,11 @@ public partial class ToolUi : CanvasLayer
 
     private Button SizeDot(int i)
     {
-        var b = new Button { Text = "●", ToggleMode = true, ButtonGroup = _sizeGroup, TooltipText = $"{BrushSizes[i]:0} m" };
+        var b = new Button { Text = "●", ToggleMode = true, ButtonGroup = _sizeGroup, TooltipText = $"{BrushFractions[i] * 100:0}% of view" };
         b.AddThemeFontSizeOverride("font_size", DotFontSizes[i]);
         b.CustomMinimumSize = new Vector2(36, 34);
         b.ButtonPressed = i == 2;
-        b.Pressed += () => Root.Tool.RadiusM = BrushSizes[i];
+        b.Pressed += () => Root.Tool.RadiusFraction = BrushFractions[i];
         _sizeDots.Add(b);
         return b;
     }

@@ -40,7 +40,7 @@ public partial class CartographerSpike : Node3D
     [Export] public float BrushStrength = 0.06f;
 
     /// Tiles (Chebyshev) around the camera focus kept meshed; chunks beyond this are freed.
-    [Export] public int RenderDistance = 6;
+    [Export] public int RenderDistance = 3;
     /// Chunks tessellated per frame while streaming in (caps the per-frame upload cost; at
     /// ~3-4 ms/chunk, 4 keeps inside a 60 fps frame while still filling the view in well under 1 s).
     [Export] public int ChunksPerFrame = 4;
@@ -89,7 +89,9 @@ public partial class CartographerSpike : Node3D
 
     // Brush stroke state: spacing (don't pile dabs on one spot) + liquid settle on release.
     private const float BrushSpacingFrac = 0.25f;
-    private const int SettleSubsteps = 12;
+    private const int SettleSubsteps = 16;
+    private const float MinBrushM = 15f;
+    private const float MaxBrushM = 6000f;
     private Vector3 _lastPaintPos;
     private bool _hasLastPaint;
     private bool _painting;
@@ -409,8 +411,8 @@ public partial class CartographerSpike : Node3D
     private void UpdateBrushGizmo()
     {
         if (_brush == null) return;
-        Vector3? maybeHit = TerrainHit(GetViewport().GetMousePosition());
-        if (maybeHit is not Vector3 p) { _brush.Visible = false; return; }
+        if (!TerrainHit(GetViewport().GetMousePosition(), out Vector3 p, out Vector3 from)) { _brush.Visible = false; return; }
+        Tool.RadiusM = EffectiveRadius(from, p);
         _brush.Visible = true;
         _brush.GlobalPosition = p + new Vector3(0f, _exaggeration * 0.003f, 0f); // lift to dodge z-fight
         _brush.Scale = new Vector3(Tool.RadiusM, 1f, Tool.RadiusM);
@@ -499,9 +501,9 @@ public partial class CartographerSpike : Node3D
     private void PaintAt(Vector2 screen)
     {
         if (!_genDone) return;
-        Vector3? maybeHit = TerrainHit(screen);
-        if (maybeHit is not Vector3 hit) return; // cursor not over terrain
+        if (!TerrainHit(screen, out Vector3 hit, out Vector3 from)) return; // cursor not over terrain
         // core (x, y) = (hit.X, hit.Z)
+        Tool.RadiusM = EffectiveRadius(from, hit); // brush radius scales with how far you're zoomed
 
         // Brush spacing: skip dabs that haven't moved far enough, so a slow drag doesn't pile
         // many dabs on one spot (which produced spikes / water pillars).
@@ -527,17 +529,26 @@ public partial class CartographerSpike : Node3D
     }
 
     /// Ray from the camera through `screen` to the terrain surface (via the core's analytic
-    /// raycast — lands on the actual surface under the cursor from any view angle, not the
-    /// Y = 0 plane). Null if the cursor isn't over terrain.
-    private Vector3? TerrainHit(Vector2 screen)
+    /// raycast — lands on the actual surface under the cursor from any view angle, not the Y = 0
+    /// plane). Returns false if the cursor isn't over terrain; `from` is the ray origin (camera).
+    private bool TerrainHit(Vector2 screen, out Vector3 hit, out Vector3 from)
     {
+        hit = Vector3.Zero;
+        from = Vector3.Zero;
         var cam = GetViewport().GetCamera3D();
-        if (cam == null) return null;
-        Vector3 from = cam.ProjectRayOrigin(screen);
+        if (cam == null) return false;
+        from = cam.ProjectRayOrigin(screen);
         Vector3 dir = cam.ProjectRayNormal(screen);
         var hits = _engine.Call("raycast_terrain", from, dir, (double)_exaggeration).As<Vector3[]>();
-        return hits.Length > 0 ? hits[0] : null;
+        if (hits.Length == 0) return false;
+        hit = hits[0];
+        return true;
     }
+
+    /// Brush radius scaled to the zoom: a fraction of the camera→cursor distance, so the brush is
+    /// small up close (edit like a person) and large when pulled back (edit like a giant).
+    private float EffectiveRadius(Vector3 from, Vector3 hit)
+        => Mathf.Clamp(Tool.RadiusFraction * from.DistanceTo(hit), MinBrushM, MaxBrushM);
 
     /// Settle the fluid a few steps when a liquid stroke ends, so water flows downhill and levels
     /// into basins instead of standing in columns where it was poured.
@@ -545,7 +556,7 @@ public partial class CartographerSpike : Node3D
     {
         if (!_strokeTouchedLiquid) return;
         _strokeTouchedLiquid = false;
-        _engine.Call("step_fluid", 0.4, 0.0, SettleSubsteps);
+        _engine.Call("step_fluid", 0.45, 0.0, SettleSubsteps);
         RebuildLiquid();
     }
 }
