@@ -119,18 +119,32 @@ call) — out of scope; revisit only if the hitch is unacceptable. `ThreadedGen`
 Verify: window opens immediately on a 20 km world; tiles stream around the camera; edits stay ~10 ms;
 the per-dab timing line still prints.
 
-## Then
-- **N3** — sculpt/course/flood/biome tools, brush size + intensity UI, **world + physics panels**,
-  per-biome editor + **biome-driven terrain shaping** (per-biome `Landform` profiles so
-  jagged/rolling/volcanic differ) with **natural biome transitions** + scatter-rule authoring.
-  Designed in [docs/specs/n3-tooling-design.md](../specs/n3-tooling-design.md) — four ordered
-  slices: **N3a** tool shell + world/physics + liquid render (C#), **N3b** layered-elevation Apply
-  shaping + diffusion blending (Rust+DLL), **N3c** per-biome editor (C#), **N3d** scatter rules (C#).
-- **N4** — export pipeline → editable Godot `.tscn` (terrain `ArrayMesh`+collision, `MultiMesh` scatter,
-  bake-to-instances) + authoring-project save/load.
-- **N5** — authored **volumetric** caves / overhangs / tunnels carved into the heightfield (hybrid;
-  local volumetric mesh merged on export).
-- Later — generation-streaming/LOD only if a world outgrows RAM; Atmospheric Fog; Scatter Tool polish.
+## Then  *(status refreshed 2026-06-15 — after the in-editor reshell, ADR 0005)*
+
+> **Big shift since this roadmap was written:** the tool was rebuilt from a standalone F5 app into an
+> **in-editor Godot plugin** ([ADR 0005](../adr/0005-in-editor-authoring-and-phased-physics.md);
+> reshell plan [dhce-editor-reshell.md](dhce-editor-reshell.md)). Trait/biome/Region model is
+> [ADR 0004](../adr/0004-biome-region-territory-model.md). So the N-phases below are re-cast for the
+> in-editor tool.
+
+- **N3 ✅ DONE** — the full authoring toolset, in-editor: sculpt/course/flood + trait/biome/Region
+  brushes, brush + world + physics panels, per-trait editor, biome-driven shaping, natural
+  transitions, data views, biome classifier, the **Region tier**, and **N3d scatter** (model-slot
+  library + low-poly preview + real-mesh bake). See [n3-biome-traits.md](n3-biome-traits.md) +
+  [n3-tooling-design.md](../specs/n3-tooling-design.md).
+- **N4 — export pipeline — ⚠️ MOSTLY DONE via the reshell, remainder open.** The **per-Region level
+  slicer** ([dhce-region-slicing.md](../specs/dhce-region-slicing.md)) bakes terrain `ArrayMesh` +
+  trimesh collider + water + **per-slot scatter `MultiMesh`** into a `.tscn` per Region, writes the
+  master `DhceWorldState` (R5 save/load) + a `regions.json` adjacency manifest. **Outstanding:**
+  bake-to-**individual selectable instances** (vs MultiMesh), merged-mesh / export-granularity option,
+  and **cross-project scatter-asset resolution** (tool `res://` ↔ game repo).
+- **N5 — Volumetric features — ❌ NOT STARTED (the big forgotten one).** Authored caves / overhangs /
+  tunnels carved into the heightfield (hybrid; local SDF / marching-cubes / CSG carve, merged on
+  export). See [ADR 0003](../adr/0003-edit-streaming-and-godot-export.md) §5.
+- **Later — ❌ outstanding bucket** — generation-streaming / LOD (only if a world outgrows RAM),
+  **Atmospheric Fog**, **Scatter Tool polish**, the **scale bar** (context-aware cm→m→km readout) and
+  zoomable-minimap LOD (n3-tooling-design §5). Plus the cross-repo **gates + game-side level loading**
+  (gameplay phase, in the game repo) and the **reshell R6b** cleanup (retire the stale runtime app).
 
 ## Pending housekeeping
 - Migrate the build-time license gate from `scripts/check-licenses.mjs` (Node) to `cargo-deny`.
