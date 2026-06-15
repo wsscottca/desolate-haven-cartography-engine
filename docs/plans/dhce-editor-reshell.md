@@ -172,14 +172,21 @@ Rationale: finer, lighter, smoother show/hide as the camera moves. Core tests
 `DhceWorldState` and loads the plugin ✅. Author → Save → reopen → world restored — **user check**.
 
 ### R6 — Retire the runtime app + package *(C#)*
-**Files:** `tool/Main.tscn`, `tool/project.godot`, `tool/scripts/` (remove runtime-only), `addons/dhce/`.
+**Files:** `tool/DhceHost.tscn` (new), `tool/project.godot`, `addons/dhce/README.md` (new); later:
+`tool/Main.tscn` + `tool/scripts/{CartographerSpike,ToolUi,MinimapPanel}.cs` (deletion deferred).
 
-- Point `tool/` at a host scene that uses the addon (or drop `run/main_scene`); remove
-  `CartographerSpike`'s runtime-only shell once the editor path is at parity (keep the ported chunk/
-  liquid streaming + gen logic in the addon). Document "enable the DHCE plugin" so the **game** installs
-  `addons/dhce/` and authors in its own editor.
+- **R6a — ✅ done (2026-06-15), non-destructive (user-requested).** New **`DhceHost.tscn`** = the
+  in-editor authoring scene: a `DhceWorld` + its own `DirectionalLight3D` + `WorldEnvironment` (sky
+  ambient), since the plugin manages no sun. `project.godot` `run/main_scene` → `DhceHost.tscn`
+  (replaces `Main.tscn`). `addons/dhce/README.md` documents enable + author + the DLL build/copy, so
+  the **game** can install `addons/dhce/` and author in its own editor. The runtime app
+  (`Main.tscn` + `CartographerSpike`/`ToolUi`/`MinimapPanel`) is **left stale in place** for the user
+  to validate the editor path against — **not deleted**.
+- **⏳ R6b — deferred (after user validation):** delete the stale runtime-only files once the in-editor
+  tool is confirmed; finish the `AddControlToDock` → `AddDock(EditorDock)` migration.
 
-**Gate:** `tool/` is a dev host with the addon enabled; a clean checkout opens + authors in-editor.
+**Gate:** new main scene loads headless (runtime + editor) with no errors ✅; clean checkout opens +
+authors in-editor — **user validation tonight**, then R6b deletion.
 
 ---
 
