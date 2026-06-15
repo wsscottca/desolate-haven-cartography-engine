@@ -109,6 +109,33 @@ legibility, so the Natural view stays realistic.)
 **Test (world.rs):** `temperature_view_maps_the_field_to_a_heat_ramp` (hot = red / cold = blue, and
 differs from Natural).
 
+## Stage 3c — Shaping pass (landform dials → terrain height) *(Rust core + C#)* — ✅ done (2026-06-14)
+
+Closes the gap flagged in Stage 3: the landform dials now reshape the terrain.
+
+**Files:** `world.rs` (+ tests), `lib.rs`, `tool/scripts/ToolUi.cs`.
+
+- `shape_terrain(strength)` layers a deterministic elevation delta on the sculpted base from the
+  live (blended) dial fields: **jaggedness** → high-frequency roughness gated by altitude (peaks
+  jag, lowlands stay smooth); **relief** → mid-frequency rolling hills on land; **foothill_falloff**
+  → widens the down-slope skirt the detail reaches; **erosion** → damps roughness + neighbour-mean
+  smooths the added delta. fbm2 + lerp/averaging only (cross-target safe).
+- Idempotent via a stored `shape_delta` (restore-then-reapply, mirroring `stream_carve`), so
+  re-running or changing strength/dials never compounds. Risen land sheds the water it rose through.
+  Recolours (the ramp reads elevation) + flags all chunks dirty; auto-biome reclassify is skipped
+  (colour is trait-driven, so it'd only affect the Biome view) to keep Apply snappy.
+- C#: a **SHAPING** section in the Biomes tab (Strength slider + Apply shaping) that re-tessellates
+  + rebuilds liquid.
+
+**Tests (world.rs):** `shaping_roughens_with_jaggedness_and_is_idempotent`,
+`shaping_strength_zero_is_a_no_op`.
+
+### UI layout (this pass)
+- The Temperature/Moisture brushes moved out of the Biomes-tab trait dropdown to a **contextual
+  paint slider under the VIEW select** (pick the view → paint that field in place, no tab hop). The
+  trait dropdown keeps Vegetation / Palette family / Jaggedness / Relief / Foothill / Erosion.
+- **Blend borders** (+ Width) moved to **under the map** in the right panel.
+
 ## Stage 4 — Border tool (scopes) + Region tier *(Rust core + C#)*
 
 **Files:** `world.rs` (+ test), `lib.rs`, `tool/scripts/` (border tool, Region panel, overlay).

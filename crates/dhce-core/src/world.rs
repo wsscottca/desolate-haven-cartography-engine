@@ -39,6 +39,17 @@ pub const VIEW_TEMPERATURE: u8 = 1;
 pub const VIEW_MOISTURE: u8 = 2;
 pub const VIEW_ELEVATION: u8 = 3;
 pub const VIEW_BIOME: u8 = 4;
+/// Shaping (landform dials → terrain height): noise frequencies (cycles across the map), max added
+/// normalized elevation at dial = 1, and erosion smoothing of the added detail. All deterministic
+/// (fbm2 + lerp / averaging). See [`World::shape_terrain`].
+const SHAPE_JAG_FREQ: f64 = 22.0;
+const SHAPE_JAG_AMP: f64 = 0.30;
+const SHAPE_RELIEF_FREQ: f64 = 7.0;
+const SHAPE_RELIEF_AMP: f64 = 0.18;
+const SHAPE_EROSION_PASSES: usize = 3;
+const SHAPE_EROSION_W: f64 = 0.5;
+const SHAPE_JAG_SALT: u64 = 0x9E37_79B9_7F4A_7C15;
+const SHAPE_RELIEF_SALT: u64 = 0x2545_F491_4F6C_DD1D;
 /// Elevation clamp shared by every sculpt/carve op (normalized terrain stays in range).
 const ELEV_MIN: f64 = -1.5;
 const ELEV_MAX: f64 = 1.5;
@@ -96,6 +107,9 @@ pub struct World {
     /// Per-region elevation lowering currently applied by the last stream pass, so a
     /// re-run restores then re-carves (idempotent + adapts to edits in between).
     stream_carve: Vec<f64>,
+    /// Per-cell elevation delta (signed) applied by the last [`shape_terrain`] pass. Restored then
+    /// recomputed each run, so re-shaping is idempotent and adapts to edits made in between.
+    shape_delta: Vec<f64>,
     grid_cell: f64,
     grid_cols: usize,
     grid_rows: usize,
@@ -169,6 +183,7 @@ impl World {
             biome_locked: Vec::new(),
             course_mask: Vec::new(),
             stream_carve: Vec::new(),
+            shape_delta: Vec::new(),
             grid_cell: 0.0,
             grid_cols: 0,
             grid_rows: 0,
@@ -196,6 +211,7 @@ impl World {
         self.biome_locked = vec![false; nr];
         self.course_mask = vec![false; nr];
         self.stream_carve = vec![0.0; nr];
+        self.shape_delta = vec![0.0; nr];
         fluid::sea_fill(&mut self.field, &self.elevation_r, self.sea_level);
 
         // Auto-classify biomes from elevation + moisture + distance-from-center.
@@ -804,6 +820,96 @@ impl World {
     /// The active data-view mode (see the `VIEW_*` consts).
     pub fn view_mode(&self) -> u8 {
         self.view_mode
+    }
+
+    /// Bake the landform trait dials into the terrain height. Each dial drives a deterministic
+    /// elevation perturbation layered on top of the sculpted base:
+    /// - **jaggedness** adds high-frequency roughness, concentrated on high ground (peaks jag,
+    ///   lowlands stay smooth);
+    /// - **relief** adds mid-frequency rolling hills across land;
+    /// - **foothill_falloff** widens how far down-slope that detail reaches (broad skirt vs
+    ///   peaks-only);
+    /// - **erosion** rounds the added detail (neighbour smoothing of the delta).
+    ///
+    /// `strength` is a global gain (1.0 nominal). The previous shaping is restored first, so
+    /// re-running — or changing strength/dials — is idempotent and never compounds. Recolours +
+    /// flags all chunks dirty (geometry changed → re-tessellate via [`take_dirty_chunks`]).
+    pub fn shape_terrain(&mut self, strength: f64) {
+        if self.mesh.is_none() {
+            return;
+        }
+        let n = self.elevation_r.len();
+        if self.shape_delta.len() != n {
+            self.shape_delta = vec![0.0; n];
+        }
+        // Restore the previous shaping so the pass always builds from the sculpted base.
+        for r in 0..n {
+            self.elevation_r[r] -= self.shape_delta[r];
+            self.shape_delta[r] = 0.0;
+        }
+
+        let (w, h, seed) = (self.width, self.height, self.seed);
+        // 1. Raw per-cell delta from jaggedness + relief, gated by altitude / land.
+        let mut d = vec![0.0f64; n];
+        {
+            let mesh = self.mesh.as_ref().unwrap();
+            for r in 0..n {
+                let p = mesh.pos_of_r(r);
+                let e = self.elevation_r[r];
+                let jag = self.jaggedness_r[r];
+                let rel = self.relief_r[r];
+                let foot = self.foothill_falloff_r[r];
+                let ero = self.erosion_r[r];
+                // foothill_falloff widens the skirt: a smaller divisor lets detail reach full
+                // strength at lower elevations (broad foothills); larger keeps it near the peaks.
+                let skirt = lerpf(0.25, 0.70, 1.0 - clamp01f(foot));
+                let alt = clamp01f(e / skirt);
+                let land = clamp01f((e + 0.10) / 0.20); // ~0 below sea, 1 above
+                let jag_amp = SHAPE_JAG_AMP * (1.0 - 0.6 * clamp01f(ero)); // erosion damps roughness
+                let nj = crate::noise::fbm2(p[0] / w * SHAPE_JAG_FREQ, p[1] / h * SHAPE_JAG_FREQ, seed ^ SHAPE_JAG_SALT, 4);
+                let nr_ = crate::noise::fbm2(p[0] / w * SHAPE_RELIEF_FREQ, p[1] / h * SHAPE_RELIEF_FREQ, seed ^ SHAPE_RELIEF_SALT, 3);
+                d[r] = (nj * jag_amp * jag * alt + nr_ * SHAPE_RELIEF_AMP * rel * land) * strength;
+            }
+        }
+        // 2. Erosion rounds the added detail (neighbour-mean smoothing, weighted per cell).
+        if self.neighbors.len() == n {
+            for _ in 0..SHAPE_EROSION_PASSES {
+                let mut next = d.clone();
+                for r in 0..n {
+                    let nb = &self.neighbors[r];
+                    if nb.is_empty() {
+                        continue;
+                    }
+                    let mut sum = 0.0;
+                    for &j in nb {
+                        sum += d[j as usize];
+                    }
+                    let mean = sum / nb.len() as f64;
+                    let wgt = clamp01f(self.erosion_r[r]) * SHAPE_EROSION_W;
+                    next[r] = d[r] + (mean - d[r]) * wgt;
+                }
+                d = next;
+            }
+        }
+        // 3. Apply, recording the actual (clamped) delta; risen land sheds the water it rose through.
+        for r in 0..n {
+            let before = self.elevation_r[r];
+            let after = (before + d[r]).clamp(ELEV_MIN, ELEV_MAX);
+            self.shape_delta[r] = after - before;
+            self.elevation_r[r] = after;
+            let rise = after - before;
+            if rise > 0.0 && self.field.depth[r] > 0.0 {
+                self.field.depth[r] = (self.field.depth[r] - rise).max(0.0);
+            }
+        }
+
+        // Elevation changed everywhere → recolour (the ramp reads elevation) and re-tessellate all.
+        // Auto-biome reclassify is skipped: colour is trait-driven (not biome-driven), so a stale
+        // auto-biome would only show in the Biome view — left to the next edit to keep this snappy.
+        self.color_cache = self.region_color();
+        for dch in self.chunk_dirty.iter_mut() {
+            *dch = true;
+        }
     }
 
     // --- selection / boundary tools ---
@@ -1487,6 +1593,22 @@ impl World {
             indices,
         })
     }
+}
+
+/// Clamp to [0, 1] (f64).
+fn clamp01f(x: f64) -> f64 {
+    if x < 0.0 {
+        0.0
+    } else if x > 1.0 {
+        1.0
+    } else {
+        x
+    }
+}
+
+/// Linear interpolate `a → b` by `t` (f64).
+fn lerpf(a: f64, b: f64, t: f64) -> f64 {
+    a + (b - a) * t
 }
 
 /// Ease a scalar trait field at `i` toward `target` by weight `w` (brush falloff).

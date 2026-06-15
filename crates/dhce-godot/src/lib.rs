@@ -291,6 +291,13 @@ impl DhceEngine {
     fn view_mode(&self) -> i64 {
         self.world.view_mode() as i64
     }
+    /// Bake the landform trait dials (jaggedness/relief/foothill_falloff/erosion) into the terrain
+    /// height. `strength` is a global gain. Idempotent on re-run; recolours + flags all chunks
+    /// dirty (geometry changed — re-tessellate via `take_dirty_chunks` + rebuild the liquid).
+    #[func]
+    fn shape_terrain(&mut self, strength: f64) {
+        self.world.shape_terrain(strength);
+    }
 
     // --- selection / boundary tools ---
 

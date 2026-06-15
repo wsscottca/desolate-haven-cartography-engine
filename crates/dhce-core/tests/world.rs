@@ -219,6 +219,42 @@ fn blend_traits_leaves_a_uniform_field_unchanged() {
     assert!((before - after).abs() < 1e-9, "a uniform field is a fixed point of the blend: {before} vs {after}");
 }
 
+fn variance(v: &[f32]) -> f32 {
+    let n = v.len().max(1) as f32;
+    let mean = v.iter().sum::<f32>() / n;
+    v.iter().map(|&x| (x - mean) * (x - mean)).sum::<f32>() / n
+}
+
+#[test]
+fn shaping_roughens_with_jaggedness_and_is_idempotent() {
+    // From a flat plateau, cranking jaggedness everywhere should add roughness; re-running must
+    // restore the base then reapply identically (idempotent), not pile detail on detail.
+    let mut w = built();
+    w.paint_trait(500.0, 500.0, 5000.0, 0, 1.0); // trait 0 = jaggedness → 1 over the whole map
+    w.set_elevation(&vec![0.6f32; w.region_count()]); // flat high ground (so altitude-gating is on)
+
+    let flat = variance(&w.elevation_export());
+    w.shape_terrain(1.0);
+    let shaped = w.elevation_export();
+    assert!(variance(&shaped) > flat + 1e-4, "jaggedness adds roughness: {flat} -> {}", variance(&shaped));
+
+    let a: Vec<u32> = shaped.iter().map(|v| v.to_bits()).collect();
+    w.shape_terrain(1.0); // re-run from the restored base
+    let b: Vec<u32> = w.elevation_export().iter().map(|v| v.to_bits()).collect();
+    assert_eq!(a, b, "re-shaping restores the base then reapplies → bit-identical");
+}
+
+#[test]
+fn shaping_strength_zero_is_a_no_op() {
+    let mut w = built();
+    w.paint_trait(500.0, 500.0, 5000.0, 0, 1.0);
+    w.set_elevation(&vec![0.6f32; w.region_count()]);
+    let before: Vec<u32> = w.elevation_export().iter().map(|v| v.to_bits()).collect();
+    w.shape_terrain(0.0);
+    let after: Vec<u32> = w.elevation_export().iter().map(|v| v.to_bits()).collect();
+    assert_eq!(before, after, "zero strength adds nothing");
+}
+
 #[test]
 fn temperature_view_maps_the_field_to_a_heat_ramp() {
     // The Temperature data view recolours the same mesh by the field: hot reads red-dominant,

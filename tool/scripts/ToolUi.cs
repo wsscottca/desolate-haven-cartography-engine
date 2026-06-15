@@ -31,14 +31,21 @@ public partial class ToolUi : CanvasLayer
     private ColorPickerButton[] _palPickers;
     private bool _loadingPalette;
 
+    // Contextual paint controls shown under the VIEW select (Temperature/Moisture brushes).
+    private HSlider _viewBrushSlider;
+    private Label _viewBrushLabel, _viewEditHint;
+    private double _shapeStrength = 1.0; // global gain for Apply shaping
+
     private static readonly float[] BrushFractions = { 0.03f, 0.06f, 0.12f, 0.25f, 0.5f };
     private static readonly int[] DotFontSizes = { 9, 12, 16, 20, 25 };
 
     // Trait dropdown order → engine trait id (0 jag,1 relief,2 foothill,3 erosion,4 temp,5 moist,
     // 6 vegetation,7 palette_family). Enum traits (6,7) use the dropdown; the rest use the slider.
-    private static readonly int[] TraitEngineId = { 6, 7, 0, 1, 2, 3, 4, 5 };
+    // Temperature/Moisture are NOT here — they're painted from the contextual brush under the VIEW
+    // select (those two traits have dedicated data views; see SelectView).
+    private static readonly int[] TraitEngineId = { 6, 7, 0, 1, 2, 3 };
     private static readonly string[] TraitNames =
-        { "Vegetation", "Palette family", "Jaggedness", "Relief", "Foothill falloff", "Erosion", "Temperature", "Moisture" };
+        { "Vegetation", "Palette family", "Jaggedness", "Relief", "Foothill falloff", "Erosion" };
     private static readonly string[] VegNames =
         { "Barren", "Grass", "Scrub", "Forest", "Evergreen", "Marsh", "Thorn" };
     private static readonly string[] FamilyNames =
@@ -212,19 +219,28 @@ public partial class ToolUi : CanvasLayer
         _traitEnum.ItemSelected += idx => { Root.Tool.TraitValue = (int)idx; Root.Tool.Active = ToolKind.Trait; };
         col.AddChild(_traitEnum);
 
-        // Ease painted-region borders into natural skirts. One-shot (not a brush): the core
-        // diffuses the scalar trait fields from their painted base, so re-applying is idempotent.
-        col.AddChild(ToolTheme.Header("TRANSITIONS"));
-        Slider(col, "Width (m)", 0, 1200, 25, _transitionWidthM, v => _transitionWidthM = v);
-        var blend = GhostButton("Blend borders");
-        blend.Pressed += () =>
+        // Bake the landform dials (Jaggedness/Relief/Foothill falloff/Erosion) into the terrain.
+        // One-shot + idempotent: the core restores the previous shaping, then reapplies from the
+        // current dial fields, so re-running (or changing strength) never compounds.
+        col.AddChild(ToolTheme.Header("SHAPING"));
+        var shapeHint = new Label
         {
-            Root.Engine.Call("blend_traits", _transitionWidthM);
-            Root.RepaintDirtyTerrain();
-            RefreshMinimap();
-            SetStatus($"blended trait borders @ {_transitionWidthM:0} m");
+            Text = "Bake the landform dials into the terrain height.",
+            AutowrapMode = TextServer.AutowrapMode.WordSmart,
         };
-        col.AddChild(blend);
+        shapeHint.AddThemeColorOverride("font_color", ToolTheme.InkDim);
+        col.AddChild(shapeHint);
+        Slider(col, "Strength", 0, 2, 0.05, _shapeStrength, v => _shapeStrength = v);
+        var shape = GhostButton("Apply shaping");
+        shape.Pressed += () =>
+        {
+            Root.Engine.Call("shape_terrain", _shapeStrength);
+            Root.RepaintDirtyTerrain();
+            Root.RebuildLiquid();
+            RefreshMinimap();
+            SetStatus($"shaped terrain @ strength {_shapeStrength:0.##}");
+        };
+        col.AddChild(shape);
 
         SelectTrait(0); // default to Vegetation
     }
@@ -306,7 +322,7 @@ public partial class ToolUi : CanvasLayer
         col.AddChild(ToolTheme.Header("VIEW"));
         var viewHint = new Label
         {
-            Text = "Recolour the terrain + map by a data layer; paint to edit it directly.",
+            Text = "Recolour the terrain + map by a data layer.",
             AutowrapMode = TextServer.AutowrapMode.WordSmart,
         };
         viewHint.AddThemeColorOverride("font_color", ToolTheme.InkDim);
@@ -317,25 +333,67 @@ public partial class ToolUi : CanvasLayer
         view.ItemSelected += idx => SelectView((int)idx);
         col.AddChild(view);
 
+        // Contextual paint brush for the views that map to a paintable trait (Temperature/Moisture).
+        // Shown only for those views; left-dragging the terrain paints the field you're looking at.
+        _viewEditHint = DimLabel("");
+        _viewEditHint.AutowrapMode = TextServer.AutowrapMode.WordSmart;
+        col.AddChild(_viewEditHint);
+        _viewBrushLabel = DimLabel("Paint value: 0.5");
+        col.AddChild(_viewBrushLabel);
+        _viewBrushSlider = new HSlider { MinValue = 0, MaxValue = 1, Step = 0.01, Value = 0.5 };
+        _viewBrushSlider.ValueChanged += v =>
+        {
+            _viewBrushLabel.Text = $"Paint value: {v:0.##}";
+            Root.Tool.TraitValue = (float)v;
+            Root.Tool.Active = ToolKind.Trait;
+        };
+        col.AddChild(_viewBrushSlider);
+        _viewBrushSlider.Visible = false;
+        _viewBrushLabel.Visible = false;
+
         col.AddChild(ToolTheme.Header("MAP"));
         _minimap = new MinimapPanel { Root = Root };
         col.AddChild(_minimap);
+
+        // Ease painted-region borders into natural skirts. One-shot + idempotent (the core diffuses
+        // the scalar trait fields from their painted base). Placed under the map per the layout.
+        col.AddChild(ToolTheme.Header("TRANSITIONS"));
+        Slider(col, "Width (m)", 0, 1200, 25, _transitionWidthM, v => _transitionWidthM = v);
+        var blend = GhostButton("Blend borders");
+        blend.Pressed += () =>
+        {
+            Root.Engine.Call("blend_traits", _transitionWidthM);
+            Root.RepaintDirtyTerrain();
+            RefreshMinimap();
+            SetStatus($"blended trait borders @ {_transitionWidthM:0} m");
+        };
+        col.AddChild(blend);
     }
 
-    /// Switch the colour view. Temperature/Moisture also arm the matching trait brush (and jump to
-    /// the Biomes tab, where its controls live) so you can paint the field you're looking at.
+    /// Switch the colour view. Temperature/Moisture arm the matching trait brush and reveal the
+    /// contextual paint slider right here (no tab hop) so you can edit the field you're looking at.
     private void SelectView(int mode)
     {
         Root.SetViewMode(mode);
-        if (mode == 1 || mode == 2) // Temperature / Moisture → arm the matching trait brush
+        bool paintable = mode == 1 || mode == 2; // Temperature / Moisture
+        _viewBrushSlider.Visible = paintable;
+        _viewBrushLabel.Visible = paintable;
+        if (paintable)
         {
-            SetTab(false);
-            int dropdownIdx = mode == 1 ? 6 : 7; // TraitEngineId: temperature 4 → idx 6, moisture 5 → idx 7
-            if (_traitPick != null) { _traitPick.Selected = dropdownIdx; SelectTrait(dropdownIdx); }
+            Root.Tool.TraitId = mode == 1 ? 4 : 5; // engine ids: temperature 4, moisture 5
+            Root.Tool.TraitValue = (float)_viewBrushSlider.Value;
+            Root.Tool.Active = ToolKind.Trait;
+            _viewEditHint.Text = $"Left-drag the terrain to paint {ViewNames[mode]}.";
             SetStatus($"{ViewNames[mode]} view — paint to edit");
         }
         else
         {
+            _viewEditHint.Text = mode switch
+            {
+                3 => "Use the Terrain tools to sculpt elevation.",
+                4 => "Use the Region swatches (Biomes tab) to stamp.",
+                _ => "",
+            };
             SetStatus($"{ViewNames[mode]} view");
         }
     }

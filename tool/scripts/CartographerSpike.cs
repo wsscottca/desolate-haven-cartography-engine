@@ -382,7 +382,7 @@ public partial class CartographerSpike : Node3D
         _engine.Call("set_view_mode", mode);
         var m = CurrentViewMat();
         if (_chunks != null) foreach (var mi in _chunks) if (mi != null) mi.MaterialOverride = m;
-        RepaintDirtyTerrain();
+        if (_genDone) RepaintDirtyTerrain();
         _ui?.RefreshMinimap();
     }
 
