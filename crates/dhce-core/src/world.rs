@@ -1919,6 +1919,30 @@ impl World {
     pub fn chunk_surface(&self, chunk: usize, exaggeration: f64) -> Option<geometry::Surface> {
         let mesh = self.mesh.as_ref()?;
         let tris = self.chunk_tris.get(chunk)?;
+        Some(self.surface_from_tris(mesh, tris, exaggeration))
+    }
+
+    /// Terrain submesh of every triangle whose three cells are all in named Region `region_id`,
+    /// compacted to a local vertex set (the per-Region level geometry — see the slicing spec). Empty
+    /// if the Region has no fully-interior triangle. Boundary triangles between Regions are dropped.
+    pub fn region_terrain_surface(&self, region_id: u8, exaggeration: f64) -> Option<geometry::Surface> {
+        let mesh = self.mesh.as_ref()?;
+        let want = |r: usize| self.region_r.get(r).copied() == Some(region_id);
+        let mut tris: Vec<u32> = Vec::new();
+        for t in 0..mesh.num_triangles() {
+            let a = mesh.r_begin_s(3 * t);
+            let b = mesh.r_begin_s(3 * t + 1);
+            let c = mesh.r_begin_s(3 * t + 2);
+            if want(a) && want(b) && want(c) {
+                tris.push(t as u32);
+            }
+        }
+        Some(self.surface_from_tris(mesh, &tris, exaggeration))
+    }
+
+    /// Compact terrain submesh from a set of triangle ids: vertices remapped to a local set, smooth
+    /// normals from incident faces. Shared by the chunk + per-Region surface producers.
+    fn surface_from_tris(&self, mesh: &crate::mesh::Mesh, tris: &[u32], exaggeration: f64) -> geometry::Surface {
         let mut local_of: HashMap<u32, u32> = HashMap::new();
         let mut globals: Vec<u32> = Vec::new();
         let mut indices: Vec<u32> = Vec::with_capacity(tris.len() * 3);
@@ -1994,13 +2018,44 @@ impl World {
                 normals[3 * li + 2] = 1.0;
             }
         }
-        Some(geometry::Surface {
+        geometry::Surface {
             positions,
             normals,
             heights,
             colors,
             indices,
-        })
+        }
+    }
+
+    /// `[region_a, region_b, shared_cell_pairs]` for each unordered pair of named Regions whose cells
+    /// touch (both non-zero). Drives the adjacency manifest the level slicer writes for later gates.
+    pub fn region_adjacency(&self) -> Vec<[u32; 3]> {
+        let n = self.region_r.len();
+        if self.neighbors.len() != n {
+            return Vec::new();
+        }
+        let mut counts: std::collections::BTreeMap<(u8, u8), u32> = std::collections::BTreeMap::new();
+        for r in 0..n {
+            let ra = self.region_r[r];
+            if ra == 0 {
+                continue;
+            }
+            for &nb in &self.neighbors[r] {
+                let rb = self.region_r[nb as usize];
+                if rb == 0 || rb == ra {
+                    continue;
+                }
+                let key = if ra < rb { (ra, rb) } else { (rb, ra) };
+                *counts.entry(key).or_insert(0) += 1;
+            }
+        }
+        // Each adjacent cell-pair is counted from both sides → halve for the pair count.
+        counts.into_iter().map(|((a, b), c)| [a as u32, b as u32, c / 2]).collect()
+    }
+
+    /// Number of cells assigned to named Region `region_id` (for the slicer's per-Region report).
+    pub fn region_cell_count(&self, region_id: u8) -> usize {
+        self.region_r.iter().filter(|&&r| r == region_id).count()
     }
 
     // --- liquid rendering chunks (mirror the terrain chunk path) ---

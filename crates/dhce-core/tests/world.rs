@@ -449,6 +449,28 @@ fn region_tier_assigns_via_polygon_and_persists() {
 }
 
 #[test]
+fn region_slicing_extracts_submesh_and_adjacency() {
+    // Slicer core: per-Region terrain submesh + Region adjacency for the level export.
+    let mut w = built(); // 1000 × 1000
+    let left = w.regions_in_polygon(&[10.0, 500.0, 500.0, 10.0], &[10.0, 10.0, 990.0, 990.0]);
+    assert!(!left.is_empty());
+    w.assign_region(&left, 1);
+    assert_eq!(w.region_cell_count(1), left.len(), "cell count matches the assignment");
+
+    let surf = w.region_terrain_surface(1, 100.0).expect("built world");
+    assert!(!surf.positions.is_empty() && !surf.indices.is_empty(), "Region 1 has interior geometry");
+    assert_eq!(surf.indices.len() % 3, 0, "triangles");
+    let vtx = (surf.positions.len() / 3) as u32;
+    assert!(surf.indices.iter().all(|&i| i < vtx), "indices are compacted + in range");
+
+    // Assign the abutting right half to Region 2 → the two Regions share a border ⇒ adjacency.
+    let right = w.regions_in_polygon(&[500.0, 990.0, 990.0, 500.0], &[10.0, 10.0, 990.0, 990.0]);
+    w.assign_region(&right, 2);
+    let adj = w.region_adjacency();
+    assert!(adj.iter().any(|p| p[0] == 1 && p[1] == 2 && p[2] > 0), "Regions 1 & 2 are adjacent: {adj:?}");
+}
+
+#[test]
 fn save_load_round_trips_authored_fields() {
     // R5 persistence: author a world, export every field, then rebuild a fresh world from the same
     // params and restore — the restored fields must be bit-identical (regenerate-then-overwrite).

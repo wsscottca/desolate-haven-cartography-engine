@@ -25,6 +25,7 @@ struct DhceEngine {
     world: World,
     surface: Option<Surface>,
     chunk_cache: Option<Surface>,
+    region_cache: Option<Surface>,
     liquid: Option<LiquidSurface>,
     liquid_chunk_cache: Option<LiquidSurface>,
     scatter_buf: Vec<f32>,
@@ -39,6 +40,7 @@ impl IRefCounted for DhceEngine {
             world: World::new(),
             surface: None,
             chunk_cache: None,
+            region_cache: None,
             liquid: None,
             liquid_chunk_cache: None,
             scatter_buf: Vec::new(),
@@ -164,6 +166,44 @@ impl DhceEngine {
     #[func]
     fn take_dirty_chunks(&mut self) -> PackedInt32Array {
         u32_to_packed(&self.world.take_dirty_chunks())
+    }
+
+    // --- per-Region level slicing (bake one named Region's geometry; see the slicing spec) ---
+
+    /// Cache the compact terrain submesh for named Region `region_id`; read via region_positions etc.
+    #[func]
+    fn slice_region_terrain(&mut self, region_id: i64, exaggeration: f64) {
+        self.region_cache = self.world.region_terrain_surface(region_id.max(0) as u8, exaggeration);
+    }
+    #[func]
+    fn region_positions(&self) -> PackedVector3Array {
+        self.region_cache.as_ref().map(|s| to_vec3_yup(&s.positions)).unwrap_or_default()
+    }
+    #[func]
+    fn region_normals(&self) -> PackedVector3Array {
+        self.region_cache.as_ref().map(|s| to_vec3_yup(&s.normals)).unwrap_or_default()
+    }
+    #[func]
+    fn region_colors(&self) -> PackedColorArray {
+        self.region_cache.as_ref().map(|s| to_colors(&s.colors)).unwrap_or_default()
+    }
+    #[func]
+    fn region_indices(&self) -> PackedInt32Array {
+        self.region_cache.as_ref().map(|s| u32_to_packed(&s.indices)).unwrap_or_default()
+    }
+    /// Region adjacency flat as `[a, b, shared_pairs, …]` (3 ints per touching pair); for the manifest.
+    #[func]
+    fn region_adjacency(&self) -> PackedInt32Array {
+        let mut flat: Vec<u32> = Vec::new();
+        for p in self.world.region_adjacency() {
+            flat.extend_from_slice(&p);
+        }
+        u32_to_packed(&flat)
+    }
+    /// Number of cells assigned to named Region `region_id`.
+    #[func]
+    fn region_cell_count(&self, region_id: i64) -> i64 {
+        self.world.region_cell_count(region_id.max(0) as u8) as i64
     }
 
     // --- liquid simulation + render surface ---
