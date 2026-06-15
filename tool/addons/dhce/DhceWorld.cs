@@ -23,6 +23,8 @@ public partial class DhceWorld : Node3D
     [Export] public float ChunkSizeM = 256f;   // fixed chunk edge (m); smaller ⇒ finer, lighter streaming
     [Export] public int RenderDistance = 8;    // chunk tiles (Chebyshev) kept meshed around the focus
     [Export] public int ChunksPerFrame = 8;    // chunks tessellated per streaming tick
+    [Export] public int LodDistance = 3;       // chunks within this (tiles) render full TIN; beyond → coarse LOD
+    [Export] public int LodGridN = 8;          // coarse LOD grid resolution per chunk
     [Export] public DhceWorldState State;      // persisted snapshot; regenerated from on open (R5)
     [Export] public DhceScatterLibrary Scatter; // authored scatter model slots + rules (N3d)
     [Export] public Godot.Collections.Array<Vector4> Caves = new(); // volumetric carve spheres: xyz centre + w radius (N5)
@@ -36,6 +38,7 @@ public partial class DhceWorld : Node3D
     private MeshInstance3D[] _liquidChunks;
     private ArrayMesh[] _liquidChunkMeshes;
     private bool[] _built;
+    private int[] _chunkLod; // per built chunk: 0 = full TIN, 1 = coarse LOD
     private StandardMaterial3D _mat, _dataMat, _liquidMat;
     private int _viewMode;
     private int _cols, _rows;
@@ -43,7 +46,7 @@ public partial class DhceWorld : Node3D
     private float _exaggeration;
     private float _widthM, _heightM;
     private bool _genDone;
-    private readonly List<(int dist, int ci)> _pending = new();
+    private readonly List<(int dist, int ci, bool lod)> _pending = new();
     private readonly List<Node> _scatterPreview = new(); // ephemeral N3d scatter preview nodes
     private MeshInstance3D _cavePreview;        // ephemeral N5 carved-cave preview
     private StandardMaterial3D _caveMat;
@@ -119,6 +122,7 @@ public partial class DhceWorld : Node3D
         _liquidChunks = new MeshInstance3D[n];
         _liquidChunkMeshes = new ArrayMesh[n];
         _built = new bool[n];
+        _chunkLod = new int[n];
         _genDone = true;
         UpdateStreaming(WorldCenter); // seed the centre so something shows immediately
     }
@@ -151,18 +155,20 @@ public partial class DhceWorld : Node3D
             int gx = ci % _cols;
             int gy = ci / _cols;
             int dist = Mathf.Max(Mathf.Abs(gx - camGx), Mathf.Abs(gy - camGy));
-            if (dist <= RenderDistance) { if (!_built[ci]) _pending.Add((dist, ci)); }
-            else if (_built[ci]) FreeChunk(ci);
+            if (dist > RenderDistance) { if (_built[ci]) FreeChunk(ci); continue; }
+            bool lod = dist > LodDistance; // near = full TIN, far = coarse LOD
+            // Build if not meshed, or re-mesh when a chunk crosses the LOD threshold as the camera moves.
+            if (!_built[ci] || (_chunkLod[ci] == 1) != lod) _pending.Add((dist, ci, lod));
         }
         if (_pending.Count > 0)
         {
             _pending.Sort((a, b) => a.dist.CompareTo(b.dist));
             int budget = Mathf.Min(ChunksPerFrame, _pending.Count);
-            for (int k = 0; k < budget; k++) BuildChunk(_pending[k].ci);
+            for (int k = 0; k < budget; k++) BuildChunk(_pending[k].ci, _pending[k].lod);
         }
     }
 
-    private void BuildChunk(int i)
+    private void BuildChunk(int i, bool lod)
     {
         if (_chunks[i] == null) // lazy: instantiate the tile node the first time it streams in
         {
@@ -172,7 +178,9 @@ public partial class DhceWorld : Node3D
             _chunks[i] = mi;
             _chunkMeshes[i] = m;
         }
-        _engine.Call("tessellate_chunk", i, _exaggeration);
+        if (lod) _engine.Call("tessellate_chunk_lod", i, _exaggeration, LodGridN);
+        else _engine.Call("tessellate_chunk", i, _exaggeration);
+        _chunkLod[i] = lod ? 1 : 0;
         ArrayMesh am = _chunkMeshes[i];
         am.ClearSurfaces();
         var positions = _engine.Call("chunk_positions").As<Vector3[]>();
@@ -187,7 +195,8 @@ public partial class DhceWorld : Node3D
         arrays[(int)Mesh.ArrayType.Color] = colors;
         arrays[(int)Mesh.ArrayType.Index] = indices;
         am.AddSurfaceFromArrays(Mesh.PrimitiveType.Triangles, arrays);
-        BuildLiquidChunk(i);
+        if (lod) _liquidChunkMeshes[i]?.ClearSurfaces(); // far chunks skip the (expensive) liquid surface
+        else BuildLiquidChunk(i);
         _built[i] = true;
     }
 
@@ -239,7 +248,7 @@ public partial class DhceWorld : Node3D
         if (_chunkMeshes == null) return 0;
         int[] dirty = _engine.Call("take_dirty_chunks").As<int[]>();
         foreach (int ci in dirty)
-            if (ci >= 0 && ci < _chunkMeshes.Length && _built[ci]) BuildChunk(ci);
+            if (ci >= 0 && ci < _chunkMeshes.Length && _built[ci]) BuildChunk(ci, _chunkLod[ci] == 1);
         return dirty.Length;
     }
 
@@ -269,7 +278,7 @@ public partial class DhceWorld : Node3D
         TerrainHeightKm = km;
         _exaggeration = km * 1000f / ElevSpan;
         if (!_genDone) return;
-        for (int i = 0; i < _built.Length; i++) if (_built[i]) BuildChunk(i);
+        for (int i = 0; i < _built.Length; i++) if (_built[i]) BuildChunk(i, _chunkLod[i] == 1);
     }
 
     private StandardMaterial3D CurrentViewMat() => _viewMode == 0 ? _mat : _dataMat;
@@ -379,7 +388,7 @@ public partial class DhceWorld : Node3D
         SetF("set_base_palettes", s.BasePalettes);
         SetF("set_region_landform_table", s.RegionLandform);
         _engine.Call("refresh_colors");
-        for (int i = 0; i < _built.Length; i++) if (_built[i]) BuildChunk(i); // re-tessellate the meshed ring
+        for (int i = 0; i < _built.Length; i++) if (_built[i]) BuildChunk(i, _chunkLod[i] == 1); // re-tessellate the meshed ring
     }
 
     /// Save to a binary .res next to the scene and reference it (so reopening restores). Returns status.

@@ -157,10 +157,16 @@ the per-dab timing line still prints.
       (no hole cut in the heightfield yet) → possible z-fighting at the entrance. Refinement: remove
       region terrain triangles within the cave bbox + stitch. Surface-Nets winding isn't guaranteed
       outward → cave material is double-sided for now.
-- **Later — ❌ outstanding bucket** — generation-streaming / LOD (only if a world outgrows RAM),
-  **Atmospheric Fog**, **Scatter Tool polish**, the **scale bar** (context-aware cm→m→km readout) and
-  zoomable-minimap LOD (n3-tooling-design §5). Plus the cross-repo **gates + game-side level loading**
-  (gameplay phase, in the game repo) and the **reshell R6b** cleanup (retire the stale runtime app).
+- **LOD / atmosphere — ✅ DONE (2026-06-15).** **Atmospheric fog** (host-scene Environment, exponential
+  + aerial perspective); **scatter LOD culling** (per-slot `VisibilityEndM` → `VisibilityRangeEnd` on
+  preview + bake); **scale bar** (context-aware cm→m→km viewport-span readout from the editor camera);
+  **distance terrain LOD** (`World::chunk_lod_surface` — coarse `n×n` grid heightmesh for far chunks;
+  `DhceWorld` streams full TIN within `LodDistance`, coarse beyond, re-meshing on threshold crossings;
+  far chunks skip liquid). *(v1: LOD seams aren't crack-stitched — fog/distance hide them.)*
+- **Later — ❌ still outstanding** — **generation-streaming** (only if a world outgrows RAM — not
+  needed yet); the cross-repo **gates + game-side level loading** (gameplay phase, in the game repo);
+  the **reshell R6b** cleanup (retire the stale runtime app, after the user validates); and small
+  scatter-polish (region-mask UI; the veg-from-scatter reconcile button).
 
 ## Pending housekeeping
 - Migrate the build-time license gate from `scripts/check-licenses.mjs` (Node) to `cargo-deny`.

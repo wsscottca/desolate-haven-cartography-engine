@@ -152,6 +152,11 @@ impl DhceEngine {
     fn tessellate_chunk(&mut self, chunk: i64, exaggeration: f64) {
         self.chunk_cache = self.world.chunk_surface(chunk.max(0) as usize, exaggeration);
     }
+    /// Coarse LOD heightmesh for a distant chunk (`n×n` grid); read via the same `chunk_*` accessors.
+    #[func]
+    fn tessellate_chunk_lod(&mut self, chunk: i64, exaggeration: f64, n: i64) {
+        self.chunk_cache = self.world.chunk_lod_surface(chunk.max(0) as usize, exaggeration, n.max(1) as usize);
+    }
     #[func]
     fn chunk_positions(&self) -> PackedVector3Array {
         self.chunk_cache.as_ref().map(|s| to_vec3_yup(&s.positions)).unwrap_or_default()

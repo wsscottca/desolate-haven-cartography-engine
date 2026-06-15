@@ -2027,6 +2027,95 @@ impl World {
         }
     }
 
+    /// A **coarse** regular-grid heightmesh over one chunk's footprint (terrain LOD): an `n×n` grid of
+    /// `height_at` samples → `2n²` triangles, far fewer than the chunk's full TIN. Used for distant
+    /// chunks so a larger area can stay rendered cheaply (near chunks keep [`chunk_surface`]). Positions
+    /// in core space (the binding applies the Y-up remap, as for the full chunk). Seams with full-detail
+    /// neighbours aren't stitched (v1) — fog + distance hide the small cracks.
+    pub fn chunk_lod_surface(&self, chunk: usize, exaggeration: f64, n: usize) -> Option<geometry::Surface> {
+        if self.mesh.is_none() || self.chunk_cols == 0 {
+            return None;
+        }
+        let n = n.max(1);
+        let cs = self.chunk_size_m;
+        let gx = (chunk % self.chunk_cols) as f64;
+        let gy = (chunk / self.chunk_cols) as f64;
+        let x0 = gx * cs;
+        let x1 = ((gx + 1.0) * cs).min(self.width);
+        let y0 = gy * cs;
+        let y1 = ((gy + 1.0) * cs).min(self.height);
+        if x1 <= x0 || y1 <= y0 {
+            return Some(geometry::Surface { positions: vec![], normals: vec![], heights: vec![], colors: vec![], indices: vec![] });
+        }
+        let w = n + 1;
+        let mut positions = vec![0.0f32; w * w * 3];
+        let mut heights = vec![0.0f32; w * w];
+        let mut colors = vec![0.5f32; w * w * 3];
+        for j in 0..w {
+            for i in 0..w {
+                let px = x0 + (x1 - x0) * (i as f64 / n as f64);
+                let py = y0 + (y1 - y0) * (j as f64 / n as f64);
+                let r = self.region_at(px, py);
+                let e = r.map(|r| self.elevation_r[r]).unwrap_or(0.0);
+                let idx = j * w + i;
+                positions[3 * idx] = px as f32;
+                positions[3 * idx + 1] = py as f32;
+                positions[3 * idx + 2] = (e * exaggeration) as f32;
+                heights[idx] = e as f32;
+                if let Some(r) = r {
+                    if 3 * r + 2 < self.color_cache.len() {
+                        colors[3 * idx] = self.color_cache[3 * r];
+                        colors[3 * idx + 1] = self.color_cache[3 * r + 1];
+                        colors[3 * idx + 2] = self.color_cache[3 * r + 2];
+                    }
+                }
+            }
+        }
+        let mut indices = Vec::with_capacity(n * n * 6);
+        for j in 0..n {
+            for i in 0..n {
+                let a = (j * w + i) as u32;
+                let b = a + 1;
+                let c = a + w as u32;
+                let dd = c + 1;
+                indices.extend_from_slice(&[a, c, b, b, c, dd]);
+            }
+        }
+        // Smooth normals, oriented upward (matches build_surface; the chunk material is double-sided).
+        let mut accum = vec![0.0f64; w * w * 3];
+        for tri in indices.chunks_exact(3) {
+            let (ia, ib, ic) = (tri[0] as usize, tri[1] as usize, tri[2] as usize);
+            let p = |idx: usize| [positions[3 * idx] as f64, positions[3 * idx + 1] as f64, positions[3 * idx + 2] as f64];
+            let (a, b, c) = (p(ia), p(ib), p(ic));
+            let u = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+            let v = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+            let (mut nx, mut ny, mut nz) = (u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]);
+            if nz < 0.0 {
+                nx = -nx;
+                ny = -ny;
+                nz = -nz;
+            }
+            for &idx in &[ia, ib, ic] {
+                accum[3 * idx] += nx;
+                accum[3 * idx + 1] += ny;
+                accum[3 * idx + 2] += nz;
+            }
+        }
+        let mut normals = vec![0.0f32; w * w * 3];
+        for idx in 0..w * w {
+            let (nx, ny, nz) = (accum[3 * idx], accum[3 * idx + 1], accum[3 * idx + 2]);
+            let len = (nx * nx + ny * ny + nz * nz).sqrt();
+            if len > 1e-12 {
+                normals[3 * idx] = (nx / len) as f32;
+                normals[3 * idx + 1] = (ny / len) as f32;
+                normals[3 * idx + 2] = (nz / len) as f32;
+            } else {
+                normals[3 * idx + 2] = 1.0;
+            }
+        }
+        Some(geometry::Surface { positions, normals, heights, colors, indices })
+    }
+
     /// `[region_a, region_b, shared_cell_pairs]` for each unordered pair of named Regions whose cells
     /// touch (both non-zero). Drives the adjacency manifest the level slicer writes for later gates.
     pub fn region_adjacency(&self) -> Vec<[u32; 3]> {
