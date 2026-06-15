@@ -199,6 +199,12 @@ public partial class DhceDock : ScrollContainer
             SetStatus($"Region tool: {BiomeNames[_tool.RegionId - 1]}");
         };
         _col.AddChild(_regionPick);
+        var regionModes = new HBoxContainer();
+        AddModeButton(regionModes, "Brush", ToolKind.Region);
+        AddModeButton(regionModes, "Polygon", ToolKind.Territory);
+        AddModeButton(regionModes, "Select", ToolKind.RegionSelect);
+        _col.AddChild(regionModes);
+        _col.AddChild(Dim("Polygon: click vertices, right-click closes, Esc cancels. Select: click an area to flood-assign."));
 
         Header("TRAIT BRUSH");
         _traitPick = Options(TraitNames, 0, idx => SelectTrait((int)idx));
@@ -413,7 +419,7 @@ public partial class DhceDock : ScrollContainer
 
     // --- control helpers ---
 
-    private void SetStatus(string text) { if (_status != null) _status.Text = text; }
+    public void SetStatus(string text) { if (_status != null) _status.Text = text; }
 
     private void Header(string text)
     {
@@ -430,6 +436,13 @@ public partial class DhceDock : ScrollContainer
         if (tool == _tool.Active) b.ButtonPressed = true;
         parent.AddChild(b);
         _toolButtons.Add(b);
+    }
+
+    private void AddModeButton(Container parent, string text, ToolKind tool)
+    {
+        var b = new Button { Text = text, SizeFlagsHorizontal = SizeFlags.ExpandFill };
+        b.Pressed += () => { _tool.Active = tool; SetStatus($"Region: {text} mode"); };
+        parent.AddChild(b);
     }
 
     private Button SwatchButton(int id, string name)

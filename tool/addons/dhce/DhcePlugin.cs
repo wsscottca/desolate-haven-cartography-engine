@@ -1,5 +1,6 @@
 #if TOOLS
 using Godot;
+using System.Collections.Generic;
 
 namespace DesolateHaven.Cartography;
 
@@ -16,6 +17,8 @@ public partial class DhcePlugin : EditorPlugin
     private DhceWorld _edited;                   // the selected/edited DhceWorld (drives picking)
     private bool _painting;                      // a left-drag stroke is in progress
     private MeshInstance3D _gizmo;               // brush-footprint ring under the cursor (ephemeral)
+    private readonly List<Vector3> _polyVerts = new(); // in-progress Territory polygon (ground points)
+    private MeshInstance3D _polyLine;            // polygon outline overlay (ephemeral)
 
     public override void _EnterTree()
     {
@@ -28,6 +31,7 @@ public partial class DhcePlugin : EditorPlugin
     public override void _ExitTree()
     {
         FreeGizmo();
+        ClearPolygon();
         if (_dock != null)
         {
             RemoveControlFromDocks(_dock);
@@ -59,16 +63,17 @@ public partial class DhcePlugin : EditorPlugin
     {
         _edited = @object as DhceWorld;
         _painting = false;
+        ClearPolygon();
     }
 
     public override void _MakeVisible(bool visible)
     {
-        if (!visible) { _edited = null; _painting = false; FreeGizmo(); }
+        if (!visible) { _edited = null; _painting = false; FreeGizmo(); ClearPolygon(); }
     }
 
-    /// Turn a left-drag in the 3D viewport into a brush stroke on the selected world. Uses the editor
-    /// camera's own ray so the brush lands under the cursor from any angle; the 3D-sphere falloff
-    /// (set inside `ToolState.Apply`) keeps it biting the surface, not a vertical column.
+    /// Route 3D viewport input to the active tool: brush stroke (sculpt/trait/region brush), polygon
+    /// Territory (multi-click → `regions_in_polygon` → `assign_region`), or Select (flood-assign).
+    /// All use the editor camera's own ray so edits land under the cursor from any angle.
     public override int _Forward3DGuiInput(Camera3D camera, InputEvent @event)
     {
         int pass = (int)EditorPlugin.AfterGuiInput.Pass;
@@ -78,42 +83,157 @@ public partial class DhcePlugin : EditorPlugin
         if (world == null || !world.GenDone || world.Engine == null || camera == null)
             return pass;
 
-        // Only mouse motion/buttons drive the brush; let everything else (nav, keys) pass.
-        Vector2 mouse;
-        if (@event is InputEventMouseButton mbp) mouse = mbp.Position;
-        else if (@event is InputEventMouseMotion mmp) mouse = mmp.Position;
-        else return pass;
+        bool isButton = @event is InputEventMouseButton;
+        bool isMotion = @event is InputEventMouseMotion;
+        bool isKey = @event is InputEventKey;
+        if (!isButton && !isMotion && !isKey) return pass;
 
-        // Cast once; update the footprint gizmo at the hovered surface point (even when not painting).
-        Vector3 origin = camera.ProjectRayOrigin(mouse);
-        Vector3 dir = camera.ProjectRayNormal(mouse);
-        var hits = world.Engine.Call("raycast_terrain", origin, dir, (double)world.Exaggeration).As<Vector3[]>();
-        bool onTerrain = hits.Length > 0;
-        UpdateGizmo(world, onTerrain ? hits[0] : Vector3.Zero, onTerrain);
-        _dock?.SetBiomeReadout(onTerrain
-            ? world.Engine.Call("biome_label_at", hits[0].X, hits[0].Z).AsString()
-            : null);
-        _dock?.SetRegionReadout(onTerrain
-            ? world.Engine.Call("region_id_at", hits[0].X, hits[0].Z).AsInt64()
-            : -1);
+        // Leaving the Territory tool mid-polygon cancels the in-progress outline.
+        if (_tool.Active != ToolKind.Territory && _polyVerts.Count > 0) ClearPolygon();
 
-        if (@event is InputEventMouseButton mb)
+        // Resolve the hovered surface point (drives readouts, the gizmo, and polygon vertices).
+        Vector3 hit = Vector3.Zero;
+        bool onTerrain = false;
+        if (!isKey)
         {
+            Vector2 mouse = isButton ? ((InputEventMouseButton)@event).Position : ((InputEventMouseMotion)@event).Position;
+            Vector3 origin = camera.ProjectRayOrigin(mouse);
+            Vector3 dir = camera.ProjectRayNormal(mouse);
+            var hits = world.Engine.Call("raycast_terrain", origin, dir, (double)world.Exaggeration).As<Vector3[]>();
+            onTerrain = hits.Length > 0;
+            if (onTerrain) hit = hits[0];
+            _dock?.SetBiomeReadout(onTerrain ? world.Engine.Call("biome_label_at", hit.X, hit.Z).AsString() : null);
+            _dock?.SetRegionReadout(onTerrain ? world.Engine.Call("region_id_at", hit.X, hit.Z).AsInt64() : -1);
+        }
+
+        // Polygon Territory tool owns clicks; no brush gizmo while it's active.
+        if (_tool.Active == ToolKind.Territory)
+        {
+            FreeGizmo();
+            return HandlePolygon(world, @event, hit, onTerrain) ? stop : pass;
+        }
+
+        UpdateGizmo(world, onTerrain ? hit : Vector3.Zero, onTerrain);
+        if (isKey) return pass;
+
+        if (isButton)
+        {
+            var mb = (InputEventMouseButton)@event;
             if (mb.ButtonIndex != MouseButton.Left) return pass;
             if (!mb.Pressed) { bool was = _painting; _painting = false; return was ? stop : pass; }
             if (!onTerrain) { _painting = false; return pass; } // click off terrain → let editor select
+
+            // Select tool: one click floods the contiguous same-biome area and assigns the Region.
+            if (_tool.Active == ToolKind.RegionSelect)
+            {
+                long cell = world.Engine.Call("region_at", hit.X, hit.Z).AsInt64();
+                if (cell >= 0)
+                {
+                    var sel = world.Engine.Call("select_contiguous", cell).As<int[]>();
+                    world.Engine.Call("assign_region", sel, _tool.RegionId);
+                    world.RepaintDirtyTerrain();
+                    _dock?.SetStatus($"assigned {sel.Length} cells to the Region (flood)");
+                }
+                return stop;
+            }
             _painting = true;
         }
         else // motion
         {
             var mm = (InputEventMouseMotion)@event;
+            if (_tool.Active == ToolKind.RegionSelect) return pass; // Select is click-only
             if (!_painting || !mm.ButtonMask.HasFlag(MouseButtonMask.Left) || !onTerrain) return pass;
         }
 
-        EditResult res = _tool.Apply(world.Engine, hits[0], world.Exaggeration);
+        EditResult res = _tool.Apply(world.Engine, hit, world.Exaggeration);
         if ((res & EditResult.Terrain) != 0) world.RepaintDirtyTerrain();
         if ((res & EditResult.Liquid) != 0) world.RebuildLiquid();
         return stop;
+    }
+
+    // --- Territory polygon tool: left-click places vertices, right-click closes, Esc cancels ---
+
+    private bool HandlePolygon(DhceWorld world, InputEvent e, Vector3 hit, bool onTerrain)
+    {
+        if (e is InputEventKey k && k.Pressed && k.Keycode == Key.Escape)
+        {
+            ClearPolygon();
+            _dock?.SetStatus("polygon cancelled");
+            return true;
+        }
+        if (e is InputEventMouseMotion)
+        {
+            if (_polyVerts.Count > 0) UpdatePolyOverlay(world, onTerrain ? hit : (Vector3?)null);
+            return false; // don't consume motion → camera navigation still works while outlining
+        }
+        if (e is InputEventMouseButton mb && mb.Pressed)
+        {
+            if (mb.ButtonIndex == MouseButton.Left)
+            {
+                if (!onTerrain) return false;
+                _polyVerts.Add(hit);
+                UpdatePolyOverlay(world, null);
+                _dock?.SetStatus($"polygon: {_polyVerts.Count} pts — right-click to close, Esc to cancel");
+                return true;
+            }
+            if (mb.ButtonIndex == MouseButton.Right && _polyVerts.Count > 0)
+            {
+                ClosePolygon(world);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private void ClosePolygon(DhceWorld world)
+    {
+        if (_polyVerts.Count >= 3)
+        {
+            var xs = new float[_polyVerts.Count];
+            var ys = new float[_polyVerts.Count];
+            for (int i = 0; i < _polyVerts.Count; i++) { xs[i] = _polyVerts[i].X; ys[i] = _polyVerts[i].Z; }
+            var cells = world.Engine.Call("regions_in_polygon", xs, ys).As<int[]>();
+            world.Engine.Call("assign_region", cells, _tool.RegionId);
+            world.RepaintDirtyTerrain();
+            _dock?.SetStatus($"assigned {cells.Length} cells to the Region (polygon)");
+        }
+        else _dock?.SetStatus("polygon needs at least 3 points");
+        ClearPolygon();
+    }
+
+    private void UpdatePolyOverlay(DhceWorld world, Vector3? cursor)
+    {
+        if (_polyLine == null || !GodotObject.IsInstanceValid(_polyLine) || _polyLine.GetParent() != world)
+        {
+            FreePoly();
+            _polyLine = new MeshInstance3D { CastShadow = GeometryInstance3D.ShadowCastingSetting.Off };
+            world.AddChild(_polyLine); // owner left null → ephemeral
+        }
+        var mat = new StandardMaterial3D
+        {
+            ShadingMode = BaseMaterial3D.ShadingModeEnum.Unshaded,
+            AlbedoColor = new Color(0.30f, 0.85f, 1.0f),
+            NoDepthTest = true,
+        };
+        var im = new ImmediateMesh();
+        im.SurfaceBegin(Mesh.PrimitiveType.LineStrip, mat);
+        foreach (var v in _polyVerts) im.SurfaceAddVertex(v);
+        if (cursor.HasValue) im.SurfaceAddVertex(cursor.Value); // rubber-band to the cursor
+        if (_polyVerts.Count > 0) im.SurfaceAddVertex(_polyVerts[0]); // closing hint
+        im.SurfaceEnd();
+        _polyLine.Mesh = im;
+    }
+
+    private void ClearPolygon()
+    {
+        _polyVerts.Clear();
+        FreePoly();
+    }
+
+    private void FreePoly()
+    {
+        if (_polyLine != null && GodotObject.IsInstanceValid(_polyLine)) _polyLine.QueueFree();
+        _polyLine = null;
     }
 
     // --- brush footprint gizmo (a flat ring laid on the surface under the cursor) ---

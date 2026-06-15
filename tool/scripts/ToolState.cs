@@ -5,7 +5,7 @@ namespace DesolateHaven.Cartography;
 /// The authoring tools, in toolbar order. Shortcuts 1–7 map to these (see ToolUi).
 /// (Named ToolKind so the `Tool` name is free for CartographerSpike's ToolState property.)
 /// `Biome` stamps a Region preset's whole trait bundle; `Trait` paints a single trait.
-public enum ToolKind { Raise, Carve, Level, Crest, River, Flood, Biome, Trait, Region }
+public enum ToolKind { Raise, Carve, Level, Crest, River, Flood, Biome, Trait, Region, Territory, RegionSelect }
 
 /// What a stroke changed, so the caller knows which render surface(s) to refresh.
 [System.Flags]

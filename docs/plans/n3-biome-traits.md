@@ -163,11 +163,25 @@ Closes the gap flagged in Stage 3: the landform dials now reshape the terrain.
   unassigned). C#: a **Region** tool in `ToolState`/the brush path; an **ASSIGN REGION (place)** dock
   picker (the 14 names); **VIEW → Region**; a live **"Region: …"** cursor readout; and Region
   membership added to `DhceWorldState` Save/Load. Tests: `region_tier_assigns_via_polygon_and_persists`.
-- **⏳ Stage 4b — remaining:** the in-viewport **polygon "Territory" tool** (multi-click vertices →
-  `regions_in_polygon` → `assign_region`) and the **Select-to-reassign** flow (`select_contiguous`),
-  plus an **accent border overlay** mesh. (Brush + polygon both feed the same core `assign_region`.)
+- **Stage 4b — ✅ done (2026-06-15, in-editor; C#-only, no DLL change — all core primitives already
+  existed).** Two more in-viewport Region-assignment modes feed the same core `assign_region`:
+  - **Territory (polygon):** `DhcePlugin` intercepts viewport input in Territory mode — left-click
+    places ground vertices (via `raycast_terrain`), a cyan no-depth-test `ImmediateMesh` outline
+    rubber-bands to the cursor, **right-click** closes → `regions_in_polygon(xs, ys)` →
+    `assign_region(cells, RegionId)`; **Esc** cancels. Motion isn't consumed, so camera nav still works
+    while outlining.
+  - **Select (flood):** left-click → `region_at` → `select_contiguous` (same-biome flood) →
+    `assign_region`.
+  - Dock **ASSIGN REGION** section gains **Brush / Polygon / Select** mode buttons; `DhceDock.SetStatus`
+    made public for live polygon/flood feedback. Result is visible immediately in **VIEW → Region**
+    (the assigned cells take the Region accent).
+  - **Deferred (review):** a dedicated per-edge **border-line overlay** (drawing Region boundaries in
+    accent) — `VIEW_REGION` already visualizes membership, so it wasn't needed for usability; a
+    selection-fill overlay would need a new `cell_positions` core accessor.
 
-**Tests:** polygon assignment ✅; region membership ✅; persistence ✅. (Selection-scope test with 4b.)
+**Tests:** polygon assignment ✅; region membership ✅; persistence ✅ (Stage 4a's
+`region_tier_assigns_via_polygon_and_persists` exercises `regions_in_polygon`+`assign_region`). 4b is
+viewport-interaction C# over those tested primitives — `dotnet build` + editor smoke are its gates.
 
 ## Stage 5 — Per-trait editor panel + presets *(C#)*
 
