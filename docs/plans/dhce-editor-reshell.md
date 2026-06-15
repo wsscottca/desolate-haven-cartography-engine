@@ -135,9 +135,14 @@ Rationale: finer, lighter, smoother show/hide as the camera moves. Core tests
     / `DirectionalLight3D` (engine-built-ins principle), not a DHCE-managed sun. **No tab split** — one
     scrolling column suits a narrow dock. Tool-toggle highlight can lag when a swatch/trait/view arms a
     different `ToolState.Active` (cosmetic; the active tool is still correct).
-- **⏳ R4b — remaining:** the **MAP** minimap (decouple `MinimapPanel` from `CartographerSpike` → take
-  the engine + a focus; editor has no camera-fly API, so click-to-fly degrades to recentre/none) and
-  the **brush gizmo** (overlay `MeshInstance3D` ring under the cursor) deferred from R3.
+- **R4b — ✅ done (2026-06-15).** **MAP:** new `DhceMinimap` (decoupled from `CartographerSpike` —
+  takes the engine + bounds + a focus point) renders the core overview, zoom/pan, and a live marker at
+  the editor-camera ground focus (fed by the plugin each `_Process`); refreshed on gen / view-switch /
+  shaping / blend / palette + a manual **Refresh map** button. Click-to-fly dropped (no editor-camera
+  reposition API) — review. Especially useful now that 3D streaming only meshes a ~4 km ring. **Brush
+  gizmo:** an `ImmediateMesh` ring (unshaded, no-depth-test) laid on the surface under the cursor,
+  scaled to the brush radius, updated on hover via the same `raycast_terrain` (ephemeral child of the
+  world, owner-less). Both visual — **user check**.
 
 **Gate:** every tool/panel usable from the dock against an in-editor world (visual — **user check**);
 `dotnet build` clean ✅ + headless editor smoke loads the plugin + dock with no script errors ✅.

@@ -28,6 +28,7 @@ public partial class DhceDock : ScrollContainer
     private ColorPickerButton[] _palPickers;
     private SpinBox[] _landSpins;
     private CheckButton _simulate;
+    private DhceMinimap _minimap;
     private bool _loadingPalette, _loadingLandform;
 
     private double _shapeStrength = 1.0, _transitionWidthM = 200, _simFlow = 0.45, _simEvap = 0.001;
@@ -70,10 +71,19 @@ public partial class DhceDock : ScrollContainer
         if (world != null && (changed || (gen && !_wasGenDone)))
         {
             PullWorldParams();
-            if (gen) { LoadPaletteColors(); LoadRegionLandform(); }
+            if (gen)
+            {
+                LoadPaletteColors();
+                LoadRegionLandform();
+                _minimap.Bind(Eng, _world.WorldWidthM, _world.WorldHeightM);
+                _minimap.Refresh();
+            }
         }
         _wasGenDone = gen;
     }
+
+    /// Editor-camera ground focus → the minimap marker (fed by the plugin each frame).
+    public void SetMapFocus(Vector3 f) => _minimap?.SetFocus(f);
 
     private bool HasWorld => _world != null && _world.Engine != null;
     private GodotObject Eng => _world.Engine;
@@ -130,6 +140,11 @@ public partial class DhceDock : ScrollContainer
         };
         _col.AddChild(_viewBrushSlider);
 
+        Header("MAP");
+        _minimap = new DhceMinimap();
+        _col.AddChild(_minimap);
+        Button(_col, "Refresh map", () => _minimap.Refresh());
+
         Header("REGIONS (stamp)");
         var swatches = new GridContainer { Columns = 2 };
         _col.AddChild(swatches);
@@ -170,6 +185,7 @@ public partial class DhceDock : ScrollContainer
             if (!HasWorld) return;
             Eng.Call("shape_terrain", _shapeStrength);
             _world.RepaintDirtyTerrain(); _world.RebuildLiquid();
+            _minimap?.Refresh();
             SetStatus($"shaped @ strength {_shapeStrength:0.##}");
         });
 
@@ -180,6 +196,7 @@ public partial class DhceDock : ScrollContainer
             if (!HasWorld) return;
             Eng.Call("blend_traits", _transitionWidthM);
             _world.RepaintDirtyTerrain();
+            _minimap?.Refresh();
             SetStatus($"blended borders @ {_transitionWidthM:0} m");
         });
 
@@ -239,6 +256,7 @@ public partial class DhceDock : ScrollContainer
     private void SelectView(int mode)
     {
         _world?.SetViewMode(mode);
+        _minimap?.Refresh(); // the core recolours its cache to the view; the overview tracks it
         bool paintable = mode == 1 || mode == 2; // Temperature / Moisture
         _viewBrushSlider.Visible = paintable;
         _viewBrushLabel.Visible = paintable;
@@ -339,6 +357,7 @@ public partial class DhceDock : ScrollContainer
         if (_loadingPalette || !HasWorld) return;
         Eng.Call("set_base_palette_color", _palFamily.Selected, slot, (double)c.R, (double)c.G, (double)c.B);
         _world.RepaintDirtyTerrain();
+        _minimap?.Refresh();
     }
 
     // --- control helpers ---
