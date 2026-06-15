@@ -7,7 +7,9 @@ owner: wsscottca
 # ADR 0002 — Native desktop tool on Godot 4 + C# (Rust-powered)
 
 ## Status
-Accepted.
+Accepted. **Partially superseded by [ADR 0005](0005-in-editor-authoring-and-phased-physics.md):** the
+standalone desktop-app *delivery* is replaced by an in-editor plugin. The Rust-core / compute-in-Rust
+and one-engine-tool+game decisions below still hold.
 
 ## Context
 The tool shipped Phases 0–8 as a browser app (TS/WebGL2 front-end over the
