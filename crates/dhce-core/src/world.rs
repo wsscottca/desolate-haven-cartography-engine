@@ -1438,6 +1438,119 @@ impl World {
         }
     }
 
+    /// Export the manual-biome lock mask (cells the author painted, protected from auto-reclassify).
+    pub fn biome_locked_export(&self) -> Vec<u8> {
+        self.biome_locked.iter().map(|&b| b as u8).collect()
+    }
+    /// Restore the manual-biome lock mask (size must match the mesh), so loaded manual paints survive
+    /// the next reclassify just as they did before saving.
+    pub fn set_biome_locked(&mut self, m: &[u8]) {
+        if m.len() == self.biome_locked.len() {
+            for (i, &v) in m.iter().enumerate() {
+                self.biome_locked[i] = v != 0;
+            }
+        }
+    }
+
+    /// Export per-cell trait field `trait_id` (as in [`paint_trait`]: 0 jaggedness … 5 moisture
+    /// scalars; 6 vegetation, 7 palette_family as enum indices) as `f32`, for save/load.
+    pub fn trait_field_export(&self, trait_id: u32) -> Vec<f32> {
+        match trait_id {
+            0 => self.jaggedness_r.iter().map(|&v| v as f32).collect(),
+            1 => self.relief_r.iter().map(|&v| v as f32).collect(),
+            2 => self.foothill_falloff_r.iter().map(|&v| v as f32).collect(),
+            3 => self.erosion_r.iter().map(|&v| v as f32).collect(),
+            4 => self.temperature_r.iter().map(|&v| v as f32).collect(),
+            5 => self.moisture_r.iter().map(|&v| v as f32).collect(),
+            6 => self.vegetation_r.iter().map(|&v| v as f32).collect(),
+            7 => self.palette_family_r.iter().map(|&v| v as f32).collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Restore a saved trait field (size must match the mesh). Scalars (0–5) also reset the painted
+    /// base to the loaded values, so the render matches and a later [`blend_traits`] grades from here
+    /// (a re-blend after load re-bases once — the same one-time caveat as `shape_delta`; see the
+    /// reshell persistence note). Enums (6–7) snap to the nearest index.
+    pub fn set_trait_field(&mut self, trait_id: u32, vals: &[f32]) {
+        let n = self.elevation_r.len();
+        if vals.len() != n {
+            return;
+        }
+        match trait_id {
+            0 => for i in 0..n { let v = vals[i] as f64; self.jaggedness_r[i] = v; self.jaggedness_base[i] = v; },
+            1 => for i in 0..n { let v = vals[i] as f64; self.relief_r[i] = v; self.relief_base[i] = v; },
+            2 => for i in 0..n { let v = vals[i] as f64; self.foothill_falloff_r[i] = v; self.foothill_falloff_base[i] = v; },
+            3 => for i in 0..n { let v = vals[i] as f64; self.erosion_r[i] = v; self.erosion_base[i] = v; },
+            4 => for i in 0..n { let v = vals[i] as f64; self.temperature_r[i] = v; self.temperature_base[i] = v; },
+            5 => for i in 0..n { let v = vals[i] as f64; self.moisture_r[i] = v; self.moisture_base[i] = v; },
+            6 => for i in 0..n { self.vegetation_r[i] = vals[i].round().max(0.0) as u8; },
+            7 => for i in 0..n { self.palette_family_r[i] = vals[i].round().max(0.0) as u8; },
+            _ => {}
+        }
+    }
+
+    /// Export the 7 shared base palettes flat: `[family][slot 0..5][r,g,b]` (7×6×3 = 126 f32).
+    pub fn base_palettes_export(&self) -> Vec<f32> {
+        let mut out = Vec::with_capacity(self.base_palettes.len() * 18);
+        for bp in &self.base_palettes {
+            for c in [bp.water_deep, bp.water_shallow, bp.low, bp.rock, bp.cap_warm, bp.cap_cold] {
+                out.extend_from_slice(&c);
+            }
+        }
+        out
+    }
+    /// Restore the base palettes from [`base_palettes_export`] layout (trailing/short data ignored).
+    pub fn set_base_palettes(&mut self, vals: &[f32]) {
+        const STRIDE: usize = 18; // 6 slots × 3 channels
+        for (fi, bp) in self.base_palettes.iter_mut().enumerate() {
+            let base = fi * STRIDE;
+            if base + STRIDE > vals.len() {
+                break;
+            }
+            let g = |s: usize| [vals[base + s * 3], vals[base + s * 3 + 1], vals[base + s * 3 + 2]];
+            bp.water_deep = g(0);
+            bp.water_shallow = g(1);
+            bp.low = g(2);
+            bp.rock = g(3);
+            bp.cap_warm = g(4);
+            bp.cap_cold = g(5);
+        }
+    }
+
+    /// Export the per-Region landform dial table flat: `[region][jag, relief, foothill, erosion]`.
+    pub fn region_landform_export(&self) -> Vec<f32> {
+        let mut out = Vec::with_capacity(self.biome_landform.len() * 4);
+        for a in &self.biome_landform {
+            out.extend_from_slice(a);
+        }
+        out
+    }
+    /// Restore the per-Region landform dial table (the UI dials + what `set_region_landform` stamps
+    /// from); per-cell landform is restored separately via the trait fields (0–3).
+    pub fn set_region_landform_table(&mut self, vals: &[f32]) {
+        for (i, a) in self.biome_landform.iter_mut().enumerate() {
+            let b = i * 4;
+            if b + 4 > vals.len() {
+                break;
+            }
+            *a = [vals[b], vals[b + 1], vals[b + 2], vals[b + 3]];
+        }
+    }
+
+    /// Recompute the colour cache and flag every chunk (terrain + liquid) dirty — call once after a
+    /// batch restore (load) so the render reflects the loaded fields.
+    pub fn refresh_colors(&mut self) {
+        if self.elevation_r.is_empty() {
+            return;
+        }
+        self.color_cache = self.region_color();
+        for d in self.chunk_dirty.iter_mut() {
+            *d = true;
+        }
+        self.mark_all_liquid_changed();
+    }
+
     // --- internal compute ---
 
     /// Candidate region ids whose grid cells overlap the brush's bounding box.

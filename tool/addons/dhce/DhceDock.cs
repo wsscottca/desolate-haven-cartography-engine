@@ -102,6 +102,20 @@ public partial class DhceDock : ScrollContainer
         _status = new Label { Text = "Add a DhceWorld, set params, Generate.", AutowrapMode = TextServer.AutowrapMode.WordSmart };
         _col.AddChild(_status);
 
+        Header("SAVE / LOAD");
+        Button(_col, "Save world", () => { if (_world != null) SetStatus(_world.SaveToDisk()); });
+        Button(_col, "Load world", () =>
+        {
+            if (_world == null) return;
+            SetStatus(_world.LoadFromDisk());
+            if (!HasWorld) return;
+            PullWorldParams();
+            LoadPaletteColors();
+            LoadRegionLandform();
+            _minimap.Bind(Eng, _world.WorldWidthM, _world.WorldHeightM);
+            _minimap.Refresh();
+        });
+
         Header("TOOLS");
         var grid = new GridContainer { Columns = 3 };
         _col.AddChild(grid);

@@ -23,6 +23,7 @@ public partial class DhceWorld : Node3D
     [Export] public float ChunkSizeM = 256f;   // fixed chunk edge (m); smaller ⇒ finer, lighter streaming
     [Export] public int RenderDistance = 8;    // chunk tiles (Chebyshev) kept meshed around the focus
     [Export] public int ChunksPerFrame = 8;    // chunks tessellated per streaming tick
+    [Export] public DhceWorldState State;      // persisted snapshot; regenerated from on open (R5)
 
     /// Normalized-elevation span the core clamps to (ELEV_MAX − ELEV_MIN in world.rs).
     private const float ElevSpan = 3.0f;
@@ -265,4 +266,85 @@ public partial class DhceWorld : Node3D
     }
 
     private StandardMaterial3D CurrentViewMat() => _viewMode == 0 ? _mat : _dataMat;
+
+    // --- persistence (R5): regenerate from a compact DhceWorldState, no mesh bake ---
+
+    /// On scene open, restore from the assigned state (regenerate + overwrite fields). No-op if none.
+    public override void _Ready()
+    {
+        if (State != null && !_genDone) Load(State);
+    }
+
+    private string StatePath => $"res://{Name}_dhce.res";
+
+    /// Snapshot params + every authored field into a new DhceWorldState (null until generated).
+    public DhceWorldState Save()
+    {
+        if (_engine == null || !_genDone) return null;
+        float[] T(int id) => _engine.Call("trait_field_export", id).As<float[]>();
+        return new DhceWorldState
+        {
+            Seed = Seed, WorldSizeKm = WorldSizeKm, SpacingM = SpacingM, Octaves = Octaves,
+            TerrainHeightKm = TerrainHeightKm, ChunkSizeM = ChunkSizeM,
+            Elevation = _engine.Call("elevation_export").As<float[]>(),
+            Biome = _engine.Call("biome_export").As<byte[]>(),
+            BiomeLocked = _engine.Call("biome_locked_export").As<byte[]>(),
+            LiquidDepth = _engine.Call("liquid_depth_export").As<float[]>(),
+            LiquidKind = _engine.Call("liquid_kind_export").As<byte[]>(),
+            CourseMask = _engine.Call("course_mask_export").As<byte[]>(),
+            Jaggedness = T(0), Relief = T(1), FoothillFalloff = T(2), Erosion = T(3),
+            Temperature = T(4), Moisture = T(5), Vegetation = T(6), PaletteFamily = T(7),
+            BasePalettes = _engine.Call("base_palettes_export").As<float[]>(),
+            RegionLandform = _engine.Call("region_landform_export").As<float[]>(),
+        };
+    }
+
+    /// Rebuild the world deterministically from a state's params, then overwrite every authored field.
+    public void Load(DhceWorldState s)
+    {
+        if (s == null) return;
+        Seed = s.Seed; WorldSizeKm = s.WorldSizeKm; SpacingM = s.SpacingM; Octaves = s.Octaves;
+        TerrainHeightKm = s.TerrainHeightKm; ChunkSizeM = s.ChunkSizeM;
+        Generate(); // deterministic mesh + chunk slots from the params
+        if (_engine == null) return;
+
+        void SetF(string fn, float[] a) { if (a is { Length: > 0 }) _engine.Call(fn, a); }
+        void SetB(string fn, byte[] a) { if (a is { Length: > 0 }) _engine.Call(fn, a); }
+        void SetT(int id, float[] a) { if (a is { Length: > 0 }) _engine.Call("set_trait_field", id, a); }
+
+        SetF("set_elevation", s.Elevation);
+        SetB("set_biome", s.Biome);
+        SetB("set_biome_locked", s.BiomeLocked);
+        if (s.LiquidDepth is { Length: > 0 } && s.LiquidKind is { Length: > 0 })
+            _engine.Call("set_liquid", s.LiquidDepth, s.LiquidKind);
+        SetB("set_course_mask", s.CourseMask);
+        SetT(0, s.Jaggedness); SetT(1, s.Relief); SetT(2, s.FoothillFalloff); SetT(3, s.Erosion);
+        SetT(4, s.Temperature); SetT(5, s.Moisture); SetT(6, s.Vegetation); SetT(7, s.PaletteFamily);
+        SetF("set_base_palettes", s.BasePalettes);
+        SetF("set_region_landform_table", s.RegionLandform);
+        _engine.Call("refresh_colors");
+        for (int i = 0; i < _built.Length; i++) if (_built[i]) BuildChunk(i); // re-tessellate the meshed ring
+    }
+
+    /// Save to a binary .res next to the scene and reference it (so reopening restores). Returns status.
+    public string SaveToDisk()
+    {
+        var s = Save();
+        if (s == null) return "Generate first, then Save.";
+        var err = ResourceSaver.Save(s, StatePath, ResourceSaver.SaverFlags.Compress);
+        if (err != Error.Ok) return $"Save failed: {err}";
+        State = ResourceLoader.Load<DhceWorldState>(StatePath); // reference the on-disk copy, not an embed
+        return $"Saved {StatePath}";
+    }
+
+    /// Load from the assigned State (or the on-disk .res) and regenerate. Returns status.
+    public string LoadFromDisk()
+    {
+        var s = State;
+        if (s == null && ResourceLoader.Exists(StatePath)) s = ResourceLoader.Load<DhceWorldState>(StatePath);
+        if (s == null) return "No saved world to load.";
+        Load(s);
+        State = s;
+        return "Loaded saved world.";
+    }
 }

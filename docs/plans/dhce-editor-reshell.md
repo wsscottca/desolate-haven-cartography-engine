@@ -147,17 +147,29 @@ Rationale: finer, lighter, smoother show/hide as the camera moves. Core tests
 **Gate:** every tool/panel usable from the dock against an in-editor world (visual — **user check**);
 `dotnet build` clean ✅ + headless editor smoke loads the plugin + dock with no script errors ✅.
 
-### R5 — Persistence (`DhceWorldState`) *(Rust core + C#)*
-**Files:** `crates/dhce-core/src/world.rs` (+ test) + `lib.rs` (trait/palette/landform export+import),
-`addons/dhce/DhceWorldState.cs`, `DhceWorld.cs` (Save/Load), dock buttons.
+### R5 — Persistence (`DhceWorldState`) *(Rust core + C#)* — ✅ done (2026-06-15)
+**Files:** `crates/dhce-core/src/world.rs` (+ test) + `lib.rs` (trait/palette/landform/lock export+import
++ `refresh_colors`), `addons/dhce/DhceWorldState.cs`, `DhceWorld.cs` (Save/Load/_Ready), `DhceDock.cs`
+(Save/Load buttons).
 
-- Add the core export/import listed above (with a round-trip test: export → new World → `build` +
-  import → fields bit-identical). `DhceWorld` Save writes a `DhceWorldState`; Load (or `_Ready` in the
-  editor) regenerates: `build(params)` then restore. Dock **Save / Load** buttons; the node references
-  its `DhceWorldState` resource so reopening the project restores the world.
+- **Core export/import added:** generic `trait_field_export(id)` / `set_trait_field(id, …)` (the six
+  scalars + the two enums; scalar set also resets the painted base — see the limitation note),
+  `base_palettes_export` / `set_base_palettes` (7×6×3), `region_landform_export` /
+  `set_region_landform_table` (15×4), `biome_locked_export` / `set_biome_locked` (so manual paints
+  survive reclassify after load), and `refresh_colors` (recompute colour cache + flag all dirty after a
+  batch restore). Round-trip test `save_load_round_trips_authored_fields` (export → fresh `build` +
+  import → bit-identical) green.
+- **`DhceWorldState`** (`[Tool][GlobalClass] Resource`): gen params + every authored field array;
+  saved as a **binary `.res`** (compressed, external to the `.tscn`). **`DhceWorld.Save/Load`**:
+  Load = `Generate()` (deterministic rebuild from params) then overwrite the fields + `refresh_colors`
+  + re-tessellate the meshed ring. `_Ready` auto-loads the assigned `State` on scene open. Dock **Save
+  world / Load world** buttons; Save writes `res://<NodeName>_dhce.res` and references it.
+  - **Limitations (review):** `shape_delta` + the per-trait painted *base* aren't stored (re-Apply
+    shaping / Blend after load re-bases once — one-time, non-destructive). The state path is per node
+    name (one state file per `DhceWorld`); fine for the single-world tool.
 
-**Gate:** author → Save → reopen the project → world restored identically (spot-check elevation/biome
-via the views). Core round-trip test green.
+**Gate:** core round-trip test green ✅; `dotnet build` clean + headless editor smoke registers
+`DhceWorldState` and loads the plugin ✅. Author → Save → reopen → world restored — **user check**.
 
 ### R6 — Retire the runtime app + package *(C#)*
 **Files:** `tool/Main.tscn`, `tool/project.godot`, `tool/scripts/` (remove runtime-only), `addons/dhce/`.

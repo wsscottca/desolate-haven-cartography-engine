@@ -458,6 +458,46 @@ impl DhceEngine {
     fn set_liquid(&mut self, depth: PackedFloat32Array, kind: PackedByteArray) {
         self.world.set_liquid(&depth.to_vec(), &kind.to_vec());
     }
+    #[func]
+    fn biome_locked_export(&self) -> PackedByteArray {
+        PackedByteArray::from(self.world.biome_locked_export().as_slice())
+    }
+    #[func]
+    fn set_biome_locked(&mut self, m: PackedByteArray) {
+        self.world.set_biome_locked(&m.to_vec());
+    }
+    /// Export per-cell trait field `trait_id` (as in `paint_trait`) as f32, for save/load.
+    #[func]
+    fn trait_field_export(&self, trait_id: i64) -> PackedFloat32Array {
+        PackedFloat32Array::from(self.world.trait_field_export(trait_id.max(0) as u32).as_slice())
+    }
+    #[func]
+    fn set_trait_field(&mut self, trait_id: i64, vals: PackedFloat32Array) {
+        self.world.set_trait_field(trait_id.max(0) as u32, &vals.to_vec());
+    }
+    /// The 7 base palettes flat: `[family][slot 0..5][r,g,b]` (126 f32).
+    #[func]
+    fn base_palettes_export(&self) -> PackedFloat32Array {
+        PackedFloat32Array::from(self.world.base_palettes_export().as_slice())
+    }
+    #[func]
+    fn set_base_palettes(&mut self, vals: PackedFloat32Array) {
+        self.world.set_base_palettes(&vals.to_vec());
+    }
+    /// The per-Region landform dial table flat: `[region][jag, relief, foothill, erosion]`.
+    #[func]
+    fn region_landform_export(&self) -> PackedFloat32Array {
+        PackedFloat32Array::from(self.world.region_landform_export().as_slice())
+    }
+    #[func]
+    fn set_region_landform_table(&mut self, vals: PackedFloat32Array) {
+        self.world.set_region_landform_table(&vals.to_vec());
+    }
+    /// Recompute colours + flag every chunk dirty — call once after a batch restore (load).
+    #[func]
+    fn refresh_colors(&mut self) {
+        self.world.refresh_colors();
+    }
 
     // --- decoration scatter ---
 

@@ -424,6 +424,48 @@ fn chunk_grid_and_centers_match_the_partition() {
 }
 
 #[test]
+fn save_load_round_trips_authored_fields() {
+    // R5 persistence: author a world, export every field, then rebuild a fresh world from the same
+    // params and restore — the restored fields must be bit-identical (regenerate-then-overwrite).
+    let mut a = World::new();
+    a.build(1000.0, 1000.0, 50.0, 7, 5);
+    a.paint_terrain(500.0, 500.0, 200.0, 0.3, 0);  // sculpt
+    a.paint_trait(300.0, 500.0, 150.0, 4, 0.2);    // temperature scalar
+    a.paint_trait(700.0, 500.0, 150.0, 6, 3.0);    // vegetation = Forest (enum)
+    a.paint_biome(500.0, 500.0, 100.0, 9);         // stamp + lock biome 9
+    a.paint_liquid(500.0, 500.0, 150.0, 0.2, 0);   // some water
+    a.set_base_palette_color(2, 3, 0.1, 0.2, 0.3); // Stone rock slot
+    a.set_region_landform(4, 1, 0.8);              // region 4 relief dial
+
+    let bits = |v: &[f32]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+    let elev = a.elevation_export();
+    let biome = a.biome_export();
+    let locked = a.biome_locked_export();
+    let pal = a.base_palettes_export();
+    let land = a.region_landform_export();
+
+    let mut b = World::new();
+    b.build(1000.0, 1000.0, 50.0, 7, 5);
+    b.set_elevation(&elev);
+    b.set_biome(&biome);
+    b.set_biome_locked(&locked);
+    b.set_liquid(&a.liquid_depth_export(), &a.liquid_kind_export());
+    b.set_course_mask(&a.course_mask_export());
+    for tid in 0..8 { b.set_trait_field(tid, &a.trait_field_export(tid)); }
+    b.set_base_palettes(&pal);
+    b.set_region_landform_table(&land);
+    b.refresh_colors();
+
+    assert_eq!(bits(&b.elevation_export()), bits(&elev), "elevation round-trips");
+    assert_eq!(b.biome_export(), biome, "biome round-trips");
+    assert_eq!(b.biome_locked_export(), locked, "biome locks round-trip");
+    for tid in 0..6 { assert_eq!(bits(&b.trait_field_export(tid)), bits(&a.trait_field_export(tid)), "scalar trait {tid} round-trips"); }
+    for tid in 6..8 { assert_eq!(b.trait_field_export(tid), a.trait_field_export(tid), "enum trait {tid} round-trips"); }
+    assert_eq!(b.base_palettes_export(), pal, "base palettes round-trip");
+    assert_eq!(b.region_landform_export(), land, "region landform round-trips");
+}
+
+#[test]
 fn chunk_size_is_settable_and_resizes_the_grid() {
     let (width, height) = (4000.0, 4000.0);
     let coarse = {
