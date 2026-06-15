@@ -4,25 +4,22 @@ using Godot;
 namespace DesolateHaven.Cartography;
 
 /// In-editor entry point for the DHCE authoring tool — the editor-plugin reshell (ADR 0005).
-/// Editor-only (`#if TOOLS`): a dock (Generate + a minimal tool/brush slice) and per-frame streaming
-/// of the scene's `DhceWorld` around the editor viewport camera. When a `DhceWorld` is selected the
-/// plugin forwards 3D viewport input (`_Forward3DGuiInput`) into a brush stroke: ray from the editor
-/// camera → `raycast_terrain` → `ToolState.Apply` (which sets the 3D-sphere brush, R3). The full tool
-/// dock is R4; `DhceWorldState` persistence is R5.
+/// Editor-only (`#if TOOLS`): hosts the `DhceDock` (full tool panel, R4), streams the scene's
+/// `DhceWorld` around the editor camera each frame, and — when a `DhceWorld` is selected — forwards
+/// 3D viewport input (`_Forward3DGuiInput`) into a brush stroke: ray from the editor camera →
+/// `raycast_terrain` → `ToolState.Apply` (which sets the 3D-sphere brush, R3). Persistence is R5.
 [Tool]
 public partial class DhcePlugin : EditorPlugin
 {
-    private Control _dock;
-    private Label _status;
-    private OptionButton _toolPick;
-
-    private readonly ToolState _tool = new();
-    private DhceWorld _edited;   // the DhceWorld currently selected/edited (drives picking)
-    private bool _painting;      // a left-drag stroke is in progress
+    private DhceDock _dock;
+    private readonly ToolState _tool = new();   // shared by the dock and the viewport picking
+    private DhceWorld _edited;                   // the selected/edited DhceWorld (drives picking)
+    private bool _painting;                      // a left-drag stroke is in progress
 
     public override void _EnterTree()
     {
-        _dock = BuildDock();
+        _dock = new DhceDock();
+        _dock.Init(_tool);
         AddControlToDock(DockSlot.RightUl, _dock);
         SetProcess(true);
     }
@@ -40,6 +37,8 @@ public partial class DhcePlugin : EditorPlugin
     public override void _Process(double delta)
     {
         var world = FindWorld();
+        _dock?.Bind(world);
+        _dock?.SimTick();
         if (world == null || !world.GenDone) return;
         var cam = GetEditorCamera();
         if (cam != null) world.UpdateStreaming(GroundFocus(cam, world));
@@ -106,62 +105,7 @@ public partial class DhcePlugin : EditorPlugin
         return stop;
     }
 
-    // --- dock ---
-
-    private Control BuildDock()
-    {
-        var root = new VBoxContainer { Name = "DHCE" };
-        var title = new Label { Text = "DHCE Cartographer" };
-        title.AddThemeFontSizeOverride("font_size", 16);
-        root.AddChild(title);
-
-        var gen = new Button { Text = "Generate" };
-        gen.Pressed += OnGenerate;
-        root.AddChild(gen);
-
-        _status = new Label
-        {
-            Text = "Add a DhceWorld node to the scene, then Generate.",
-            AutowrapMode = TextServer.AutowrapMode.WordSmart,
-        };
-        root.AddChild(_status);
-
-        root.AddChild(new HSeparator());
-        root.AddChild(new Label { Text = "Brush (select a DhceWorld, left-drag to paint)" });
-
-        _toolPick = new OptionButton();
-        foreach (var name in System.Enum.GetNames<ToolKind>()) _toolPick.AddItem(name);
-        _toolPick.Selected = (int)_tool.Active;
-        _toolPick.ItemSelected += idx => _tool.Active = (ToolKind)idx;
-        root.AddChild(_toolPick);
-
-        AddSlider(root, "Radius (m)", 50f, 2000f, _tool.RadiusM, v => _tool.RadiusM = v);
-        AddSlider(root, "Strength (m)", 1f, 300f, _tool.StrengthM, v => _tool.StrengthM = v);
-        return root;
-    }
-
-    /// A labelled HSlider whose live value drives `set`. The label tracks the value as it moves.
-    private static void AddSlider(Control parent, string name, float min, float max, float value, System.Action<float> set)
-    {
-        var label = new Label { Text = $"{name}: {value:0}" };
-        parent.AddChild(label);
-        var s = new HSlider { MinValue = min, MaxValue = max, Value = value, Step = 1 };
-        s.ValueChanged += v => { set((float)v); label.Text = $"{name}: {v:0}"; };
-        parent.AddChild(s);
-    }
-
-    private void OnGenerate()
-    {
-        var world = FindWorld();
-        if (world == null)
-        {
-            _status.Text = "No DhceWorld in the scene. Add one (Add Node → DhceWorld), then Generate.";
-            return;
-        }
-        _status.Text = "Generating… (the editor pauses for a few seconds)";
-        world.Generate();
-        _status.Text = $"Generated ~{world.WorldWidthM / 1000f:0.0} km. Select the DhceWorld and left-drag to paint.";
-    }
+    // --- helpers ---
 
     /// The DhceWorld in the currently-edited scene (root or first descendant), or null.
     private static DhceWorld FindWorld()

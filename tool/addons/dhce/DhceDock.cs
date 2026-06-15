@@ -1,0 +1,414 @@
+#if TOOLS
+using Godot;
+using System.Collections.Generic;
+
+namespace DesolateHaven.Cartography;
+
+/// The in-editor authoring dock (reshell R4): the full tool panel ported from the runtime `ToolUi`,
+/// wired to the **selected `DhceWorld`** and the plugin's shared `ToolState` instead of
+/// `CartographerSpike`. Native editor controls (no parchment theme); one scroll of sections —
+/// tools, brush, world/regen, VIEW + contextual paint, regions, trait brush, region landform,
+/// shaping, transitions, palette, physics. Lighting is the scene's own (WorldEnvironment /
+/// DirectionalLight3D), so there's no SUN panel; the minimap + brush gizmo land in R4b.
+public partial class DhceDock : ScrollContainer
+{
+    private ToolState _tool;          // shared with the plugin's viewport picking
+    private DhceWorld _world;         // current target (the scene's DhceWorld); null until bound
+    private bool _wasGenDone;         // edge-detect gen completion to reload engine-backed values
+
+    private Label _status;
+    private VBoxContainer _col;
+    private readonly ButtonGroup _toolGroup = new();
+    private readonly List<Button> _toolButtons = new();
+
+    private SpinBox _seed, _oct, _size, _spacing, _chunk;
+    private OptionButton _liquidKind, _traitPick, _traitEnum, _view, _palFamily, _landRegion;
+    private HSlider _traitSlider, _viewBrushSlider;
+    private Label _traitSliderLabel, _traitEnumLabel, _viewEditHint, _viewBrushLabel;
+    private ColorPickerButton[] _palPickers;
+    private SpinBox[] _landSpins;
+    private CheckButton _simulate;
+    private bool _loadingPalette, _loadingLandform;
+
+    private double _shapeStrength = 1.0, _transitionWidthM = 200, _simFlow = 0.45, _simEvap = 0.001;
+    private int _simSubsteps = 10, _simTick;
+    private const int SimEveryNFrames = 6;
+
+    private static readonly string[] ViewNames = { "Natural", "Temperature", "Moisture", "Elevation", "Biome" };
+    private static readonly int[] TraitEngineId = { 6, 7 };
+    private static readonly string[] TraitNames = { "Vegetation", "Palette family" };
+    private static readonly string[] LandNames = { "Jaggedness", "Relief", "Foothill falloff", "Erosion" };
+    private static readonly string[] VegNames = { "Barren", "Grass", "Scrub", "Forest", "Evergreen", "Marsh", "Thorn" };
+    private static readonly string[] FamilyNames = { "Verdant", "Arid", "Stone", "Ashen", "Frost", "Wetland", "Exotic" };
+    private static readonly string[] SlotNames = { "Deep water", "Shallows", "Low cover", "Rock", "Cap (warm)", "Cap (snow)" };
+    private static readonly string[] BiomeNames =
+    {
+        "Jagged Mountains", "Sacred Woods Plateau", "Great Lake", "Temperate Forest",
+        "Open Plains", "Underdeep", "Deep Wood", "Frozen Reaches", "Lost Isles",
+        "Blisterwood", "Volcanic Scape", "Blight Ruins", "Scattered Isles", "Marsh & Bog",
+    };
+
+    /// Build the dock once; the plugin passes the shared ToolState and calls `Bind` each frame.
+    public void Init(ToolState tool)
+    {
+        _tool = tool;
+        Name = "DHCE";
+        CustomMinimumSize = new Vector2(248, 0);
+        HorizontalScrollMode = ScrollMode.Disabled;
+        _col = new VBoxContainer { SizeFlagsHorizontal = SizeFlags.ExpandFill };
+        AddChild(_col);
+        BuildUi();
+    }
+
+    /// Point the dock at the scene's current DhceWorld; reload engine-backed values when it changes
+    /// or finishes generating. Cheap when nothing changed.
+    public void Bind(DhceWorld world)
+    {
+        bool changed = world != _world;
+        _world = world;
+        bool gen = world != null && world.GenDone;
+        if (world != null && (changed || (gen && !_wasGenDone)))
+        {
+            PullWorldParams();
+            if (gen) { LoadPaletteColors(); LoadRegionLandform(); }
+        }
+        _wasGenDone = gen;
+    }
+
+    private bool HasWorld => _world != null && _world.Engine != null;
+    private GodotObject Eng => _world.Engine;
+
+    // --- layout ---
+
+    private void BuildUi()
+    {
+        var title = new Label { Text = "DHCE Cartographer" };
+        title.AddThemeFontSizeOverride("font_size", 16);
+        _col.AddChild(title);
+
+        var gen = new Button { Text = "Generate / Regenerate" };
+        gen.Pressed += OnGenerate;
+        _col.AddChild(gen);
+        _status = new Label { Text = "Add a DhceWorld, set params, Generate.", AutowrapMode = TextServer.AutowrapMode.WordSmart };
+        _col.AddChild(_status);
+
+        Header("TOOLS");
+        var grid = new GridContainer { Columns = 3 };
+        _col.AddChild(grid);
+        AddToolButton(grid, "Raise", ToolKind.Raise);
+        AddToolButton(grid, "Carve", ToolKind.Carve);
+        AddToolButton(grid, "Level", ToolKind.Level);
+        AddToolButton(grid, "Crest", ToolKind.Crest);
+        AddToolButton(grid, "River", ToolKind.River);
+        AddToolButton(grid, "Flood", ToolKind.Flood);
+        Button(_col, "Generate streams", () => { if (HasWorld) { Eng.Call("generate_streams", 0.5, 1.0); _world.RepaintDirtyTerrain(); _world.RebuildLiquid(); } });
+
+        Header("BRUSH");
+        Slider("Radius (m)", 50, 2000, 1, _tool.RadiusM, v => _tool.RadiusM = (float)v);
+        Slider("Strength (m)", 1, 400, 1, _tool.StrengthM, v => _tool.StrengthM = (float)v);
+        _liquidKind = Options(new[] { "Water", "Lava" }, 0, idx => _tool.LiquidKind = (int)idx);
+
+        Header("WORLD");
+        _seed = SpinRow("Seed", 0, 999999, 1, 12345);
+        _oct = SpinRow("Octaves", 1, 12, 1, 6);
+        _size = SpinRow("Size (km)", 1, 60, 1, 20);
+        _spacing = SpinRow("Spacing (m)", 4, 60, 1, 12);
+        _chunk = SpinRow("Chunk size (m)", 32, 2048, 32, 256);
+        Slider("Height (km)", 0.1, 10, 0.1, 2.4, v => _world?.SetTerrainHeight((float)v));
+
+        Header("VIEW");
+        _view = Options(ViewNames, 0, idx => SelectView((int)idx));
+        _viewEditHint = Dim("");
+        _viewBrushLabel = Dim("Paint value: 0.5");
+        _viewBrushSlider = new HSlider { MinValue = 0, MaxValue = 1, Step = 0.01, Value = 0.5, Visible = false };
+        _viewBrushLabel.Visible = false;
+        _viewBrushSlider.ValueChanged += v =>
+        {
+            _viewBrushLabel.Text = $"Paint value: {v:0.##}";
+            _tool.TraitValue = (float)v;
+            _tool.Active = ToolKind.Trait;
+        };
+        _col.AddChild(_viewBrushSlider);
+
+        Header("REGIONS (stamp)");
+        var swatches = new GridContainer { Columns = 2 };
+        _col.AddChild(swatches);
+        for (int id = 1; id <= BiomeNames.Length; id++) swatches.AddChild(SwatchButton(id, BiomeNames[id - 1]));
+
+        Header("TRAIT BRUSH");
+        _traitPick = Options(TraitNames, 0, idx => SelectTrait((int)idx));
+        _traitSliderLabel = Dim("Value: 1");
+        _traitSlider = new HSlider { MinValue = 0, MaxValue = 1, Step = 0.01, Value = 1 };
+        _traitSlider.ValueChanged += v => { _traitSliderLabel.Text = $"Value: {v:0.##}"; _tool.TraitValue = (float)v; _tool.Active = ToolKind.Trait; };
+        _col.AddChild(_traitSlider);
+        _traitEnumLabel = Dim("Type");
+        _traitEnum = new OptionButton();
+        _traitEnum.ItemSelected += idx => { _tool.TraitValue = (int)idx; _tool.Active = ToolKind.Trait; };
+        _col.AddChild(_traitEnum);
+
+        Header("REGION LANDFORM");
+        _col.AddChild(Dim("Set a region's terrain character, then Apply shaping."));
+        _landRegion = new OptionButton();
+        for (int id = 1; id <= BiomeNames.Length; id++) _landRegion.AddItem(BiomeNames[id - 1], id);
+        _landRegion.Selected = 0;
+        _landRegion.ItemSelected += _ => LoadRegionLandform();
+        _col.AddChild(_landRegion);
+        _landSpins = new SpinBox[LandNames.Length];
+        for (int i = 0; i < LandNames.Length; i++)
+        {
+            int idx = i;
+            var sb = SpinRow(LandNames[i], 0, 1, 0.05, 0);
+            sb.ValueChanged += v => OnRegionLandform(idx, v);
+            _landSpins[i] = sb;
+        }
+
+        Header("SHAPING");
+        _col.AddChild(Dim("Bake the landform dials into the terrain height."));
+        Slider("Strength", 0, 2, 0.05, _shapeStrength, v => _shapeStrength = v);
+        Button(_col, "Apply shaping", () =>
+        {
+            if (!HasWorld) return;
+            Eng.Call("shape_terrain", _shapeStrength);
+            _world.RepaintDirtyTerrain(); _world.RebuildLiquid();
+            SetStatus($"shaped @ strength {_shapeStrength:0.##}");
+        });
+
+        Header("TRANSITIONS");
+        Slider("Width (m)", 0, 1200, 25, _transitionWidthM, v => _transitionWidthM = v);
+        Button(_col, "Blend borders", () =>
+        {
+            if (!HasWorld) return;
+            Eng.Call("blend_traits", _transitionWidthM);
+            _world.RepaintDirtyTerrain();
+            SetStatus($"blended borders @ {_transitionWidthM:0} m");
+        });
+
+        BuildPaletteEditor();
+
+        Header("PHYSICS");
+        Slider("Sea level", -1.0, 1.0, 0.01, 0.0, v => { if (HasWorld) { Eng.Call("set_sea_level", v); _world.RebuildLiquid(); } });
+        Slider("Flow rate", 0.0, 0.5, 0.01, _simFlow, v => _simFlow = v);
+        Slider("Evaporation", 0.0, 0.02, 0.0005, _simEvap, v => _simEvap = v);
+        Slider("Substeps", 1, 40, 1, _simSubsteps, v => _simSubsteps = (int)v);
+        Button(_col, "Rain", () => { if (HasWorld) { Eng.Call("rain", 0.05); _world.RebuildLiquid(); } });
+        Button(_col, "Settle (1 step)", () => { if (HasWorld) { Eng.Call("step_fluid", _simFlow, _simEvap, _simSubsteps); _world.RebuildLiquid(); } });
+        Button(_col, "Clear liquid", () => { if (HasWorld) { Eng.Call("clear_liquid"); _world.RebuildLiquid(); } });
+        _simulate = new CheckButton { Text = "Simulate" };
+        _col.AddChild(_simulate);
+
+        SelectTrait(0);
+    }
+
+    // --- sim tick (driven by the plugin's _Process so it runs in-editor) ---
+
+    public void SimTick()
+    {
+        if (_simulate == null || !_simulate.ButtonPressed || !HasWorld) return;
+        if (++_simTick < SimEveryNFrames) return;
+        _simTick = 0;
+        if (Eng.Call("liquid_active_count").As<int>() == 0) return; // settled → idle
+        Eng.Call("step_fluid", _simFlow, _simEvap, _simSubsteps);
+        _world.RebuildLiquid();
+    }
+
+    // --- actions ---
+
+    private void OnGenerate()
+    {
+        if (_world == null) { SetStatus("No DhceWorld in the scene. Add one (Add Node → DhceWorld)."); return; }
+        _world.Seed = (int)_seed.Value;
+        _world.Octaves = (int)_oct.Value;
+        _world.WorldSizeKm = (float)_size.Value;
+        _world.SpacingM = (float)_spacing.Value;
+        _world.ChunkSizeM = (float)_chunk.Value;
+        SetStatus("Generating… (the editor pauses a few seconds)");
+        _world.Generate();
+        _wasGenDone = false; // force a value reload on the next Bind
+        SetStatus($"Generated ~{_world.WorldWidthM / 1000f:0.0} km. Select the node and left-drag to paint.");
+    }
+
+    private void PullWorldParams()
+    {
+        _seed.Value = _world.Seed;
+        _oct.Value = _world.Octaves;
+        _size.Value = _world.WorldSizeKm;
+        _spacing.Value = _world.SpacingM;
+        _chunk.Value = _world.ChunkSizeM;
+    }
+
+    private void SelectView(int mode)
+    {
+        _world?.SetViewMode(mode);
+        bool paintable = mode == 1 || mode == 2; // Temperature / Moisture
+        _viewBrushSlider.Visible = paintable;
+        _viewBrushLabel.Visible = paintable;
+        if (paintable)
+        {
+            _tool.TraitId = mode == 1 ? 4 : 5;
+            _tool.TraitValue = (float)_viewBrushSlider.Value;
+            _tool.Active = ToolKind.Trait;
+            _viewEditHint.Text = $"Left-drag the terrain to paint {ViewNames[mode]}.";
+        }
+        else
+        {
+            _viewEditHint.Text = mode switch
+            {
+                3 => "Use the sculpt tools to edit elevation.",
+                4 => "Use the Region swatches to stamp.",
+                _ => "",
+            };
+        }
+        SetStatus($"{ViewNames[mode]} view");
+    }
+
+    private void SelectTrait(int dropdownIdx)
+    {
+        int engineId = TraitEngineId[dropdownIdx];
+        _tool.TraitId = engineId;
+        _tool.Active = ToolKind.Trait;
+        bool isEnum = engineId == 6 || engineId == 7; // both current trait-brush traits are enums
+        _traitSlider.Visible = !isEnum;
+        _traitSliderLabel.Visible = !isEnum;
+        _traitEnum.Visible = isEnum;
+        _traitEnumLabel.Visible = isEnum;
+        if (isEnum)
+        {
+            _traitEnum.Clear();
+            string[] names = engineId == 6 ? VegNames : FamilyNames;
+            for (int k = 0; k < names.Length; k++) _traitEnum.AddItem(names[k], k);
+            _traitEnum.Selected = 0;
+            _tool.TraitValue = 0;
+        }
+        else _tool.TraitValue = (float)_traitSlider.Value;
+    }
+
+    private int SelectedLandRegion() => _landRegion.GetItemId(_landRegion.Selected);
+
+    private void LoadRegionLandform()
+    {
+        if (!HasWorld || !_world.GenDone) return;
+        _loadingLandform = true;
+        var a = Eng.Call("biome_landform_of", SelectedLandRegion()).As<float[]>();
+        for (int i = 0; i < _landSpins.Length && i < a.Length; i++) _landSpins[i].Value = a[i];
+        _loadingLandform = false;
+    }
+
+    private void OnRegionLandform(int idx, double v)
+    {
+        if (_loadingLandform || !HasWorld) return;
+        int id = SelectedLandRegion();
+        Eng.Call("set_region_landform", id, idx, v);
+        SetStatus($"{BiomeNames[id - 1]}: {LandNames[idx].ToLower()} {v:0.##} — Apply shaping to bake");
+    }
+
+    private void BuildPaletteEditor()
+    {
+        Header("PALETTE");
+        _palFamily = Options(FamilyNames, 0, _ => LoadPaletteColors());
+        _palPickers = new ColorPickerButton[SlotNames.Length];
+        for (int s = 0; s < SlotNames.Length; s++)
+        {
+            var row = new HBoxContainer();
+            var lbl = Dim(SlotNames[s]);
+            lbl.SizeFlagsHorizontal = SizeFlags.ExpandFill;
+            row.AddChild(lbl);
+            var cp = new ColorPickerButton { CustomMinimumSize = new Vector2(46, 22) };
+            int slot = s;
+            cp.ColorChanged += c => OnPaletteColor(slot, c);
+            _palPickers[s] = cp;
+            row.AddChild(cp);
+            _col.AddChild(row);
+        }
+    }
+
+    private void LoadPaletteColors()
+    {
+        if (!HasWorld || !_world.GenDone) return;
+        _loadingPalette = true;
+        int fam = _palFamily.Selected;
+        for (int s = 0; s < _palPickers.Length; s++)
+        {
+            var a = Eng.Call("base_palette_color", fam, s).As<float[]>();
+            if (a.Length >= 3) _palPickers[s].Color = new Color(a[0], a[1], a[2]);
+        }
+        _loadingPalette = false;
+    }
+
+    private void OnPaletteColor(int slot, Color c)
+    {
+        if (_loadingPalette || !HasWorld) return;
+        Eng.Call("set_base_palette_color", _palFamily.Selected, slot, (double)c.R, (double)c.G, (double)c.B);
+        _world.RepaintDirtyTerrain();
+    }
+
+    // --- control helpers ---
+
+    private void SetStatus(string text) { if (_status != null) _status.Text = text; }
+
+    private void Header(string text)
+    {
+        _col.AddChild(new HSeparator());
+        var l = new Label { Text = text };
+        l.AddThemeFontSizeOverride("font_size", 11);
+        _col.AddChild(l);
+    }
+
+    private void AddToolButton(Container parent, string text, ToolKind tool)
+    {
+        var b = new Button { Text = text, ToggleMode = true, ButtonGroup = _toolGroup, SizeFlagsHorizontal = SizeFlags.ExpandFill };
+        b.Pressed += () => _tool.Active = tool;
+        if (tool == _tool.Active) b.ButtonPressed = true;
+        parent.AddChild(b);
+        _toolButtons.Add(b);
+    }
+
+    private Button SwatchButton(int id, string name)
+    {
+        var b = new Button { Text = name };
+        b.Pressed += () => { _tool.Active = ToolKind.Biome; _tool.BiomeId = id; SetStatus($"stamp: {name}"); };
+        return b;
+    }
+
+    private static Label Dim(string text)
+    {
+        var l = new Label { Text = text, AutowrapMode = TextServer.AutowrapMode.WordSmart };
+        l.Modulate = new Color(1, 1, 1, 0.65f);
+        return l;
+    }
+
+    private void Button(Container parent, string text, System.Action onPress)
+    {
+        var b = new Button { Text = text, SizeFlagsHorizontal = SizeFlags.ExpandFill };
+        b.Pressed += onPress;
+        parent.AddChild(b);
+    }
+
+    private OptionButton Options(string[] items, int selected, System.Action<long> onSelect)
+    {
+        var o = new OptionButton();
+        for (int i = 0; i < items.Length; i++) o.AddItem(items[i], i);
+        o.Selected = selected;
+        o.ItemSelected += idx => onSelect(idx);
+        _col.AddChild(o);
+        return o;
+    }
+
+    private HSlider Slider(string label, double min, double max, double step, double val, System.Action<double> onChange)
+    {
+        var lbl = Dim($"{label}: {val:0.###}");
+        _col.AddChild(lbl);
+        var s = new HSlider { MinValue = min, MaxValue = max, Step = step, Value = val };
+        s.ValueChanged += v => { lbl.Text = $"{label}: {v:0.###}"; onChange(v); };
+        _col.AddChild(s);
+        return s;
+    }
+
+    private SpinBox SpinRow(string label, double min, double max, double step, double val)
+    {
+        _col.AddChild(Dim(label));
+        var sb = new SpinBox { MinValue = min, MaxValue = max, Step = step, Value = val };
+        _col.AddChild(sb);
+        return sb;
+    }
+}
+#endif

@@ -120,13 +120,27 @@ Rationale: finer, lighter, smoother show/hide as the camera moves. Core tests
 `chunk_size_is_settable_and_resizes_the_grid` + the updated partition test green.
 
 ### R4 — Dock UI parity *(C#)*
-**Files:** `addons/dhce/ToolUi*.cs` (ported from `tool/scripts/ToolUi.cs`), `DhcePlugin.cs`.
+**Files:** `addons/dhce/DhceDock.cs` (new, ported from `tool/scripts/ToolUi.cs`), `DhcePlugin.cs`.
 
-- Port the panels into the editor dock: Terrain/Biomes tabs, brush size, tools, VIEW + contextual
-  paint, REGION LANDFORM, SHAPING, TRANSITIONS, PHYSICS, SUN, PALETTE, MAP (minimap). Controls live in
-  the dock (a `Control`), not a runtime `CanvasLayer`. Wire to the selected `DhceWorld`.
+- **R4a — ✅ done (2026-06-15).** `DhceDock` (a `ScrollContainer`, native editor controls — not the
+  runtime `CanvasLayer`/parchment theme) ports the authoring panels and wires them to the **scene's
+  `DhceWorld`** + the plugin's shared `ToolState`: TOOLS (sculpt toggle grid + generate-streams), BRUSH
+  (radius m + strength m + liquid kind), WORLD (seed/octaves/size/spacing/**chunk size**/height +
+  Generate), VIEW + contextual paint, REGIONS (stamp swatches), TRAIT BRUSH, REGION LANDFORM, SHAPING,
+  TRANSITIONS, PALETTE, PHYSICS (sea/flow/evap/substeps/rain/settle/clear + Simulate). The plugin
+  `Bind`s the dock to the current world each `_Process` and drives the Simulate tick (`SimTick`) so it
+  runs in-editor. Brush **radius is in metres** (a slider), not the runtime's view-fraction dots —
+  correct for a world-space editor brush (no per-dab camera-distance scaling).
+  - **Divergences (review):** **no SUN panel** — editor lighting is the scene's own `WorldEnvironment`
+    / `DirectionalLight3D` (engine-built-ins principle), not a DHCE-managed sun. **No tab split** — one
+    scrolling column suits a narrow dock. Tool-toggle highlight can lag when a swatch/trait/view arms a
+    different `ToolState.Active` (cosmetic; the active tool is still correct).
+- **⏳ R4b — remaining:** the **MAP** minimap (decouple `MinimapPanel` from `CartographerSpike` → take
+  the engine + a focus; editor has no camera-fly API, so click-to-fly degrades to recentre/none) and
+  the **brush gizmo** (overlay `MeshInstance3D` ring under the cursor) deferred from R3.
 
-**Gate:** every tool/panel usable from the dock against an in-editor world. `dotnet build` clean.
+**Gate:** every tool/panel usable from the dock against an in-editor world (visual — **user check**);
+`dotnet build` clean ✅ + headless editor smoke loads the plugin + dock with no script errors ✅.
 
 ### R5 — Persistence (`DhceWorldState`) *(Rust core + C#)*
 **Files:** `crates/dhce-core/src/world.rs` (+ test) + `lib.rs` (trait/palette/landform export+import),
