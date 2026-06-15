@@ -170,6 +170,7 @@ public partial class DhceDock : ScrollContainer
         _col.AddChild(Dim("Bakes each assigned Region → levels/<Name>.tscn + world_master.res + regions.json."));
 
         BuildScatterSection();
+        BuildCavesSection();
 
         Header("TOOLS");
         var grid = new GridContainer { Columns = 3 };
@@ -517,6 +518,14 @@ public partial class DhceDock : ScrollContainer
         _scatterPreview = new CheckButton { Text = "Preview scatter (low-poly)" };
         _scatterPreview.Toggled += on => _world?.PreviewScatter(on);
         _col.AddChild(_scatterPreview);
+    }
+
+    private void BuildCavesSection()
+    {
+        Header("CAVES (volumetric)");
+        _col.AddChild(Dim("Cave tool: click the terrain to drop a carve sphere (radius = the Brush radius). Chain them for tunnels/overhangs. Carved into real geometry on export (N5 layer B)."));
+        Button(_col, "Cave tool", () => { _tool.Active = ToolKind.Cave; SetStatus("Cave tool — click to place carve spheres"); });
+        Button(_col, "Clear caves", () => { _world?.ClearCaves(); SetStatus("cleared caves"); });
     }
 
     private DhceScatterSlot SelectedSlot()

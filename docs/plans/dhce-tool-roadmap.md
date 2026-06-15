@@ -142,9 +142,16 @@ the per-dab timing line still prints.
   export path defaults **tool-local** (`res://exports`), so the tool never writes into another project
   (the owner copies levels over by hand). Export **granularity** = per-Region (the slicing model is the
   answer). *(Optional later: a single merged-mesh-per-level mode — not needed now.)*
-- **N5 — Volumetric features — ❌ NOT STARTED (the big forgotten one).** Authored caves / overhangs /
-  tunnels carved into the heightfield (hybrid; local SDF / marching-cubes / CSG carve, merged on
-  export). See [ADR 0003](../adr/0003-edit-streaming-and-godot-export.md) §5.
+- **N5 — Volumetric features — 🚧 IN PROGRESS.** Authored caves / overhangs / tunnels.
+  - **Layer A ✅ (2026-06-15) — carve-volume authoring tooling.** `DhceWorld.Caves` (Vector4 spheres:
+    xyz centre + radius, persisted with the scene); a **Cave tool** (click the terrain to drop a carve
+    sphere, radius = the Brush radius; chain for tunnels/overhangs) with translucent **sphere gizmos**;
+    dock **CAVES (volumetric)** section (Cave tool + Clear caves).
+  - **Layer B ⏳ next — carve geometry + export merge.** Turn the carve volumes into real volumetric
+    geometry at export: evaluate **Godot CSG** (engine-native boolean on a local terrain patch, bake to
+    mesh — risk: CSG computes in-tree) vs a **core marching-cubes** pass over an SDF (`density(p) =
+    terrainY − p.y`, min carve-sphere SDFs; deterministic, tree-independent). Merge the carved patch
+    into the affected level scene(s). See [ADR 0003](../adr/0003-edit-streaming-and-godot-export.md) §5.
 - **Later — ❌ outstanding bucket** — generation-streaming / LOD (only if a world outgrows RAM),
   **Atmospheric Fog**, **Scatter Tool polish**, the **scale bar** (context-aware cm→m→km readout) and
   zoomable-minimap LOD (n3-tooling-design §5). Plus the cross-repo **gates + game-side level loading**

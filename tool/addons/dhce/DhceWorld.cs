@@ -25,6 +25,7 @@ public partial class DhceWorld : Node3D
     [Export] public int ChunksPerFrame = 8;    // chunks tessellated per streaming tick
     [Export] public DhceWorldState State;      // persisted snapshot; regenerated from on open (R5)
     [Export] public DhceScatterLibrary Scatter; // authored scatter model slots + rules (N3d)
+    [Export] public Godot.Collections.Array<Vector4> Caves = new(); // volumetric carve spheres: xyz centre + w radius (N5)
 
     /// Normalized-elevation span the core clamps to (ELEV_MAX − ELEV_MIN in world.rs).
     private const float ElevSpan = 3.0f;
@@ -269,6 +270,12 @@ public partial class DhceWorld : Node3D
     }
 
     private StandardMaterial3D CurrentViewMat() => _viewMode == 0 ? _mat : _dataMat;
+
+    /// Add a volumetric carve sphere (N5): `centre` in world space, `radius` in metres. Carved into
+    /// real geometry at export (Layer B); shown as a gizmo while the Cave tool is active.
+    public void AddCave(Vector3 centre, float radius) => Caves.Add(new Vector4(centre.X, centre.Y, centre.Z, Mathf.Max(radius, 0.5f)));
+    public void ClearCaves() => Caves.Clear();
+    public int CaveCount => Caves.Count;
 
     /// Toggle the in-editor scatter preview: per-slot MultiMesh (low-poly proxy/import-LOD), capped.
     /// The full real-mesh bake happens at export (the slicer). No-op without a library / before gen.

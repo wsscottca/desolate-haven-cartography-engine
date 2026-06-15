@@ -19,6 +19,8 @@ public partial class DhcePlugin : EditorPlugin
     private MeshInstance3D _gizmo;               // brush-footprint ring under the cursor (ephemeral)
     private readonly List<Vector3> _polyVerts = new(); // in-progress Territory polygon (ground points)
     private MeshInstance3D _polyLine;            // polygon outline overlay (ephemeral)
+    private Node3D _caveOverlay;                 // translucent carve-sphere gizmos (ephemeral)
+    private int _caveOverlayCount = -1;          // cave count the overlay was built for
 
     public override void _EnterTree()
     {
@@ -32,6 +34,7 @@ public partial class DhcePlugin : EditorPlugin
     {
         FreeGizmo();
         ClearPolygon();
+        FreeCaveOverlay();
         if (_dock != null)
         {
             RemoveControlFromDocks(_dock);
@@ -64,11 +67,12 @@ public partial class DhcePlugin : EditorPlugin
         _edited = @object as DhceWorld;
         _painting = false;
         ClearPolygon();
+        FreeCaveOverlay();
     }
 
     public override void _MakeVisible(bool visible)
     {
-        if (!visible) { _edited = null; _painting = false; FreeGizmo(); ClearPolygon(); }
+        if (!visible) { _edited = null; _painting = false; FreeGizmo(); ClearPolygon(); FreeCaveOverlay(); }
     }
 
     /// Route 3D viewport input to the active tool: brush stroke (sculpt/trait/region brush), polygon
@@ -115,6 +119,24 @@ public partial class DhcePlugin : EditorPlugin
             FreeGizmo();
             return HandlePolygon(world, @event, hit, onTerrain) ? stop : pass;
         }
+
+        // Cave tool places volumetric carve spheres (carved into geometry at export); sphere gizmos, no ring.
+        if (_tool.Active == ToolKind.Cave)
+        {
+            FreeGizmo();
+            UpdateCaveOverlay(world, true);
+            if (@event is InputEventMouseButton cb && cb.ButtonIndex == MouseButton.Left)
+            {
+                if (!cb.Pressed) return stop;
+                if (!onTerrain) return pass;
+                world.AddCave(hit, Mathf.Max(_tool.RadiusM, 1f));
+                RebuildCaveOverlay(world);
+                _dock?.SetStatus($"placed cave ({world.CaveCount}) — carved into geometry on export");
+                return stop;
+            }
+            return pass;
+        }
+        UpdateCaveOverlay(world, false); // hide cave gizmos outside Cave mode
 
         UpdateGizmo(world, onTerrain ? hit : Vector3.Zero, onTerrain);
         if (isKey) return pass;
@@ -237,6 +259,47 @@ public partial class DhcePlugin : EditorPlugin
     {
         if (_polyLine != null && GodotObject.IsInstanceValid(_polyLine)) _polyLine.QueueFree();
         _polyLine = null;
+    }
+
+    // --- cave carve-volume gizmos (translucent spheres; geometry baked at export) ---
+
+    private void UpdateCaveOverlay(DhceWorld world, bool show)
+    {
+        if (!show) { FreeCaveOverlay(); return; }
+        if (_caveOverlay == null || !GodotObject.IsInstanceValid(_caveOverlay) || _caveOverlay.GetParent() != world || _caveOverlayCount != world.Caves.Count)
+            RebuildCaveOverlay(world);
+    }
+
+    private void RebuildCaveOverlay(DhceWorld world)
+    {
+        FreeCaveOverlay();
+        _caveOverlay = new Node3D { Name = "DhceCaveGizmos" };
+        world.AddChild(_caveOverlay); // owner left null → ephemeral
+        var mat = new StandardMaterial3D
+        {
+            ShadingMode = BaseMaterial3D.ShadingModeEnum.Unshaded,
+            AlbedoColor = new Color(0.95f, 0.4f, 0.2f, 0.35f),
+            Transparency = BaseMaterial3D.TransparencyEnum.Alpha,
+            CullMode = BaseMaterial3D.CullModeEnum.Disabled,
+        };
+        foreach (Vector4 c in world.Caves)
+        {
+            _caveOverlay.AddChild(new MeshInstance3D
+            {
+                Mesh = new SphereMesh { Radius = c.W, Height = c.W * 2f },
+                MaterialOverride = mat,
+                Position = new Vector3(c.X, c.Y, c.Z),
+                CastShadow = GeometryInstance3D.ShadowCastingSetting.Off,
+            });
+        }
+        _caveOverlayCount = world.Caves.Count;
+    }
+
+    private void FreeCaveOverlay()
+    {
+        if (_caveOverlay != null && GodotObject.IsInstanceValid(_caveOverlay)) _caveOverlay.QueueFree();
+        _caveOverlay = null;
+        _caveOverlayCount = -1;
     }
 
     // --- brush footprint gizmo (a flat ring laid on the surface under the cursor) ---
