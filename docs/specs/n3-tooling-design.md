@@ -312,3 +312,45 @@ Applies to sculpt and makes River carve in smoothly. *(core falloff change + giz
 
 N3a's shipped pieces (tool shell, world/physics panels, liquid render, surface raycast, brush
 spacing/gizmo, metre strength) stay; the restyle reskins them into the dock.
+
+## 8. Revision R2 (2026-06-15) — Trait-composition world model
+
+Full rationale in [ADR 0004](../adr/0004-biome-region-territory-model.md) (rewritten to this
+model). Supersedes the flat "one color / one id per biome" assumption. The first palette slice
+([`n3-biome-palette.md`](../plans/n3-biome-palette.md), shipped) is partly superseded; staged plan
+is [`n3-biome-traits.md`](../plans/n3-biome-traits.md).
+
+### 8.1 Concepts
+- **cell** — mesh primitive (today's core "region"; rename deferred).
+- **Trait fields** — 9 independent per-cell layers (the *adjectives*), paintable + blended
+  independently: elevation, jaggedness, relief, foothill_falloff, erosion, temperature, moisture,
+  vegetation (enum), palette_family (enum, 7). The source of truth.
+- **Biome** — `classify(trait fields)` → descriptor (e.g. *jagged evergreen highland*). The
+  **culmination**; derived + lockable; off the render path.
+- **Region** — named canon place (the 14 — proper nouns from the guide); identity = name + `--mk-*`
+  accent; **may span several biomes**.
+- **Territory** — painted override scope on top.
+
+Order: **Traits compose → Biome describes → Region names → Territory overrides.**
+
+### 8.2 Colour
+**7 shared base palettes** (light→dark ramps): Verdant · Arid · Stone · Ashen · Frost · Wetland ·
+Exotic. `ground_color = base_palette[palette_family].ramp(elevation, temperature)` tinted by
+`vegetation`; neighbour-smoothing + the transition buffer soften borders; `--mk-*` accent reserved
+for borders/markers/scatter. Cohesion from few bases; variety from the 9 dials.
+
+### 8.3 Tools + engine
+**Brush** paints a trait or stamps a biome-preset + flags a **transition buffer**; **Border tool**
+scopes to Biome / Region / Territory; **Select** flood-selects. A deterministic **blend pass**
+(param-field diffusion) smooths each scalar field across the buffer; one **Transition width**.
+Determinism-safe (lerp/avg/threshold + existing `fbm2`).
+
+### 8.4 Build order (supersedes §7.7 step 2 and the R1 staging)
+1. **Trait substrate** — 9 fields in `World`; 7 base palettes; render resolves
+   `palette × vegetation × temperature × elevation`. *(Rust + DLL)*
+2. **Biome classifier** — `classify(traits) → label`, lockable. *(Rust + DLL)*
+3. **Brush + transition buffer + blend pass** — paint traits, auto skirts, Transition width. *(Rust + C#)*
+4. **Border tool (scopes) + Region tier** — the 14 as Regions; outline/select; accent identity. *(Rust + C#)*
+5. **Per-trait editor panel + biome/region presets.** *(C#)*
+
+§7.6 (brush 3D sphere) follows, unchanged.
