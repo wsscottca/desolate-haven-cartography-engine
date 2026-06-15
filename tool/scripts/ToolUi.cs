@@ -507,6 +507,8 @@ public partial class ToolUi : CanvasLayer
         if (_simulate == null || !_simulate.ButtonPressed) return;
         if (++_simTick < SimEveryNFrames) return;
         _simTick = 0;
+        // Settled water sleeps (empty active set) → skip the tick entirely (idle ≈ 0 CPU).
+        if (Root.Engine.Call("liquid_active_count").As<int>() == 0) return;
         Root.Engine.Call("step_fluid", _simFlow, _simEvap, _simSubsteps);
         Root.RebuildLiquid();
     }

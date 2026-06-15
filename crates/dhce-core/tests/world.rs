@@ -131,6 +131,39 @@ fn chunks_partition_all_triangles_and_track_edits() {
     assert!(w.take_dirty_chunks().is_empty(), "taking dirty chunks clears them");
 }
 
+fn liquid_volume(w: &World) -> f64 {
+    w.liquid_depth_export().iter().map(|&d| d as f64).sum()
+}
+
+#[test]
+fn step_fluid_sleeps_when_settled_and_conserves_volume() {
+    // Active-set sim: a sea fill wakes the wet cells but is already a level surface, so one step
+    // finds no downhill flow → the active set drains to empty (water sleeps → idle costs nothing).
+    let mut w = built();
+    w.set_sea_level(0.2);
+    assert!(w.liquid_active_count() > 0, "sea fill wakes the wet cells");
+    let v0 = liquid_volume(&w);
+    w.step_fluid(0.3, 0.0, 4);
+    assert_eq!(w.liquid_active_count(), 0, "a level pool sleeps (empty active set)");
+    let v1 = liquid_volume(&w);
+    assert!((v0 - v1).abs() / v0.max(1e-9) < 1e-6, "settle conserves volume: {v0} -> {v1}");
+}
+
+#[test]
+fn active_set_flow_conserves_volume() {
+    // A poured blob flows downhill through the active set; with no evaporation, volume is conserved
+    // regardless of how far it has settled (the mass-conservation invariant of the active solver).
+    let mut w = built();
+    w.paint_liquid(500.0, 500.0, 200.0, 0.3, 0);
+    let v0 = liquid_volume(&w);
+    assert!(v0 > 0.0, "the blob laid down water");
+    for _ in 0..200 {
+        w.step_fluid(0.3, 0.0, 1);
+    }
+    let v1 = liquid_volume(&w);
+    assert!((v0 - v1).abs() / v0 < 1e-6, "active-set flow conserves volume: {v0} -> {v1}");
+}
+
 #[test]
 fn liquid_chunks_partition_the_wet_surface() {
     // The chunked liquid surface must cover exactly the same wet triangles as the whole-surface

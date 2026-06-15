@@ -169,6 +169,11 @@ impl DhceEngine {
     fn step_fluid(&mut self, flow_rate: f64, evaporation: f64, substeps: i64) {
         self.world.step_fluid(flow_rate, evaporation, substeps.max(0) as u32);
     }
+    /// Regions the fluid solver is still iterating (0 ⇒ settled; the UI can skip the sim tick).
+    #[func]
+    fn liquid_active_count(&self) -> i64 {
+        self.world.liquid_active_count() as i64
+    }
     #[func]
     fn clear_liquid(&mut self) {
         self.world.clear_liquid();

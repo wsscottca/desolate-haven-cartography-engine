@@ -14,6 +14,9 @@ use crate::liquids::LiquidType;
 use crate::mesh::Mesh;
 
 const WET: f64 = 1.0e-4; // a region with at least this much liquid renders as wet
+/// A region whose depth moved by less than this in a step is treated as settled (drops out of the
+/// active set). Below `WET` so a cell still meaningfully flowing never sleeps prematurely.
+const SETTLE_EPS: f64 = 1.0e-5;
 
 /// A region needs at least this much liquid to contribute render geometry. Slightly
 /// above [`WET`] so the very thinnest films (which read as jagged shards on slopes)
@@ -144,6 +147,91 @@ pub fn relax_step(
         } else if field.kind[r] == 0 {
             field.kind[r] = LiquidType::Water as u8;
         }
+    }
+}
+
+/// One relaxation step processing **only** the `active` regions (wet, not yet settled) — the
+/// active-set form of [`relax_step`]. Flows scatter into `delta` (caller-owned scratch, len `n`,
+/// all-zero on entry and restored on exit); evaporation + the accumulated delta are applied to every
+/// region that's active or received flow (`touched`, deduped via `touched_flag`, also restored).
+/// Each region whose depth moved by more than [`SETTLE_EPS`] is pushed to `changed` — the seed for
+/// the next step's active set and the render-dirty set. Same mass-conserving, anti-overshoot math as
+/// [`relax_step`]; deterministic (active processed in its given order). Settled water costs nothing
+/// because it isn't in `active`.
+#[allow(clippy::too_many_arguments)]
+pub fn relax_step_active(
+    field: &mut LiquidField,
+    terrain: &[f64],
+    neighbors: &[Vec<u32>],
+    flow_rate: f64,
+    evaporation: f64,
+    active: &[u32],
+    delta: &mut [f64],
+    touched_flag: &mut [bool],
+    changed: &mut Vec<u32>,
+) {
+    // Every active region is touched (it gets evaporation applied even if it doesn't flow).
+    let mut touched: Vec<u32> = Vec::with_capacity(active.len() * 2);
+    for &r in active {
+        let ru = r as usize;
+        if !touched_flag[ru] {
+            touched_flag[ru] = true;
+            touched.push(r);
+        }
+    }
+    for &r in active {
+        let ru = r as usize;
+        let w = field.depth[ru];
+        if w <= WET {
+            continue;
+        }
+        let surf_r = terrain[ru] + w;
+        let mut total_drop = 0.0;
+        for &nb in &neighbors[ru] {
+            let surf_n = terrain[nb as usize] + field.depth[nb as usize];
+            if surf_n < surf_r {
+                total_drop += surf_r - surf_n;
+            }
+        }
+        if total_drop <= 0.0 {
+            continue; // local minimum — liquid stays (a lake)
+        }
+        let movable = w * flow_rate;
+        let src_kind = field.kind[ru];
+        for &nb in &neighbors[ru] {
+            let nbu = nb as usize;
+            let surf_n = terrain[nbu] + field.depth[nbu];
+            if surf_n < surf_r {
+                let drop = surf_r - surf_n;
+                let amt = (movable * (drop / total_drop)).min(drop * 0.5);
+                delta[ru] -= amt;
+                delta[nbu] += amt;
+                if field.depth[nbu] <= WET && field.kind[nbu] == 0 {
+                    field.kind[nbu] = src_kind;
+                }
+                if !touched_flag[nbu] {
+                    touched_flag[nbu] = true;
+                    touched.push(nb);
+                }
+            }
+        }
+    }
+    for &r in &touched {
+        let ru = r as usize;
+        let old = field.depth[ru];
+        let d = (old + delta[ru]) * (1.0 - evaporation);
+        let nw = if d > 0.0 { d } else { 0.0 };
+        field.depth[ru] = nw;
+        if nw <= WET {
+            field.kind[ru] = 0;
+        } else if field.kind[ru] == 0 {
+            field.kind[ru] = LiquidType::Water as u8;
+        }
+        if (nw - old).abs() > SETTLE_EPS {
+            changed.push(r);
+        }
+        delta[ru] = 0.0;
+        touched_flag[ru] = false;
     }
 }
 

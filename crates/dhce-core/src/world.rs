@@ -137,6 +137,13 @@ pub struct World {
     liquid_wet_cache: Vec<bool>,
     liquid_cache_dirty: bool,
     liquid_chunk_dirty: Vec<bool>,
+    /// Active-set sim state: the regions the fluid solver still iterates (wet + not settled), a
+    /// membership flag for O(1) dedup, and reusable per-region scratch for the relaxation. Settled
+    /// water drops out, so a level basin costs nothing per step (the big sim win).
+    liquid_active: Vec<u32>,
+    liquid_active_flag: Vec<bool>,
+    liquid_delta: Vec<f64>,
+    liquid_touched_flag: Vec<bool>,
 }
 
 impl Default for World {
@@ -207,6 +214,10 @@ impl World {
             liquid_wet_cache: Vec::new(),
             liquid_cache_dirty: true,
             liquid_chunk_dirty: Vec::new(),
+            liquid_active: Vec::new(),
+            liquid_active_flag: Vec::new(),
+            liquid_delta: Vec::new(),
+            liquid_touched_flag: Vec::new(),
         }
     }
 
@@ -304,6 +315,12 @@ impl World {
         self.liquid_surf_cache = vec![0.0; nr];
         self.liquid_wet_cache = vec![false; nr];
         self.liquid_cache_dirty = true;
+        // Active-set sim scratch. The active set starts empty: the build's sea fill is already a
+        // level surface (settled), so there's nothing to iterate until an edit/rain/sculpt wakes it.
+        self.liquid_active = Vec::new();
+        self.liquid_active_flag = vec![false; nr];
+        self.liquid_delta = vec![0.0; nr];
+        self.liquid_touched_flag = vec![false; nr];
     }
 
     pub fn region_count(&self) -> usize {
@@ -353,13 +370,86 @@ impl World {
     }
 
     /// Advance the hydraulic solver `substeps` relaxation steps.
+    /// Advance the hydraulic solver `substeps` relaxation steps over the **active set** (wet, not yet
+    /// settled). Settled water isn't iterated, and each step flags only the chunks whose water moved,
+    /// so a level basin (and an idle map) cost nothing. Stops early once the active set drains.
     pub fn step_fluid(&mut self, flow_rate: f64, evaporation: f64, substeps: u32) {
-        for _ in 0..substeps {
-            fluid::relax_step(&mut self.field, &self.elevation_r, &self.neighbors, flow_rate, evaporation);
+        let n = self.elevation_r.len();
+        if n == 0 {
+            return;
         }
-        // v2.1: flag all liquid chunks; the front-end still only re-tessellates in-range ones (the
-        // win). Stage 2.2 (active-set) will narrow this to the regions that actually moved.
-        self.mark_all_liquid_changed();
+        if self.liquid_delta.len() != n {
+            self.liquid_delta = vec![0.0; n];
+        }
+        if self.liquid_touched_flag.len() != n {
+            self.liquid_touched_flag = vec![false; n];
+        }
+        if self.liquid_active_flag.len() != n {
+            self.liquid_active_flag = vec![false; n];
+        }
+        let mut changed: Vec<u32> = Vec::new();
+        let mut moved = false;
+        for _ in 0..substeps {
+            if self.liquid_active.is_empty() {
+                break;
+            }
+            changed.clear();
+            fluid::relax_step_active(
+                &mut self.field,
+                &self.elevation_r,
+                &self.neighbors,
+                flow_rate,
+                evaporation,
+                &self.liquid_active,
+                &mut self.liquid_delta,
+                &mut self.liquid_touched_flag,
+                &mut changed,
+            );
+            // Clear the current membership; rebuild the active set from what moved this step.
+            for &r in &self.liquid_active {
+                self.liquid_active_flag[r as usize] = false;
+            }
+            self.liquid_active.clear();
+            if changed.is_empty() {
+                break; // settled — nothing moved
+            }
+            moved = true;
+            // Flag the chunks of the regions that moved (render-dirty).
+            for &r in &changed {
+                if let Some(chunks) = self.region_chunks.get(r as usize) {
+                    for &c in chunks {
+                        if let Some(d) = self.liquid_chunk_dirty.get_mut(c as usize) {
+                            *d = true;
+                        }
+                    }
+                }
+            }
+            // Next active = moved regions ∪ their neighbours (so a new gradient at the frontier is
+            // reconsidered). Gather first to avoid aliasing `neighbors` with the active push.
+            let mut next: Vec<u32> = Vec::new();
+            for &r in &changed {
+                next.push(r);
+                if let Some(nbs) = self.neighbors.get(r as usize) {
+                    next.extend_from_slice(nbs);
+                }
+            }
+            for r in next {
+                let ru = r as usize;
+                if !self.liquid_active_flag[ru] {
+                    self.liquid_active_flag[ru] = true;
+                    self.liquid_active.push(r);
+                }
+            }
+        }
+        if moved {
+            self.liquid_cache_dirty = true;
+        }
+    }
+
+    /// Number of regions the fluid solver is still iterating (0 ⇒ settled; the front-end can stop
+    /// ticking the sim).
+    pub fn liquid_active_count(&self) -> usize {
+        self.liquid_active.len()
     }
 
     /// Remove all liquid.
@@ -1667,6 +1757,23 @@ impl World {
                 }
             }
         }
+        // Wake the edited cells + their neighbours so the next step_fluid re-settles the area (a
+        // risen cell may have left its neighbours with a new gradient). Gather first, then activate,
+        // to avoid aliasing `neighbors` with the active push.
+        let mut wake: Vec<u32> = Vec::new();
+        for &rid in regions {
+            wake.push(rid);
+            if let Some(nbs) = self.neighbors.get(rid as usize) {
+                wake.extend_from_slice(nbs);
+            }
+        }
+        for r in wake {
+            let ru = r as usize;
+            if ru < self.liquid_active_flag.len() && !self.liquid_active_flag[ru] {
+                self.liquid_active_flag[ru] = true;
+                self.liquid_active.push(r);
+            }
+        }
     }
 
     /// Mark the liquid caches stale and flag every liquid chunk (for global liquid ops).
@@ -1674,6 +1781,18 @@ impl World {
         self.liquid_cache_dirty = true;
         for d in self.liquid_chunk_dirty.iter_mut() {
             *d = true;
+        }
+        // Active set = every currently-wet region (sea fill / rain / clear / streams touch the map
+        // broadly, so re-seed from scratch rather than guess a footprint).
+        self.liquid_active.clear();
+        for f in self.liquid_active_flag.iter_mut() {
+            *f = false;
+        }
+        for r in 0..self.field.depth.len() {
+            if self.field.depth[r] > fluid::MIN_RENDER_DEPTH && r < self.liquid_active_flag.len() {
+                self.liquid_active_flag[r] = true;
+                self.liquid_active.push(r as u32);
+            }
         }
     }
 

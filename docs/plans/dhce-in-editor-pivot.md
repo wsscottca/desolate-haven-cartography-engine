@@ -55,13 +55,22 @@ liquid surface every tick/edit (liquid is one un-chunked mesh).
   flag liquid-dirty chunks (`mark_liquid_changed` / `mark_all_liquid_changed`); C# streams per-chunk
   liquid meshes alongside terrain and re-tessellates only dirty + in-range ones. Whole-surface
   `liquid_surface` retained for export only.
-- **2.2 Active-set (sleeping) relaxation.** `relax_step` iterates only regions that changed last
-  substep (+ neighbours); settled water drops out; edits re-activate their footprint. Mass conserved.
-- **2.3 Deterministic parallelism.** Rewrite `relax_step` + surface build as a **gather** (each cell
-  computes its own net delta from read-only neighbour state) → no scatter races, bit-identical to the
-  single-threaded reference; parallelize with rayon.
-- **2.4 Dirty-driven uploads.** Re-upload only changed liquid chunks; skip ticks where the active set
-  is empty (idle water ≈ 0 CPU).
+- **2.2 Active-set (sleeping) relaxation** — ✅ done (2026-06-15). `fluid::relax_step_active` iterates
+  only the active set (wet + not settled); `step_fluid` rebuilds it each step from the regions that
+  moved (> `SETTLE_EPS`) ∪ their neighbours, flags only those chunks, and stops when it drains. Edits
+  wake their footprint (`mark_liquid_changed`); sea/rain/clear/streams wake all wet
+  (`mark_all_liquid_changed`). Mass conserved (same anti-overshoot math as `relax_step`, kept for the
+  fluid tests). Note: full convergence to the sleep threshold is solver-bound (slow spatial modes);
+  the win is that *level/idle* water sleeps and the frontier shrinks.
+- **2.3 Incremental liquid cache** *(re-scoped from rayon).* See note below.
+- **2.4 Idle skip** — ✅ done (2026-06-15). `liquid_active_count()` exposed; the Simulate tick skips
+  entirely when it's 0 (settled). Per-edit/tick uploads were already dirty-driven (2.1).
+
+> **Decision (review):** 2.3 re-scoped from "deterministic rayon parallelism" to **incremental liquid
+> cache**. Rayon in `dhce-core` would break the frozen `dhce-wasm` cross-check (ADR 0001/0002 — wasm32
+> has no threads) without cfg-gating, and after 2.1+2.2 the residual hot cost is the whole-map
+> `ensure_liquid_cache` smooth, which an incremental (changed-region halo) recompute targets directly
+> and with no new deps. Rayon stays in the bank if a native-only parallel pass is later wanted.
 
 **Gate:** `cargo test -p dhce-core` green (incl. a determinism check: parallel == serial); settling no
 longer hitches at 1.7 M cells.
