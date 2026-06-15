@@ -41,13 +41,28 @@ pub struct World {
     seed: u64,
     mesh: Option<Mesh>,
     elevation_r: Vec<f64>,
+    /// Per-region moisture (0..1), cached at build from the noise channel used by
+    /// classification, so colouring can resolve the palette ramp without re-sampling noise.
+    moisture_r: Vec<f64>,
     neighbors: Vec<Vec<u32>>,
     field: LiquidField,
     sea_level: f64,
     biome_r: Vec<u8>,
+    /// Representative swatch colour per Region preset (its `--mk-*` accent); for `biome_color_of`.
     biome_color: Vec<[f32; 3]>,
-    /// Per-biome (id 1..=14) editable landform profile: peak_shape, hill_amp,
-    /// valley_floor, roughness. Seeded from the roster; surfaced in the biome editor.
+    /// The 7 shared base palettes (editable in the colour editor), indexed by `biomes::fam::*`.
+    base_palettes: Vec<biomes::BasePalette>,
+    // Per-cell trait fields (the trait-composition model; ADR 0004). Ground colour resolves from
+    // these via `cell_color`; the landform traits feed the (later) shaping pass.
+    jaggedness_r: Vec<f64>,
+    relief_r: Vec<f64>,
+    foothill_falloff_r: Vec<f64>,
+    erosion_r: Vec<f64>,
+    temperature_r: Vec<f64>,
+    vegetation_r: Vec<u8>,
+    palette_family_r: Vec<u8>,
+    /// Legacy per-Region landform profile [jaggedness, relief, foothill_falloff, erosion] — kept
+    /// for the `biome_landform` getter/setter; the live values are the per-cell trait fields above.
     biome_landform: Vec<[f32; 4]>,
     /// Per-biome water profile: raininess, rain_shadow, evaporation, flow, ocean_depth.
     biome_water: Vec<[f32; 5]>,
@@ -91,9 +106,9 @@ impl World {
         let mut biome_landform = vec![[0.0f32; 4]; biomes::BIOME_COUNT + 1];
         let mut biome_water = vec![[0.0f32; 5]; biomes::BIOME_COUNT + 1];
         for (i, b) in roster.iter().enumerate() {
-            biome_color[i + 1] = b.color;
-            let l = &b.landform;
-            biome_landform[i + 1] = [l.peak_shape, l.hill_amp, l.valley_floor, l.roughness];
+            biome_color[i + 1] = b.representative();
+            let t = &b.traits;
+            biome_landform[i + 1] = [t.jaggedness, t.relief, t.foothill_falloff, t.erosion];
             let w = &b.water;
             biome_water[i + 1] = [w.raininess, w.rain_shadow, w.evaporation, w.flow, w.ocean_depth];
         }
@@ -103,11 +118,20 @@ impl World {
             seed: 0,
             mesh: None,
             elevation_r: Vec::new(),
+            moisture_r: Vec::new(),
             neighbors: Vec::new(),
             field: LiquidField::new(0),
             sea_level: 0.0,
             biome_r: Vec::new(),
             biome_color,
+            base_palettes: biomes::base_palettes().to_vec(),
+            jaggedness_r: Vec::new(),
+            relief_r: Vec::new(),
+            foothill_falloff_r: Vec::new(),
+            erosion_r: Vec::new(),
+            temperature_r: Vec::new(),
+            vegetation_r: Vec::new(),
+            palette_family_r: Vec::new(),
             biome_landform,
             biome_water,
             biome_locked: Vec::new(),
@@ -146,13 +170,43 @@ impl World {
         let cy = height * 0.5;
         let max_d = 0.5 * (width * width + height * height).sqrt();
         let mut biome_r = vec![0u8; nr];
+        let mut moisture_r = vec![0.0f64; nr];
         for r in 0..nr {
             let p = mesh.pos_of_r(r);
             let dist = ((p[0] - cx).powi(2) + (p[1] - cy).powi(2)).sqrt() / max_d;
             let moist = biomes::moisture_at(p[0], p[1], width, height, seed);
+            moisture_r[r] = moist;
             biome_r[r] = biomes::classify(self.elevation_r[r], moist, dist);
         }
         self.biome_r = biome_r;
+        self.moisture_r = moisture_r;
+
+        // Seed the per-cell trait fields from each cell's classified Region preset (the author
+        // paints/edits over this). `moisture_r` keeps its noise value (more varied than the preset).
+        let mut jag = vec![0.0f64; nr];
+        let mut rel = vec![0.0f64; nr];
+        let mut foot = vec![0.0f64; nr];
+        let mut ero = vec![0.0f64; nr];
+        let mut temp = vec![0.0f64; nr];
+        let mut vegc = vec![0u8; nr];
+        let mut famc = vec![0u8; nr];
+        for r in 0..nr {
+            let tr = biomes::default_traits_for(self.biome_r[r]);
+            jag[r] = tr.jaggedness as f64;
+            rel[r] = tr.relief as f64;
+            foot[r] = tr.foothill_falloff as f64;
+            ero[r] = tr.erosion as f64;
+            temp[r] = tr.temperature as f64;
+            vegc[r] = tr.vegetation;
+            famc[r] = tr.palette_family;
+        }
+        self.jaggedness_r = jag;
+        self.relief_r = rel;
+        self.foothill_falloff_r = foot;
+        self.erosion_r = ero;
+        self.temperature_r = temp;
+        self.vegetation_r = vegc;
+        self.palette_family_r = famc;
 
         // Spatial grid for O(brush) brush queries (keeps painting fast at high detail).
         let grid_cell = (width.max(height) / 64.0).max(1.0);
@@ -491,6 +545,157 @@ impl World {
         if let Some(a) = self.biome_water.get_mut(id) {
             if idx < 5 {
                 a[idx] = v;
+            }
+        }
+    }
+
+    // --- traits (the trait-composition model; ADR 0004) ---
+
+    /// Paint one trait into the brush footprint. `trait_id`: 0 jaggedness, 1 relief,
+    /// 2 foothill_falloff, 3 erosion, 4 temperature, 5 moisture, 6 vegetation (value = enum idx),
+    /// 7 palette_family (value = enum idx). Scalars ease toward `value` by the smoothstep falloff;
+    /// enums snap inside the brush. Returns the cells touched.
+    pub fn paint_trait(&mut self, cx: f64, cy: f64, radius: f64, trait_id: u32, value: f64) -> Vec<u32> {
+        if self.mesh.is_none() {
+            return Vec::new();
+        }
+        let r2 = radius * radius;
+        let candidates = self.brush_candidates(cx, cy, radius);
+        let mut touched = Vec::new();
+        {
+            let mesh = self.mesh.as_ref().unwrap();
+            for &rid in &candidates {
+                let ri = rid as usize;
+                let p = mesh.pos_of_r(ri);
+                let d2 = (p[0] - cx).powi(2) + (p[1] - cy).powi(2);
+                if d2 >= r2 {
+                    continue;
+                }
+                let t = 1.0 - (d2 / r2).sqrt();
+                let w = t * t * (3.0 - 2.0 * t);
+                match trait_id {
+                    0 => ease_into(&mut self.jaggedness_r, ri, value, w),
+                    1 => ease_into(&mut self.relief_r, ri, value, w),
+                    2 => ease_into(&mut self.foothill_falloff_r, ri, value, w),
+                    3 => ease_into(&mut self.erosion_r, ri, value, w),
+                    4 => ease_into(&mut self.temperature_r, ri, value, w),
+                    5 => ease_into(&mut self.moisture_r, ri, value, w),
+                    6 => {
+                        if w > 0.5 && ri < self.vegetation_r.len() {
+                            self.vegetation_r[ri] = value as u8;
+                        }
+                    }
+                    7 => {
+                        if w > 0.5 && ri < self.palette_family_r.len() {
+                            self.palette_family_r[ri] = value as u8;
+                        }
+                    }
+                    _ => {}
+                }
+                touched.push(rid);
+            }
+        }
+        self.after_edit(&touched);
+        touched
+    }
+
+    /// Stamp a Region preset's full trait bundle into the footprint ("this area is X"), locking
+    /// those cells' biome label. Returns the cells touched.
+    pub fn paint_region_traits(&mut self, cx: f64, cy: f64, radius: f64, biome_id: u8) -> Vec<u32> {
+        if self.mesh.is_none() {
+            return Vec::new();
+        }
+        let tr = biomes::default_traits_for(biome_id);
+        let r2 = radius * radius;
+        let candidates = self.brush_candidates(cx, cy, radius);
+        let mut touched = Vec::new();
+        {
+            let mesh = self.mesh.as_ref().unwrap();
+            for &rid in &candidates {
+                let ri = rid as usize;
+                let p = mesh.pos_of_r(ri);
+                if (p[0] - cx).powi(2) + (p[1] - cy).powi(2) >= r2 {
+                    continue;
+                }
+                if ri < self.jaggedness_r.len() {
+                    self.jaggedness_r[ri] = tr.jaggedness as f64;
+                    self.relief_r[ri] = tr.relief as f64;
+                    self.foothill_falloff_r[ri] = tr.foothill_falloff as f64;
+                    self.erosion_r[ri] = tr.erosion as f64;
+                    self.temperature_r[ri] = tr.temperature as f64;
+                    self.vegetation_r[ri] = tr.vegetation;
+                    self.palette_family_r[ri] = tr.palette_family;
+                }
+                if ri < self.biome_r.len() {
+                    self.biome_r[ri] = biome_id;
+                }
+                if ri < self.biome_locked.len() {
+                    self.biome_locked[ri] = true;
+                }
+                touched.push(rid);
+            }
+        }
+        self.after_edit(&touched);
+        touched
+    }
+
+    /// Read a per-cell trait at world `(x, y)` (nearest cell). `trait_id` as in [`paint_trait`];
+    /// enum traits return their index as `f64`. `None` outside the map.
+    pub fn trait_at(&self, x: f64, y: f64, trait_id: u32) -> Option<f64> {
+        let r = self.region_at(x, y)?;
+        Some(match trait_id {
+            0 => self.jaggedness_r.get(r).copied().unwrap_or(0.0),
+            1 => self.relief_r.get(r).copied().unwrap_or(0.0),
+            2 => self.foothill_falloff_r.get(r).copied().unwrap_or(0.0),
+            3 => self.erosion_r.get(r).copied().unwrap_or(0.0),
+            4 => self.temperature_r.get(r).copied().unwrap_or(0.0),
+            5 => self.moisture_r.get(r).copied().unwrap_or(0.0),
+            6 => self.vegetation_r.get(r).copied().unwrap_or(0) as f64,
+            7 => self.palette_family_r.get(r).copied().unwrap_or(0) as f64,
+            _ => 0.0,
+        })
+    }
+
+    /// One slot of a base palette as `[r, g, b]`. `slot`: 0 water_deep, 1 water_shallow, 2 low,
+    /// 3 rock, 4 cap_warm, 5 cap_cold. Mid-grey if out of range.
+    pub fn base_palette_color(&self, family: usize, slot: usize) -> [f32; 3] {
+        let bp = match self.base_palettes.get(family) {
+            Some(b) => b,
+            None => return [0.5, 0.5, 0.5],
+        };
+        match slot {
+            0 => bp.water_deep,
+            1 => bp.water_shallow,
+            2 => bp.low,
+            3 => bp.rock,
+            4 => bp.cap_warm,
+            5 => bp.cap_cold,
+            _ => [0.5, 0.5, 0.5],
+        }
+    }
+
+    /// Set a base-palette slot, then recompute the colour cache and flag every chunk dirty so the
+    /// 3D view + minimap re-render with the new colour.
+    pub fn set_base_palette_color(&mut self, family: usize, slot: usize, r: f32, g: f32, b: f32) {
+        let v = [r, g, b];
+        let changed = if let Some(bp) = self.base_palettes.get_mut(family) {
+            match slot {
+                0 => bp.water_deep = v,
+                1 => bp.water_shallow = v,
+                2 => bp.low = v,
+                3 => bp.rock = v,
+                4 => bp.cap_warm = v,
+                5 => bp.cap_cold = v,
+                _ => {}
+            }
+            true
+        } else {
+            false
+        };
+        if changed && !self.elevation_r.is_empty() {
+            self.color_cache = self.region_color();
+            for d in self.chunk_dirty.iter_mut() {
+                *d = true;
             }
         }
     }
@@ -854,15 +1059,33 @@ impl World {
         out
     }
 
-    /// Per-region RGB color (3 floats per region) from each region's biome, softened
-    /// across neighbours (so hard biome-block seams read as gradients) with a subtle
-    /// deterministic brightness jitter to break up flatness.
+    /// Base ground colour for one region from its biome palette + elevation + moisture
+    /// (before neighbour smoothing / jitter). The shared ramp ([`biomes::ground_color`]) is
+    /// what ties biomes together; per-biome tokens give identity. Neutral if unsized.
+    fn cell_color(&self, r: usize) -> [f32; 3] {
+        let fam = self.palette_family_r.get(r).copied().unwrap_or(0) as usize;
+        let base = if fam < self.base_palettes.len() {
+            self.base_palettes[fam]
+        } else if !self.base_palettes.is_empty() {
+            self.base_palettes[0]
+        } else {
+            biomes::base_palettes()[0]
+        };
+        let veg = self.vegetation_r.get(r).copied().unwrap_or(biomes::veg::GRASS);
+        let e = self.elevation_r.get(r).copied().unwrap_or(0.0) as f32;
+        let temp = self.temperature_r.get(r).copied().unwrap_or(0.5) as f32;
+        let moist = self.moisture_r.get(r).copied().unwrap_or(0.5) as f32;
+        biomes::resolve_color(&base, veg, e, temp, moist)
+    }
+
+    /// Per-region RGB color (3 floats per region) resolved from each region's biome palette
+    /// by elevation + moisture, softened across neighbours (so biome seams read as gradients)
+    /// with a subtle deterministic brightness jitter to break up flatness.
     fn region_color(&self) -> Vec<f32> {
         let nr = self.elevation_r.len();
         let mut c = vec![0.0f32; nr * 3];
         for r in 0..nr {
-            let id = self.biome_r.get(r).copied().unwrap_or(0) as usize;
-            let col = self.biome_color.get(id).copied().unwrap_or([0.5, 0.5, 0.5]);
+            let col = self.cell_color(r);
             c[3 * r] = col[0];
             c[3 * r + 1] = col[1];
             c[3 * r + 2] = col[2];
@@ -978,8 +1201,7 @@ impl World {
         for &rid in regions {
             let r = rid as usize;
             if 3 * r + 2 < self.color_cache.len() {
-                let id = self.biome_r.get(r).copied().unwrap_or(0) as usize;
-                let base = self.biome_color.get(id).copied().unwrap_or([0.5, 0.5, 0.5]);
+                let base = self.cell_color(r);
                 let h = hash_u32(r as u32);
                 let f = 1.0 + ((h & 0xffff) as f32 / 65535.0 - 0.5) * 2.0 * COLOR_VAR;
                 for k in 0..3 {
@@ -1130,6 +1352,14 @@ impl World {
             colors,
             indices,
         })
+    }
+}
+
+/// Ease a scalar trait field at `i` toward `target` by weight `w` (brush falloff).
+fn ease_into(v: &mut [f64], i: usize, target: f64, w: f64) {
+    if i < v.len() {
+        let cur = v[i];
+        v[i] = cur + (target - cur) * w;
     }
 }
 

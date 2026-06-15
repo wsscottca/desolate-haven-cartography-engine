@@ -131,6 +131,54 @@ fn chunks_partition_all_triangles_and_track_edits() {
     assert!(w.take_dirty_chunks().is_empty(), "taking dirty chunks clears them");
 }
 
+fn avg_luma(colors: &[f32]) -> f32 {
+    let n = colors.len() / 3;
+    let mut s = 0.0f32;
+    for r in 0..n {
+        s += 0.2126 * colors[3 * r] + 0.7152 * colors[3 * r + 1] + 0.0722 * colors[3 * r + 2];
+    }
+    s / n.max(1) as f32
+}
+
+#[test]
+fn build_colors_are_not_uniform() {
+    // The palette + ramp must produce a varied map, not one flat fill.
+    let w = built();
+    let s = w.surface(100.0).expect("surface");
+    let (r0, g0, b0) = (s.colors[0], s.colors[1], s.colors[2]);
+    let varied = (1..w.region_count()).any(|r| {
+        (s.colors[3 * r] - r0).abs() > 0.02
+            || (s.colors[3 * r + 1] - g0).abs() > 0.02
+            || (s.colors[3 * r + 2] - b0).abs() > 0.02
+    });
+    assert!(varied, "biome palette + elevation ramp should vary colour across the map");
+}
+
+#[test]
+fn surface_color_lifts_with_elevation() {
+    // Drive traits + elevation directly so the assertion is independent of generated terrain:
+    // stamp Temperate Forest everywhere, then high (bare cap) reads brighter than forested lowland.
+    let mut w = built();
+    let nr = w.region_count();
+    w.paint_region_traits(500.0, 500.0, 5000.0, 4); // id 4 = Temperate Forest, over the whole map
+
+    w.set_elevation(&vec![0.1f32; nr]);
+    let low = avg_luma(&w.surface(100.0).expect("surface").colors);
+    w.set_elevation(&vec![1.2f32; nr]);
+    let high = avg_luma(&w.surface(100.0).expect("surface").colors);
+
+    assert!(high > low + 0.15, "high ground reads brighter than lowland cover: {high} vs {low}");
+}
+
+#[test]
+fn paint_trait_sets_the_field_under_the_brush() {
+    let mut w = built();
+    let touched = w.paint_trait(500.0, 500.0, 200.0, 4, 0.0); // trait 4 = temperature → 0 (cold)
+    assert!(!touched.is_empty(), "the trait brush touches cells");
+    let t = w.trait_at(500.0, 500.0, 4).expect("a cell at the brush centre");
+    assert!(t < 0.3, "temperature eased toward 0 at the brush centre, got {t}");
+}
+
 #[test]
 fn chunk_grid_is_empty_before_build() {
     let w = World::new();

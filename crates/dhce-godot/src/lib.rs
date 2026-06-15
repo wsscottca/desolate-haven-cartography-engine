@@ -242,6 +242,37 @@ impl DhceEngine {
         self.world.set_biome_water(id.max(0) as usize, idx.max(0) as usize, v as f32);
     }
 
+    // --- traits (trait-composition model; ADR 0004) ---
+
+    /// Paint one trait into the brush footprint. `trait_id`: 0 jaggedness, 1 relief,
+    /// 2 foothill_falloff, 3 erosion, 4 temperature, 5 moisture, 6 vegetation (value = enum idx),
+    /// 7 palette_family (value = enum idx). Returns the cells touched (for partial mesh updates).
+    #[func]
+    fn paint_trait(&mut self, cx: f64, cy: f64, radius: f64, trait_id: i64, value: f64) -> PackedInt32Array {
+        u32_to_packed(&self.world.paint_trait(cx, cy, radius, trait_id.max(0) as u32, value))
+    }
+    /// Stamp a Region preset's full trait bundle into the footprint ("this area is X").
+    #[func]
+    fn paint_region_traits(&mut self, cx: f64, cy: f64, radius: f64, biome_id: i64) -> PackedInt32Array {
+        u32_to_packed(&self.world.paint_region_traits(cx, cy, radius, biome_id.max(0) as u8))
+    }
+    /// Per-cell trait at world `(x, y)`; `trait_id` as in `paint_trait` (enums → index). NaN off-map.
+    #[func]
+    fn trait_at(&self, x: f64, y: f64, trait_id: i64) -> f64 {
+        self.world.trait_at(x, y, trait_id.max(0) as u32).unwrap_or(f64::NAN)
+    }
+    /// One slot of base palette `family` as `[r,g,b]`. `slot`: 0 water_deep, 1 water_shallow,
+    /// 2 low, 3 rock, 4 cap_warm, 5 cap_cold.
+    #[func]
+    fn base_palette_color(&self, family: i64, slot: i64) -> PackedFloat32Array {
+        PackedFloat32Array::from(self.world.base_palette_color(family.max(0) as usize, slot.max(0) as usize).as_slice())
+    }
+    /// Set a base-palette slot and recolour the world (flags all chunks dirty).
+    #[func]
+    fn set_base_palette_color(&mut self, family: i64, slot: i64, r: f64, g: f64, b: f64) {
+        self.world.set_base_palette_color(family.max(0) as usize, slot.max(0) as usize, r as f32, g as f32, b as f32);
+    }
+
     // --- selection / boundary tools ---
 
     /// Region nearest to world `(x, y)`, excluding the boundary frame; `-1` if none.

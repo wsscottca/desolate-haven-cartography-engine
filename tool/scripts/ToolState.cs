@@ -4,7 +4,8 @@ namespace DesolateHaven.Cartography;
 
 /// The authoring tools, in toolbar order. Shortcuts 1–7 map to these (see ToolUi).
 /// (Named ToolKind so the `Tool` name is free for CartographerSpike's ToolState property.)
-public enum ToolKind { Raise, Carve, Level, Crest, River, Flood, Biome }
+/// `Biome` stamps a Region preset's whole trait bundle; `Trait` paints a single trait.
+public enum ToolKind { Raise, Carve, Level, Crest, River, Flood, Biome, Trait }
 
 /// What a stroke changed, so the caller knows which render surface(s) to refresh.
 [System.Flags]
@@ -20,7 +21,9 @@ public sealed class ToolState
     public float RadiusFraction = 0.12f; // brush radius as a fraction of the camera→cursor distance
     public float RadiusM = 350f;         // effective radius (m); recomputed each dab from the fraction
     public float StrengthM = 50f;        // sculpt step in METRES (→ normalized via exaggeration)
-    public int BiomeId = 1;            // 1..=14 for the Biome tool
+    public int BiomeId = 1;            // 1..=14 Region preset for the Biome (stamp) tool
+    public int TraitId = 6;            // engine trait id for the Trait tool (6 = vegetation)
+    public float TraitValue = 1f;      // target value the Trait tool paints (scalar 0..1, or enum idx)
     public int LiquidKind = 0;         // 0 water, 1 lava (River + Flood)
     public float CourseIntensity = 0.05f; // small: course water/carve gains are large in the core
     public float FloodAmount = 0.04f;     // small per dab; the stroke settles on release
@@ -43,7 +46,8 @@ public sealed class ToolState
                              return EditResult.Terrain | EditResult.Liquid;
             case ToolKind.Flood: engine.Call("paint_liquid", x, z, r, (double)FloodAmount, LiquidKind);
                              return EditResult.Liquid;
-            case ToolKind.Biome: engine.Call("paint_biome", x, z, r, BiomeId); return EditResult.Terrain;
+            case ToolKind.Biome: engine.Call("paint_region_traits", x, z, r, BiomeId); return EditResult.Terrain;
+            case ToolKind.Trait: engine.Call("paint_trait", x, z, r, TraitId, (double)TraitValue); return EditResult.Terrain;
             default: return EditResult.None;
         }
     }

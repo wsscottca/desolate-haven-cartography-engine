@@ -24,8 +24,27 @@ public partial class ToolUi : CanvasLayer
     private SpinBox _seed, _oct, _size, _spacing;
     private ToolKind _lastTerrainTool = ToolKind.Raise;
 
+    // Trait brush + base-palette editor controls.
+    private OptionButton _traitPick, _traitEnum, _palFamily;
+    private HSlider _traitSlider;
+    private Label _traitSliderLabel, _traitEnumLabel;
+    private ColorPickerButton[] _palPickers;
+    private bool _loadingPalette;
+
     private static readonly float[] BrushFractions = { 0.03f, 0.06f, 0.12f, 0.25f, 0.5f };
     private static readonly int[] DotFontSizes = { 9, 12, 16, 20, 25 };
+
+    // Trait dropdown order → engine trait id (0 jag,1 relief,2 foothill,3 erosion,4 temp,5 moist,
+    // 6 vegetation,7 palette_family). Enum traits (6,7) use the dropdown; the rest use the slider.
+    private static readonly int[] TraitEngineId = { 6, 7, 0, 1, 2, 3, 4, 5 };
+    private static readonly string[] TraitNames =
+        { "Vegetation", "Palette family", "Jaggedness", "Relief", "Foothill falloff", "Erosion", "Temperature", "Moisture" };
+    private static readonly string[] VegNames =
+        { "Barren", "Grass", "Scrub", "Forest", "Evergreen", "Marsh", "Thorn" };
+    private static readonly string[] FamilyNames =
+        { "Verdant", "Arid", "Stone", "Ashen", "Frost", "Wetland", "Exotic" };
+    private static readonly string[] SlotNames =
+        { "Deep water", "Shallows", "Low cover", "Rock", "Cap (warm)", "Cap (snow)" };
 
     private double _simFlow = 0.45, _simEvap = 0.001;
     private int _simSubsteps = 10, _simTick;
@@ -152,10 +171,10 @@ public partial class ToolUi : CanvasLayer
 
     private void BuildBiomesTab(VBoxContainer col)
     {
-        col.AddChild(ToolTheme.Header("BIOME LAYER"));
+        col.AddChild(ToolTheme.Header("REGIONS"));
         var note = new Label
         {
-            Text = "Pick a biome, then paint. Territory + Select tools land next.",
+            Text = "Stamp a region's whole character, or paint a single trait below.",
             AutowrapMode = TextServer.AutowrapMode.WordSmart,
         };
         note.AddThemeColorOverride("font_color", ToolTheme.InkDim);
@@ -164,22 +183,79 @@ public partial class ToolUi : CanvasLayer
         var grid = new GridContainer { Columns = 2 };
         col.AddChild(grid);
         for (int id = 1; id <= BiomeNames.Length; id++) grid.AddChild(SwatchButton(id, BiomeNames[id - 1]));
+
+        col.AddChild(ToolTheme.Header("TRAIT BRUSH"));
+        _traitPick = new OptionButton();
+        for (int i = 0; i < TraitNames.Length; i++) _traitPick.AddItem(TraitNames[i], i);
+        _traitPick.Selected = 0;
+        _traitPick.ItemSelected += idx => SelectTrait((int)idx);
+        col.AddChild(_traitPick);
+
+        _traitSliderLabel = DimLabel("Value: 1");
+        col.AddChild(_traitSliderLabel);
+        _traitSlider = new HSlider { MinValue = 0, MaxValue = 1, Step = 0.01, Value = 1 };
+        _traitSlider.ValueChanged += v =>
+        {
+            _traitSliderLabel.Text = $"Value: {v:0.##}";
+            Root.Tool.TraitValue = (float)v;
+            Root.Tool.Active = ToolKind.Trait;
+        };
+        col.AddChild(_traitSlider);
+
+        _traitEnumLabel = DimLabel("Type");
+        col.AddChild(_traitEnumLabel);
+        _traitEnum = new OptionButton();
+        _traitEnum.ItemSelected += idx => { Root.Tool.TraitValue = (int)idx; Root.Tool.Active = ToolKind.Trait; };
+        col.AddChild(_traitEnum);
+
+        SelectTrait(0); // default to Vegetation
+    }
+
+    /// Point the Trait brush at the trait chosen in the dropdown, swapping the scalar slider for
+    /// the enum dropdown (vegetation / palette family) as appropriate.
+    private void SelectTrait(int dropdownIdx)
+    {
+        int engineId = TraitEngineId[dropdownIdx];
+        Root.Tool.TraitId = engineId;
+        Root.Tool.Active = ToolKind.Trait;
+        bool isEnum = engineId == 6 || engineId == 7;
+        _traitSlider.Visible = !isEnum;
+        _traitSliderLabel.Visible = !isEnum;
+        _traitEnum.Visible = isEnum;
+        _traitEnumLabel.Visible = isEnum;
+        if (isEnum)
+        {
+            _traitEnum.Clear();
+            string[] names = engineId == 6 ? VegNames : FamilyNames;
+            for (int k = 0; k < names.Length; k++) _traitEnum.AddItem(names[k], k);
+            _traitEnum.Selected = 0;
+            Root.Tool.TraitValue = 0;
+        }
+        else
+        {
+            Root.Tool.TraitValue = (float)_traitSlider.Value;
+        }
     }
 
     // --- right panel (physics) ---------------------------------------------------------------
 
     private void BuildRightPanel(Control parent)
     {
+        // Full-height panel with a scroll view, so adding sections (palette editor) never pushes
+        // the minimap off-screen on smaller windows.
         var panel = new PanelContainer
         {
-            AnchorLeft = 1, AnchorRight = 1, AnchorTop = 0, AnchorBottom = 0,
+            AnchorLeft = 1, AnchorRight = 1, AnchorTop = 0, AnchorBottom = 1,
             GrowHorizontal = Control.GrowDirection.Begin,
-            OffsetLeft = -262, OffsetRight = -10, OffsetTop = 10,
+            OffsetLeft = -262, OffsetRight = -10, OffsetTop = 10, OffsetBottom = -10,
         };
         panel.CustomMinimumSize = new Vector2(252, 0);
         parent.AddChild(panel);
-        var col = new VBoxContainer();
-        panel.AddChild(col);
+        var scroll = new ScrollContainer { HorizontalScrollMode = ScrollContainer.ScrollMode.Disabled };
+        panel.AddChild(scroll);
+        var col = new VBoxContainer { SizeFlagsHorizontal = Control.SizeFlags.ExpandFill };
+        col.CustomMinimumSize = new Vector2(232, 0);
+        scroll.AddChild(col);
 
         col.AddChild(ToolTheme.Header("PHYSICS"));
         Slider(col, "Sea level", -1.0, 1.0, 0.01, 0.0, v => { Root.Engine.Call("set_sea_level", v); Root.RebuildLiquid(); });
@@ -207,9 +283,60 @@ public partial class ToolUi : CanvasLayer
         Slider(col, "Warmth", 0.0, 1.0, 0.01, 0.5, v => Root.SetSunWarmth((float)v));
         Slider(col, "Hue tint", -0.5, 0.5, 0.01, 0.0, v => Root.SetSunHue((float)v));
 
+        BuildPaletteEditor(col);
+
         col.AddChild(ToolTheme.Header("MAP"));
         _minimap = new MinimapPanel { Root = Root };
         col.AddChild(_minimap);
+    }
+
+    /// Editor for the 7 shared base palettes: pick a family, then edit its 6 light→dark slots.
+    /// Changes recolour the whole world (the core flags every chunk dirty).
+    private void BuildPaletteEditor(VBoxContainer col)
+    {
+        col.AddChild(ToolTheme.Header("PALETTE"));
+        _palFamily = new OptionButton();
+        for (int i = 0; i < FamilyNames.Length; i++) _palFamily.AddItem(FamilyNames[i], i);
+        _palFamily.Selected = 0;
+        _palFamily.ItemSelected += _ => LoadPaletteColors();
+        col.AddChild(_palFamily);
+
+        _palPickers = new ColorPickerButton[SlotNames.Length];
+        for (int s = 0; s < SlotNames.Length; s++)
+        {
+            var row = new HBoxContainer();
+            var lbl = DimLabel(SlotNames[s]);
+            lbl.SizeFlagsHorizontal = Control.SizeFlags.ExpandFill;
+            row.AddChild(lbl);
+            var cp = new ColorPickerButton { CustomMinimumSize = new Vector2(46, 22) };
+            int slot = s;
+            cp.ColorChanged += c => OnPaletteColor(slot, c);
+            _palPickers[s] = cp;
+            row.AddChild(cp);
+            col.AddChild(row);
+        }
+        LoadPaletteColors();
+    }
+
+    private void LoadPaletteColors()
+    {
+        _loadingPalette = true; // setting .Color fires ColorChanged — don't write back while loading
+        int fam = _palFamily.Selected;
+        for (int s = 0; s < _palPickers.Length; s++)
+        {
+            var a = Root.Engine.Call("base_palette_color", fam, s).As<float[]>();
+            if (a.Length >= 3) _palPickers[s].Color = new Color(a[0], a[1], a[2]);
+        }
+        _loadingPalette = false;
+    }
+
+    private void OnPaletteColor(int slot, Color c)
+    {
+        if (_loadingPalette) return;
+        int fam = _palFamily.Selected;
+        Root.Engine.Call("set_base_palette_color", fam, slot, (double)c.R, (double)c.G, (double)c.B);
+        Root.RepaintDirtyTerrain();
+        _minimap?.Refresh();
     }
 
     public void RefreshMinimap() => _minimap?.Refresh();
@@ -333,6 +460,13 @@ public partial class ToolUi : CanvasLayer
     {
         var a = Root.Engine.Call("biome_color_of", id).As<float[]>();
         return a.Length >= 3 ? new Color(a[0], a[1], a[2]) : new Color(0.5f, 0.5f, 0.5f);
+    }
+
+    private static Label DimLabel(string text)
+    {
+        var l = new Label { Text = text };
+        l.AddThemeColorOverride("font_color", ToolTheme.InkDim);
+        return l;
     }
 
     private Button GhostButton(string text)
