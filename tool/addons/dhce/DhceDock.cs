@@ -18,6 +18,8 @@ public partial class DhceDock : ScrollContainer
 
     private Label _status;
     private Label _biomeReadout;
+    private Label _regionReadout;
+    private OptionButton _regionPick;
     private VBoxContainer _col;
     private readonly ButtonGroup _toolGroup = new();
     private readonly List<Button> _toolButtons = new();
@@ -36,7 +38,7 @@ public partial class DhceDock : ScrollContainer
     private int _simSubsteps = 10, _simTick;
     private const int SimEveryNFrames = 6;
 
-    private static readonly string[] ViewNames = { "Natural", "Temperature", "Moisture", "Elevation", "Biome" };
+    private static readonly string[] ViewNames = { "Natural", "Temperature", "Moisture", "Elevation", "Biome", "Region" };
     private static readonly int[] TraitEngineId = { 6, 7 };
     private static readonly string[] TraitNames = { "Vegetation", "Palette family" };
     private static readonly string[] LandNames = { "Jaggedness", "Relief", "Foothill falloff", "Erosion" };
@@ -92,6 +94,16 @@ public partial class DhceDock : ScrollContainer
         if (_biomeReadout != null) _biomeReadout.Text = string.IsNullOrEmpty(label) ? "Biome: —" : $"Biome: {label}";
     }
 
+    /// Live named-Region under the cursor (`-1` off-map, `0` unassigned, else a place id 1..14).
+    public void SetRegionReadout(long id)
+    {
+        if (_regionReadout == null) return;
+        _regionReadout.Text = id < 0 ? "Region: —"
+            : id == 0 ? "Region: unassigned"
+            : id <= BiomeNames.Length ? $"Region: {BiomeNames[(int)id - 1]}"
+            : "Region: ?";
+    }
+
     private bool HasWorld => _world != null && _world.Engine != null;
     private GodotObject Eng => _world.Engine;
 
@@ -110,6 +122,8 @@ public partial class DhceDock : ScrollContainer
         _col.AddChild(_status);
         _biomeReadout = Dim("Biome: —"); // emergent descriptor under the cursor (Stage 2)
         _col.AddChild(_biomeReadout);
+        _regionReadout = Dim("Region: —"); // named-Region (place) under the cursor (Stage 4)
+        _col.AddChild(_regionReadout);
 
         Header("SAVE / LOAD");
         Button(_col, "Save world", () => { if (_world != null) SetStatus(_world.SaveToDisk()); });
@@ -172,6 +186,19 @@ public partial class DhceDock : ScrollContainer
         var swatches = new GridContainer { Columns = 2 };
         _col.AddChild(swatches);
         for (int id = 1; id <= BiomeNames.Length; id++) swatches.AddChild(SwatchButton(id, BiomeNames[id - 1]));
+
+        Header("ASSIGN REGION (place)");
+        _col.AddChild(Dim("Pick a place, paint with the Region tool, then VIEW → Region to see them."));
+        _regionPick = new OptionButton();
+        for (int id = 1; id <= BiomeNames.Length; id++) _regionPick.AddItem(BiomeNames[id - 1], id);
+        _regionPick.Selected = 0;
+        _regionPick.ItemSelected += idx =>
+        {
+            _tool.RegionId = (int)_regionPick.GetItemId((int)idx);
+            _tool.Active = ToolKind.Region;
+            SetStatus($"Region tool: {BiomeNames[_tool.RegionId - 1]}");
+        };
+        _col.AddChild(_regionPick);
 
         Header("TRAIT BRUSH");
         _traitPick = Options(TraitNames, 0, idx => SelectTrait((int)idx));
@@ -296,6 +323,7 @@ public partial class DhceDock : ScrollContainer
             {
                 3 => "Use the sculpt tools to edit elevation.",
                 4 => "Use the Region swatches to stamp.",
+                5 => "Paint with the Region tool to assign named places.",
                 _ => "",
             };
         }

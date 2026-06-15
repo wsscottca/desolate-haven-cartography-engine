@@ -272,6 +272,22 @@ impl DhceEngine {
     fn paint_biome(&mut self, cx: f64, cy: f64, radius: f64, biome_id: i64) -> PackedInt32Array {
         u32_to_packed(&self.world.paint_biome(cx, cy, radius, biome_id.max(0) as u8))
     }
+    /// Brush: assign the footprint to named Region `region_id` (the Region tool; `VIEW_REGION` shows it).
+    #[func]
+    fn paint_region(&mut self, cx: f64, cy: f64, radius: f64, region_id: i64) -> PackedInt32Array {
+        u32_to_packed(&self.world.paint_region(cx, cy, radius, region_id.max(0) as u8))
+    }
+    /// Assign a set of cells (e.g. from `regions_in_polygon`) to named Region `region_id`.
+    #[func]
+    fn assign_region(&mut self, cells: PackedInt32Array, region_id: i64) {
+        let v: Vec<u32> = cells.to_vec().iter().map(|&c| c.max(0) as u32).collect();
+        self.world.assign_region(&v, region_id.max(0) as u8);
+    }
+    /// Named-Region id at world `(x, y)` (`0` unassigned, `-1` off-map).
+    #[func]
+    fn region_id_at(&self, x: f64, y: f64) -> i64 {
+        self.world.region_id_at(x, y)
+    }
     #[func]
     fn set_biome_color(&mut self, id: i64, r: f64, g: f64, b: f64) {
         self.world.set_biome_color(id.max(0) as usize, r as f32, g as f32, b as f32);
@@ -471,6 +487,14 @@ impl DhceEngine {
     #[func]
     fn set_biome_locked(&mut self, m: PackedByteArray) {
         self.world.set_biome_locked(&m.to_vec());
+    }
+    #[func]
+    fn region_export(&self) -> PackedByteArray {
+        PackedByteArray::from(self.world.region_export().as_slice())
+    }
+    #[func]
+    fn set_region(&mut self, r: PackedByteArray) {
+        self.world.set_region(&r.to_vec());
     }
     /// Export per-cell trait field `trait_id` (as in `paint_trait`) as f32, for save/load.
     #[func]

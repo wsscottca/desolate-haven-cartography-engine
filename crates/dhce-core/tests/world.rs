@@ -424,6 +424,31 @@ fn chunk_grid_and_centers_match_the_partition() {
 }
 
 #[test]
+fn region_tier_assigns_via_polygon_and_persists() {
+    // Stage 4: the named-Region tier — assign a polygon's cells to a Region, read it back, persist.
+    let mut w = built(); // 1000 × 1000
+    let cells = w.regions_in_polygon(&[100.0, 900.0, 900.0, 100.0], &[100.0, 100.0, 900.0, 900.0]);
+    assert!(!cells.is_empty(), "the polygon should enclose cells");
+
+    w.assign_region(&cells, 3);
+    assert_eq!(w.region_of(cells[0] as usize), 3, "assigned cell reports its Region");
+    assert_eq!(w.region_id_at(500.0, 500.0), 3, "centre of the polygon is in Region 3");
+    assert_eq!(w.region_id_at(500.0, 500.0) >= 0, true);
+
+    // A brush dab assigns too (the Region tool).
+    let painted = w.paint_region(500.0, 500.0, 100.0, 7);
+    assert!(!painted.is_empty());
+    assert_eq!(w.region_id_at(500.0, 500.0), 7, "brush re-assigned the centre to Region 7");
+
+    // Persistence round-trip.
+    let exp = w.region_export();
+    let mut b = built();
+    b.set_region(&exp);
+    assert_eq!(b.region_export(), exp, "Region membership round-trips");
+    assert_eq!(b.region_id_at(500.0, 500.0), 7, "the brushed centre (Region 7) survives the round-trip");
+}
+
+#[test]
 fn save_load_round_trips_authored_fields() {
     // R5 persistence: author a world, export every field, then rebuild a fresh world from the same
     // params and restore — the restored fields must be bit-identical (regenerate-then-overwrite).

@@ -289,6 +289,7 @@ public partial class DhceWorld : Node3D
             Elevation = _engine.Call("elevation_export").As<float[]>(),
             Biome = _engine.Call("biome_export").As<byte[]>(),
             BiomeLocked = _engine.Call("biome_locked_export").As<byte[]>(),
+            Region = _engine.Call("region_export").As<byte[]>(),
             LiquidDepth = _engine.Call("liquid_depth_export").As<float[]>(),
             LiquidKind = _engine.Call("liquid_kind_export").As<byte[]>(),
             CourseMask = _engine.Call("course_mask_export").As<byte[]>(),
@@ -315,6 +316,7 @@ public partial class DhceWorld : Node3D
         SetF("set_elevation", s.Elevation);
         SetB("set_biome", s.Biome);
         SetB("set_biome_locked", s.BiomeLocked);
+        SetB("set_region", s.Region);
         if (s.LiquidDepth is { Length: > 0 } && s.LiquidKind is { Length: > 0 })
             _engine.Call("set_liquid", s.LiquidDepth, s.LiquidKind);
         SetB("set_course_mask", s.CourseMask);

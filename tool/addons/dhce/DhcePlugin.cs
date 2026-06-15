@@ -93,6 +93,9 @@ public partial class DhcePlugin : EditorPlugin
         _dock?.SetBiomeReadout(onTerrain
             ? world.Engine.Call("biome_label_at", hits[0].X, hits[0].Z).AsString()
             : null);
+        _dock?.SetRegionReadout(onTerrain
+            ? world.Engine.Call("region_id_at", hits[0].X, hits[0].Z).AsInt64()
+            : -1);
 
         if (@event is InputEventMouseButton mb)
         {

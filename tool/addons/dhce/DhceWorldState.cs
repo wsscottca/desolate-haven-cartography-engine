@@ -27,6 +27,7 @@ public partial class DhceWorldState : Resource
     [Export] public float[] Elevation = System.Array.Empty<float>();
     [Export] public byte[] Biome = System.Array.Empty<byte>();
     [Export] public byte[] BiomeLocked = System.Array.Empty<byte>();
+    [Export] public byte[] Region = System.Array.Empty<byte>(); // named-Region (place) membership
     [Export] public float[] LiquidDepth = System.Array.Empty<float>();
     [Export] public byte[] LiquidKind = System.Array.Empty<byte>();
     [Export] public byte[] CourseMask = System.Array.Empty<byte>();

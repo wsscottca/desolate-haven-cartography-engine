@@ -152,14 +152,22 @@ Closes the gap flagged in Stage 3: the landform dials now reshape the terrain.
 
 ## Stage 4 — Border tool (scopes) + Region tier *(Rust core + C#)*
 
-**Files:** `world.rs` (+ test), `lib.rs`, `tool/scripts/` (border tool, Region panel, overlay).
+**Files:** `world.rs` (+ test), `lib.rs`, `tool/scripts/ToolState.cs`, `addons/dhce/{DhceDock,DhcePlugin,DhceWorld,DhceWorldState}.cs`.
 
-- Region table: the 14 canon names (from the guide), each with `--mk-*` accent + member cells; a
-  Region may span biomes. `assign_region(cells, region_id)`; `region_of(cell)`.
-- **Border tool** scoped Biome / Region / Territory (polygon via existing `regions_in_polygon`);
-  **Select** via existing `select_contiguous`. Border overlay drawn in the accent colour.
+- **Stage 4a — ✅ done (2026-06-15, in-editor).** The named-Region **tier** itself: a per-cell
+  `region_r: Vec<u8>` (0 = unassigned, 1..=BIOME_COUNT — the 14 canon places, distinct from `biome_r`;
+  a Region may span biomes). Core: `assign_region(cells, id)` (pairs with the existing
+  `regions_in_polygon`/`select_contiguous`), `region_of(cell)`, `region_id_at(x,y)`,
+  `paint_region(cx,cy,r,id)` (footprint brush, 3D-sphere falloff), `region_export`/`set_region`, and a
+  new **`VIEW_REGION`** that colours cells by their Region's accent (`biome_color_of`, grey if
+  unassigned). C#: a **Region** tool in `ToolState`/the brush path; an **ASSIGN REGION (place)** dock
+  picker (the 14 names); **VIEW → Region**; a live **"Region: …"** cursor readout; and Region
+  membership added to `DhceWorldState` Save/Load. Tests: `region_tier_assigns_via_polygon_and_persists`.
+- **⏳ Stage 4b — remaining:** the in-viewport **polygon "Territory" tool** (multi-click vertices →
+  `regions_in_polygon` → `assign_region`) and the **Select-to-reassign** flow (`select_contiguous`),
+  plus an **accent border overlay** mesh. (Brush + polygon both feed the same core `assign_region`.)
 
-**Tests:** polygon assignment; region membership; selection single-scope.
+**Tests:** polygon assignment ✅; region membership ✅; persistence ✅. (Selection-scope test with 4b.)
 
 ## Stage 5 — Per-trait editor panel + presets *(C#)*
 

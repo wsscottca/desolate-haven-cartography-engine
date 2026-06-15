@@ -39,6 +39,8 @@ pub const VIEW_TEMPERATURE: u8 = 1;
 pub const VIEW_MOISTURE: u8 = 2;
 pub const VIEW_ELEVATION: u8 = 3;
 pub const VIEW_BIOME: u8 = 4;
+/// Named-Region membership view: colour each cell by its Region's accent (grey if unassigned).
+pub const VIEW_REGION: u8 = 5;
 /// Shaping (landform dials → terrain height): noise frequencies (cycles across the map), max added
 /// normalized elevation at dial = 1, and erosion smoothing of the added detail. All deterministic
 /// (fbm2 + lerp / averaging). See [`World::shape_terrain`].
@@ -76,6 +78,11 @@ pub struct World {
     field: LiquidField,
     sea_level: f64,
     biome_r: Vec<u8>,
+    /// Per-cell **named-Region** membership (the canon places; `0` = unassigned, `1..=BIOME_COUNT`).
+    /// A distinct tier from `biome_r` (a Region may span biomes); painted via [`paint_region`] and
+    /// shown by `VIEW_REGION` in the Region's accent. Persisted; the seam future per-region level
+    /// slicing cuts on.
+    region_r: Vec<u8>,
     /// Representative swatch colour per Region preset (its `--mk-*` accent); for `biome_color_of`.
     biome_color: Vec<[f32; 3]>,
     /// The 7 shared base palettes (editable in the colour editor), indexed by `biomes::fam::*`.
@@ -192,6 +199,7 @@ impl World {
             field: LiquidField::new(0),
             sea_level: 0.0,
             biome_r: Vec::new(),
+            region_r: Vec::new(),
             biome_color,
             base_palettes: biomes::base_palettes().to_vec(),
             jaggedness_r: Vec::new(),
@@ -268,6 +276,7 @@ impl World {
             biome_r[r] = biomes::classify(self.elevation_r[r], moist, dist);
         }
         self.biome_r = biome_r;
+        self.region_r = vec![0u8; nr]; // named-Region tier starts unassigned; authored via paint_region
         self.moisture_r = moisture_r;
 
         // Seed the per-cell trait fields from each cell's classified Region preset (the author
@@ -720,6 +729,33 @@ impl World {
                 self.biome_r[ri] = biome_id;
                 if ri < self.biome_locked.len() {
                     self.biome_locked[ri] = true; // manual paint — protect from reclassify
+                }
+                touched.push(rid);
+            }
+        }
+        self.after_edit(&touched);
+        touched
+    }
+
+    /// Brush: assign every cell in the footprint to named Region `region_id` (the Region tool). Like
+    /// [`paint_biome`] but writes the Region tier (no biome lock); shows live under `VIEW_REGION`.
+    /// 3D-sphere falloff via the active brush state, consistent with the other footprint brushes.
+    pub fn paint_region(&mut self, cx: f64, cy: f64, radius: f64, region_id: u8) -> Vec<u32> {
+        if self.mesh.is_none() {
+            return Vec::new();
+        }
+        let r2 = radius * radius;
+        let candidates = self.brush_candidates(cx, cy, radius);
+        let (bexag, bhy) = (self.brush_exag, self.brush_hit_y);
+        let mesh = self.mesh.as_ref().unwrap();
+        let mut touched = Vec::new();
+        for &rid in &candidates {
+            let ri = rid as usize;
+            let p = mesh.pos_of_r(ri);
+            let dv = self.elevation_r[ri] * bexag - bhy; // 3D sphere: vertical term
+            if (p[0] - cx).powi(2) + (p[1] - cy).powi(2) + dv * dv < r2 {
+                if ri < self.region_r.len() {
+                    self.region_r[ri] = region_id;
                 }
                 touched.push(rid);
             }
@@ -1321,6 +1357,34 @@ impl World {
         }
     }
 
+    // --- named-Region tier (Stage 4): the canon places as cell-membership sets ---
+
+    /// Assign `cells` to named Region `region_id` (`0` clears; `1..=BIOME_COUNT`). Pair with
+    /// [`regions_in_polygon`] / [`select_contiguous`] for area assignment. Recolours the touched
+    /// cells (so `VIEW_REGION` updates live) and flags their chunks.
+    pub fn assign_region(&mut self, cells: &[u32], region_id: u8) {
+        let mut touched = Vec::with_capacity(cells.len());
+        for &c in cells {
+            let ci = c as usize;
+            if ci < self.region_r.len() {
+                self.region_r[ci] = region_id;
+                touched.push(c);
+            }
+        }
+        self.after_edit(&touched);
+    }
+    /// Named-Region id of `cell` (`0` if unassigned / out of range).
+    pub fn region_of(&self, cell: usize) -> u8 {
+        self.region_r.get(cell).copied().unwrap_or(0)
+    }
+    /// Named-Region id at world `(x, y)` (`0` unassigned, `-1` off-map) — for the cursor readout.
+    pub fn region_id_at(&self, x: f64, y: f64) -> i64 {
+        match self.region_at(x, y) {
+            Some(c) => self.region_r.get(c).copied().unwrap_or(0) as i64,
+            None => -1,
+        }
+    }
+
     /// Contiguous same-biome region ids reachable from `region` (flood select),
     /// excluding the boundary frame.
     pub fn select_contiguous(&self, region: usize) -> Vec<u32> {
@@ -1466,6 +1530,17 @@ impl World {
         }
     }
 
+    /// Export the named-Region membership (per-cell Region id) for save/load.
+    pub fn region_export(&self) -> Vec<u8> {
+        self.region_r.clone()
+    }
+    /// Restore named-Region membership (size must match the mesh).
+    pub fn set_region(&mut self, r: &[u8]) {
+        if r.len() == self.region_r.len() {
+            self.region_r.copy_from_slice(r);
+        }
+    }
+
     /// Export per-cell trait field `trait_id` (as in [`paint_trait`]: 0 jaggedness … 5 moisture
     /// scalars; 6 vegetation, 7 palette_family as enum indices) as `f32`, for save/load.
     pub fn trait_field_export(&self, trait_id: u32) -> Vec<f32> {
@@ -1606,6 +1681,11 @@ impl World {
             VIEW_BIOME => {
                 let id = self.biome_r.get(r).copied().unwrap_or(0) as usize;
                 return self.biome_color.get(id).copied().unwrap_or([0.5, 0.5, 0.5]);
+            }
+            VIEW_REGION => {
+                let id = self.region_r.get(r).copied().unwrap_or(0) as usize;
+                // Unassigned reads neutral grey; assigned cells take the Region's accent.
+                return if id == 0 { [0.32, 0.32, 0.34] } else { self.biome_color.get(id).copied().unwrap_or([0.5, 0.5, 0.5]) };
             }
             _ => {}
         }
