@@ -19,7 +19,11 @@ system (traits / biomes / shaping / data-views / hydrology). Only the C# shell c
 
 ---
 
-## Track 1 — Editor-plugin reshell *(headline; C# only — no DLL changes)*
+## Track 1 — Editor-plugin reshell *(headline)*
+
+> **Detailed staged plan: [dhce-editor-reshell.md](dhce-editor-reshell.md)** (R1–R6, persistence model,
+> the §7.6 directional-brush fix, gates). Persistence = a compact `DhceWorldState` resource the tool +
+> game both regenerate from. The summary below is superseded by that doc.
 
 **Files:** `addons/dhce/` (the shipped addon: `plugin.cfg`, EditorPlugin + scripts moved from
 `tool/scripts/`), `tool/` (becomes the dev/test host project with the addon enabled).
