@@ -11,6 +11,7 @@
 
 use dhce_core::fluid::LiquidSurface;
 use dhce_core::geometry::Surface;
+use dhce_core::scatter::{Instance, ScatterRule};
 use dhce_core::world::World;
 use godot::prelude::*;
 
@@ -609,12 +610,23 @@ impl DhceEngine {
     #[func]
     fn tessellate_scatter(&mut self, exaggeration: f64, density: f64, seed: f64) {
         let inst = self.world.scatter_instances(exaggeration, density, seed as u64);
-        let mut data = Vec::with_capacity(inst.len() * 5);
-        for i in &inst {
-            data.extend_from_slice(&[i.x, i.y, i.z, i.scale, i.species]);
-        }
-        self.scatter_n = inst.len();
-        self.scatter_buf = data;
+        self.pack_scatter(inst);
+    }
+    /// Rule-based scatter (the N3d library) over the whole world; read via `scatter_data`/`count`.
+    /// `rules_flat` is 8 floats per slot: `[slot, density, scale_min, scale_max, elev_min, elev_max,
+    /// veg_mask, region_mask]`. `Instance::species` (the 5th packed float) carries the slot index.
+    #[func]
+    fn tessellate_scatter_rules(&mut self, rules_flat: PackedFloat32Array, exaggeration: f64, seed: f64) {
+        let rules = parse_rules(&rules_flat);
+        let inst = self.world.scatter_by_rules(&rules, exaggeration, seed as u64);
+        self.pack_scatter(inst);
+    }
+    /// Rule-based scatter filtered to named Region `region_id` (for baking that Region's level).
+    #[func]
+    fn tessellate_region_scatter_rules(&mut self, region_id: i64, rules_flat: PackedFloat32Array, exaggeration: f64, seed: f64) {
+        let rules = parse_rules(&rules_flat);
+        let inst = self.world.region_scatter_by_rules(region_id.max(0) as u8, &rules, exaggeration, seed as u64);
+        self.pack_scatter(inst);
     }
     #[func]
     fn scatter_data(&self) -> PackedFloat32Array {
@@ -624,6 +636,37 @@ impl DhceEngine {
     fn scatter_count(&self) -> i64 {
         self.scatter_n as i64
     }
+}
+
+impl DhceEngine {
+    /// Pack scatter instances into the shared buffer (flat `[x, y, z, scale, species/slot]`).
+    fn pack_scatter(&mut self, inst: Vec<Instance>) {
+        let mut data = Vec::with_capacity(inst.len() * 5);
+        for i in &inst {
+            data.extend_from_slice(&[i.x, i.y, i.z, i.scale, i.species]);
+        }
+        self.scatter_n = inst.len();
+        self.scatter_buf = data;
+    }
+}
+
+/// Parse a flat scatter-rule array (8 floats per slot) into core [`ScatterRule`]s.
+fn parse_rules(flat: &PackedFloat32Array) -> Vec<ScatterRule> {
+    let v = flat.to_vec();
+    let mut out = Vec::with_capacity(v.len() / 8);
+    for c in v.chunks_exact(8) {
+        out.push(ScatterRule {
+            slot: c[0] as u32,
+            density: c[1] as f64,
+            scale_min: c[2] as f64,
+            scale_max: c[3] as f64,
+            elev_min: c[4] as f64,
+            elev_max: c[5] as f64,
+            veg_mask: c[6] as u32,
+            region_mask: c[7] as u32,
+        });
+    }
+    out
 }
 
 /// Pack `u32` region/triangle indices into a Godot `PackedInt32Array`.

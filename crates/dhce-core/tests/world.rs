@@ -449,6 +449,29 @@ fn region_tier_assigns_via_polygon_and_persists() {
 }
 
 #[test]
+fn rule_scatter_respects_vegetation_and_elevation() {
+    use dhce_core::scatter::ScatterRule;
+    let mut w = built();
+    w.paint_trait(500.0, 500.0, 300.0, 6, 3.0); // vegetation = Forest (enum id 6, value 3)
+
+    let forest = [ScatterRule {
+        slot: 0, density: 1.0, scale_min: 1.0, scale_max: 2.0,
+        elev_min: -10.0, elev_max: 10.0, veg_mask: 1 << 3 /* Forest */, region_mask: 0,
+    }];
+    let inst = w.scatter_by_rules(&forest, 100.0, 7);
+    assert!(!inst.is_empty(), "the forest rule places on the painted patch");
+    assert!(inst.iter().all(|i| i.species == 0.0), "all instances come from slot 0");
+    assert!(inst.iter().all(|i| i.scale >= 1.0 && i.scale <= 2.0), "scale respects the rule range");
+
+    // An elevation band above the terrain ceiling matches nothing.
+    let too_high = [ScatterRule {
+        slot: 0, density: 1.0, scale_min: 1.0, scale_max: 1.0,
+        elev_min: 5.0, elev_max: 10.0, veg_mask: 0, region_mask: 0,
+    }];
+    assert!(w.scatter_by_rules(&too_high, 100.0, 7).is_empty(), "no cell sits above elevation 5");
+}
+
+#[test]
 fn region_slicing_extracts_submesh_and_adjacency() {
     // Slicer core: per-Region terrain submesh + Region adjacency for the level export.
     let mut w = built(); // 1000 × 1000

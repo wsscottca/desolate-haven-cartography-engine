@@ -33,6 +33,78 @@ fn biome_decor(biome: u8) -> (f64, f32) {
     }
 }
 
+/// One authored scatter rule — a model slot's placement gate (the N3d scatter library). Bitmasks:
+/// `veg_mask` over the 7 vegetation enum values (`1 << veg`), `region_mask` over Region ids 1..=14
+/// (`1 << (region-1)`); a `0` mask means "any". `density` 0..1, `scale` range in world metres, `elev`
+/// band in normalized height. `species` on the produced [`Instance`] carries the `slot` index.
+#[derive(Clone, Copy, Debug)]
+pub struct ScatterRule {
+    pub slot: u32,
+    pub density: f64,
+    pub scale_min: f64,
+    pub scale_max: f64,
+    pub elev_min: f64,
+    pub elev_max: f64,
+    pub veg_mask: u32,
+    pub region_mask: u32,
+}
+
+/// Rule-based deterministic scatter: at most one instance per cell (first matching rule wins). The
+/// rng advances a fixed amount per cell, so placement is independent of which cells match (stable
+/// under edits). Determinism-safe: integer hashing + multiply/add/compare only.
+pub fn scatter_by_rules(
+    seed: u64,
+    mesh: &Mesh,
+    elevation: &[f64],
+    vegetation: &[u8],
+    region: &[u8],
+    rules: &[ScatterRule],
+    exaggeration: f64,
+) -> Vec<Instance> {
+    let mut out = Vec::new();
+    if rules.is_empty() {
+        return out;
+    }
+    let mut rng = Rng::new(seed ^ 0x5343_4154_5F52_554C); // "SCAT_RUL"
+    for r in 0..mesh.num_regions() {
+        let roll = rng.next_f64();
+        let jx = rng.next_f64();
+        let jy = rng.next_f64();
+        let sroll = rng.next_f64();
+        if mesh.is_boundary_r(r) {
+            continue;
+        }
+        let e = elevation.get(r).copied().unwrap_or(0.0);
+        let veg = vegetation.get(r).copied().unwrap_or(0) as u32;
+        let reg = region.get(r).copied().unwrap_or(0);
+        for rule in rules {
+            if e < rule.elev_min || e > rule.elev_max {
+                continue;
+            }
+            if rule.veg_mask != 0 && veg < 32 && rule.veg_mask & (1 << veg) == 0 {
+                continue;
+            }
+            if rule.region_mask != 0 && (reg == 0 || rule.region_mask & (1 << (reg as u32 - 1)) == 0) {
+                continue;
+            }
+            if roll >= rule.density {
+                continue;
+            }
+            let pos = mesh.pos_of_r(r);
+            let scale = rule.scale_min + (rule.scale_max - rule.scale_min) * sroll;
+            out.push(Instance {
+                x: (pos[0] + (jx - 0.5) * 6.0) as f32,
+                y: (pos[1] + (jy - 0.5) * 6.0) as f32,
+                z: (e * exaggeration) as f32,
+                scale: scale as f32,
+                species: rule.slot as f32,
+            });
+            break; // one decoration per cell
+        }
+    }
+    out
+}
+
 /// Scatter decoration instances over land regions, deterministic in `seed`.
 /// `density` (0..1) globally scales placement; `exaggeration` lifts each instance to
 /// its terrain height.

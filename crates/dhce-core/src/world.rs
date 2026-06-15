@@ -2094,6 +2094,23 @@ impl World {
             .collect()
     }
 
+    /// Rule-based scatter (the N3d model-slot library): deterministic placement from authored rules
+    /// over the trait fields (vegetation / region / elevation). `Instance::species` is the slot index.
+    pub fn scatter_by_rules(&self, rules: &[scatter::ScatterRule], exaggeration: f64, seed: u64) -> Vec<Instance> {
+        match &self.mesh {
+            Some(mesh) => scatter::scatter_by_rules(seed, mesh, &self.elevation_r, &self.vegetation_r, &self.region_r, rules, exaggeration),
+            None => Vec::new(),
+        }
+    }
+
+    /// Rule-based scatter filtered to named Region `region_id` (for baking that Region's level).
+    pub fn region_scatter_by_rules(&self, region_id: u8, rules: &[scatter::ScatterRule], exaggeration: f64, seed: u64) -> Vec<Instance> {
+        self.scatter_by_rules(rules, exaggeration, seed)
+            .into_iter()
+            .filter(|i| self.region_at(i.x as f64, i.y as f64).map(|c| self.region_of(c) == region_id).unwrap_or(false))
+            .collect()
+    }
+
     // --- liquid rendering chunks (mirror the terrain chunk path) ---
 
     /// Mark the liquid render caches stale and flag the chunks of `regions` for re-tessellation.
