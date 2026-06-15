@@ -25,4 +25,8 @@ public partial class DhceScatterSlot : Resource
     [Export(PropertyHint.Flags, "Barren,Grass,Scrub,Forest,Evergreen,Marsh,Thorn")] public int VegetationMask = 0;
     /// Bitmask over Region ids 1..14 (`1 << (id-1)`); 0 = any.
     [Export] public int RegionMask = 0;
+
+    /// Bake as individual selectable `MeshInstance3D` nodes (hand-editable in the game) instead of one
+    /// instanced `MultiMesh`. Heavy for dense cover — capped at export; leave off for ground cover.
+    [Export] public bool BakeAsInstances = false;
 }

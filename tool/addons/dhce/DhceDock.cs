@@ -42,6 +42,7 @@ public partial class DhceDock : ScrollContainer
     private SpinBox _slotScaleMin, _slotScaleMax, _slotElevMin, _slotElevMax;
     private CheckBox[] _slotVeg;
     private CheckButton _scatterPreview;
+    private CheckBox _slotInstances;
     private bool _loadingSlot;
     private bool _loadingPalette, _loadingLandform;
 
@@ -509,6 +510,10 @@ public partial class DhceDock : ScrollContainer
         }
         _col.AddChild(vegGrid);
 
+        _slotInstances = new CheckBox { Text = "Bake as individual instances (hand-editable)" };
+        _slotInstances.Toggled += on => { var s = SelectedSlot(); if (s != null && !_loadingSlot) s.BakeAsInstances = on; };
+        _col.AddChild(_slotInstances);
+
         _scatterPreview = new CheckButton { Text = "Preview scatter (low-poly)" };
         _scatterPreview.Toggled += on => _world?.PreviewScatter(on);
         _col.AddChild(_scatterPreview);
@@ -576,6 +581,7 @@ public partial class DhceDock : ScrollContainer
         _slotElevMin.Value = s.ElevMin;
         _slotElevMax.Value = s.ElevMax;
         for (int i = 0; i < _slotVeg.Length; i++) _slotVeg[i].ButtonPressed = (s.VegetationMask & (1 << i)) != 0;
+        _slotInstances.ButtonPressed = s.BakeAsInstances;
         _loadingSlot = false;
     }
 

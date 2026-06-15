@@ -280,7 +280,7 @@ public partial class DhceWorld : Node3D
         _engine.Call("tessellate_scatter_rules", Scatter.ToRulesFlat(), (double)_exaggeration, (double)Seed);
         var data = _engine.Call("scatter_data").As<float[]>();
         int count = _engine.Call("scatter_count").As<int>();
-        foreach (var node in DhceLevelSlicer.BuildScatterMeshes(Scatter, data, count, 30000, preferProxy: true))
+        foreach (var node in DhceLevelSlicer.BuildScatterMeshes(Scatter, data, count, 30000, preferProxy: true, embed: false))
         {
             AddChild(node); // owner left null → ephemeral preview, not serialized
             _scatterPreview.Add(node);

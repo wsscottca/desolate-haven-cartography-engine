@@ -103,7 +103,7 @@ public static class DhceLevelSlicer
         if (lib != null && lib.Slots.Count > 0)
         {
             engine.Call("tessellate_region_scatter_rules", id, lib.ToRulesFlat(), (double)exag, (double)world.Seed);
-            foreach (var node in BuildScatterMeshes(lib, engine.Call("scatter_data").As<float[]>(), engine.Call("scatter_count").As<int>(), int.MaxValue, preferProxy: false))
+            foreach (var node in BuildScatterMeshes(lib, engine.Call("scatter_data").As<float[]>(), engine.Call("scatter_count").As<int>(), int.MaxValue, preferProxy: false, embed: true))
                 Adopt(root, node);
         }
         else
@@ -150,13 +150,18 @@ public static class DhceLevelSlicer
         return mm;
     }
 
-    /// Build one MultiMeshInstance3D per slot from packed scatter `[x, y(core), z(height), scale,
-    /// slot]` data. `preferProxy` picks the slot's low-poly proxy (editor) over its real mesh (bake);
-    /// the chosen `MeshPath` is recorded as `mesh_path` metadata so the game can re-bind its own asset.
+    private const int InstanceBakeCap = 6000; // per-slot safety cap when baking individual instances
+
+    /// Build scatter nodes per slot from packed `[x, y(core), z(height), scale, slot]` data.
+    /// `preferProxy` picks the slot's low-poly proxy (editor preview) over its real mesh (bake).
+    /// `embed` (bake) duplicates the mesh so it loses its `res://` path and **saves inline** in the
+    /// level `.tscn` — self-contained for the game, no tool asset needed — and honours a slot's
+    /// `BakeAsInstances` (individual `MeshInstance3D`s, capped) vs one instanced `MultiMesh`. The
+    /// source `MeshPath` is recorded as `mesh_path` meta so the game can swap to its own asset/LOD.
     /// `cap` limits total instances (editor preview). Shared by the slicer bake + the editor preview.
-    public static List<MultiMeshInstance3D> BuildScatterMeshes(DhceScatterLibrary lib, float[] data, int count, int cap, bool preferProxy)
+    public static List<Node3D> BuildScatterMeshes(DhceScatterLibrary lib, float[] data, int count, int cap, bool preferProxy, bool embed)
     {
-        var nodes = new List<MultiMeshInstance3D>();
+        var nodes = new List<Node3D>();
         if (count <= 0 || lib == null) return nodes;
         int use = Mathf.Min(count, cap);
         var bySlot = new Dictionary<int, List<Transform3D>>();
@@ -171,13 +176,29 @@ public static class DhceLevelSlicer
         foreach (var kv in bySlot)
         {
             var slot = kv.Key >= 0 && kv.Key < lib.Slots.Count ? lib.Slots[kv.Key] : null;
-            string path = slot == null ? "" : preferProxy && !string.IsNullOrEmpty(slot.ProxyMeshPath) ? slot.ProxyMeshPath : slot.MeshPath;
+            string path = slot == null ? "" : (preferProxy && !string.IsNullOrEmpty(slot.ProxyMeshPath)) ? slot.ProxyMeshPath : slot.MeshPath;
             Mesh mesh = LoadMesh(path) ?? (preferProxy ? null : LoadMesh(slot?.ProxyMeshPath)) ?? FallbackProxyMesh();
-            var mm = new MultiMesh { TransformFormat = MultiMesh.TransformFormatEnum.Transform3D, Mesh = mesh, InstanceCount = kv.Value.Count };
-            for (int k = 0; k < kv.Value.Count; k++) mm.SetInstanceTransform(k, kv.Value[k]);
-            var mmi = new MultiMeshInstance3D { Name = $"Scatter_{Sanitize(slot?.Name ?? kv.Key.ToString())}", Multimesh = mm };
-            if (slot != null && !string.IsNullOrEmpty(slot.MeshPath)) mmi.SetMeta("mesh_path", slot.MeshPath);
-            nodes.Add(mmi);
+            if (embed && mesh != null) mesh = (Mesh)mesh.Duplicate(true); // embed inline in the saved scene
+            string name = Sanitize(slot?.Name ?? kv.Key.ToString());
+
+            if (embed && slot != null && slot.BakeAsInstances)
+            {
+                int n = Mathf.Min(kv.Value.Count, InstanceBakeCap);
+                for (int k = 0; k < n; k++)
+                {
+                    var mi = new MeshInstance3D { Name = $"Scatter_{name}_{k}", Mesh = mesh, Transform = kv.Value[k] };
+                    if (!string.IsNullOrEmpty(slot.MeshPath)) mi.SetMeta("mesh_path", slot.MeshPath);
+                    nodes.Add(mi);
+                }
+            }
+            else
+            {
+                var mm = new MultiMesh { TransformFormat = MultiMesh.TransformFormatEnum.Transform3D, Mesh = mesh, InstanceCount = kv.Value.Count };
+                for (int k = 0; k < kv.Value.Count; k++) mm.SetInstanceTransform(k, kv.Value[k]);
+                var mmi = new MultiMeshInstance3D { Name = $"Scatter_{name}", Multimesh = mm };
+                if (slot != null && !string.IsNullOrEmpty(slot.MeshPath)) mmi.SetMeta("mesh_path", slot.MeshPath);
+                nodes.Add(mmi);
+            }
         }
         return nodes;
     }
@@ -278,11 +299,9 @@ public static class DhceLevelSlicer
         return string.IsNullOrEmpty(dir) ? DefaultExportDir() : System.IO.Path.GetFullPath(dir);
     }
 
-    /// The sibling game repo's root by default (…/projects/godot/desolate-haven).
-    public static string DefaultExportDir()
-    {
-        string toolDir = ProjectSettings.GlobalizePath("res://");
-        return System.IO.Path.GetFullPath(System.IO.Path.Combine(toolDir, "..", "..", "desolate-haven"));
-    }
+    /// A **tool-local** export folder by default (`res://exports`). Levels bake self-contained (meshes
+    /// embedded), so the owner can copy them into the game project by hand — the tool never writes into
+    /// another project. Change the dock path field to point elsewhere when you choose to.
+    public static string DefaultExportDir() => ProjectSettings.GlobalizePath("res://exports");
 }
 #endif

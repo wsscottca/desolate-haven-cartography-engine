@@ -11,6 +11,13 @@ owner: wsscottca
 > per-Region `.tscn` with mesh + trimesh collider + water + scatter proxies, master `DhceWorldState`,
 > `regions.json` manifest) + the dock **SLICE LEVELS** section (selectable path). Gates/game-loading
 > remain future (gameplay phase). Running an actual slice (file output) is the user's visual check.
+>
+> **N4 cleanup (2026-06-15):** baked meshes (terrain/water/scatter) are duplicated so they **embed
+> inline** in the level `.tscn` — each level is **self-contained**, so the game needs no tool asset and
+> there's no cross-project asset plumbing (scatter source meshes just need to import in the *tool*
+> project). Scatter slots can **bake as individual `MeshInstance3D`s** (capped) instead of a MultiMesh
+> for hand-editable cover. The export path defaults to a **tool-local** folder (`res://exports`) — the
+> tool never writes into the game repo; the owner copies levels over by hand.
 
 Slice the authored whole-world `DhceWorldState` into **per-Region level scenes** for the (not
 open-world) *Desolate Haven* game: each canon Region (the Stage 4 `region_r` tier) becomes its own

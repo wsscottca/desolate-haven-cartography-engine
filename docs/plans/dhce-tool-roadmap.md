@@ -132,12 +132,16 @@ the per-dab timing line still prints.
   transitions, data views, biome classifier, the **Region tier**, and **N3d scatter** (model-slot
   library + low-poly preview + real-mesh bake). See [n3-biome-traits.md](n3-biome-traits.md) +
   [n3-tooling-design.md](../specs/n3-tooling-design.md).
-- **N4 — export pipeline — ⚠️ MOSTLY DONE via the reshell, remainder open.** The **per-Region level
-  slicer** ([dhce-region-slicing.md](../specs/dhce-region-slicing.md)) bakes terrain `ArrayMesh` +
-  trimesh collider + water + **per-slot scatter `MultiMesh`** into a `.tscn` per Region, writes the
-  master `DhceWorldState` (R5 save/load) + a `regions.json` adjacency manifest. **Outstanding:**
-  bake-to-**individual selectable instances** (vs MultiMesh), merged-mesh / export-granularity option,
-  and **cross-project scatter-asset resolution** (tool `res://` ↔ game repo).
+- **N4 — export pipeline — ✅ DONE.** The **per-Region level slicer**
+  ([dhce-region-slicing.md](../specs/dhce-region-slicing.md)) bakes terrain `ArrayMesh` + trimesh
+  collider + water + **per-slot scatter `MultiMesh`** into a `.tscn` per Region, writes the master
+  `DhceWorldState` (R5 save/load) + a `regions.json` adjacency manifest. Cleanup (2026-06-15): baked
+  meshes are **duplicated to embed inline** → each level `.tscn` is **self-contained** (no tool asset
+  needed by the game — which also dissolves the cross-project-asset problem without touching the game
+  repo); a per-slot **Bake-as-individual-instances** toggle (capped) for hand-editable cover; the
+  export path defaults **tool-local** (`res://exports`), so the tool never writes into another project
+  (the owner copies levels over by hand). Export **granularity** = per-Region (the slicing model is the
+  answer). *(Optional later: a single merged-mesh-per-level mode — not needed now.)*
 - **N5 — Volumetric features — ❌ NOT STARTED (the big forgotten one).** Authored caves / overhangs /
   tunnels carved into the heightfield (hybrid; local SDF / marching-cubes / CSG carve, merged on
   export). See [ADR 0003](../adr/0003-edit-streaming-and-godot-export.md) §5.
