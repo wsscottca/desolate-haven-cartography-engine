@@ -49,7 +49,7 @@ fn paint_terrain_reports_and_raises_its_footprint() {
 fn minimap_is_rgba_and_non_empty() {
     let w = built();
     let n = 64;
-    let img = w.minimap(n);
+    let img = w.minimap(n, -0.7, -0.7);
     assert_eq!(img.len(), n * n * 4, "RGBA, n*n*4 bytes");
     // At least some on-map cells are opaque (alpha = 255).
     let opaque = (0..n * n).filter(|&i| img[i * 4 + 3] == 255).count();

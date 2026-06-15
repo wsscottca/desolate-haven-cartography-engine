@@ -274,8 +274,8 @@ impl DhceEngine {
     /// Top-down minimap as an `n×n` RGBA byte buffer (biome colour + hill-shade + contours +
     /// liquid). C#: `Image.CreateFromData(n, n, false, Image.Format.Rgba8, bytes)`.
     #[func]
-    fn minimap(&self, n: i64) -> PackedByteArray {
-        PackedByteArray::from(self.world.minimap(n.max(1) as usize).as_slice())
+    fn minimap(&self, n: i64, light_x: f64, light_y: f64) -> PackedByteArray {
+        PackedByteArray::from(self.world.minimap(n.max(1) as usize, light_x, light_y).as_slice())
     }
     #[func]
     fn biome_at(&self, region: i64) -> i64 {

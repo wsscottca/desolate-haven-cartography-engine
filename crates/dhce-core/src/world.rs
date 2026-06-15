@@ -587,7 +587,7 @@ impl World {
     /// Render a top-down minimap as an `n×n` RGBA image (row-major; row 0 = north, y = 0):
     /// smoothed biome colour, NW hill-shading, elevation contour lines, and any painted liquid
     /// (blue water / orange lava) overlaid. Drives the overview map panel. Empty until built.
-    pub fn minimap(&self, n: usize) -> Vec<u8> {
+    pub fn minimap(&self, n: usize, light_x: f64, light_y: f64) -> Vec<u8> {
         let mut out = vec![0u8; n * n * 4];
         if self.mesh.is_none() || n == 0 {
             return out;
@@ -633,7 +633,7 @@ impl World {
                 let yd = if gy + 1 < n { at(gx, gy + 1) } else { e };
                 let dzdx = if xr.is_nan() || xl.is_nan() { 0.0 } else { xr - xl };
                 let dzdy = if yd.is_nan() || yu.is_nan() { 0.0 } else { yd - yu };
-                let shade = (0.5 + (-dzdx - dzdy) * 6.0).clamp(0.35, 1.25);
+                let shade = (0.62 + (dzdx * light_x + dzdy * light_y) * 7.0).clamp(0.4, 1.3);
                 cr *= shade;
                 cg *= shade;
                 cb *= shade;
@@ -645,6 +645,17 @@ impl World {
                     cr *= 0.5;
                     cg *= 0.5;
                     cb *= 0.5;
+                }
+
+                // Depth cue: a cell just below a higher contour (to the north) is shaded — reads
+                // as "under" the line so relief doesn't look inverted.
+                if gy > 0 {
+                    let up = elev[(gy - 1) * n + gx];
+                    if !up.is_nan() && band(up) > band(e) {
+                        cr *= 0.8;
+                        cg *= 0.8;
+                        cb *= 0.8;
+                    }
                 }
 
                 // Painted-liquid overlay.

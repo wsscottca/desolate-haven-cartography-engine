@@ -199,6 +199,14 @@ public partial class ToolUi : CanvasLayer
         _simulate = new CheckButton { Text = "Simulate" };
         col.AddChild(_simulate);
 
+        col.AddChild(ToolTheme.Header("SUN"));
+        var sunHint = new Label { Text = "Drag the sun sphere in the sky to move it.", AutowrapMode = TextServer.AutowrapMode.WordSmart };
+        sunHint.AddThemeColorOverride("font_color", ToolTheme.InkDim);
+        col.AddChild(sunHint);
+        Slider(col, "Brightness", 0.0, 2.0, 0.05, 1.0, v => Root.SetSunBrightness((float)v));
+        Slider(col, "Warmth", 0.0, 1.0, 0.01, 0.5, v => Root.SetSunWarmth((float)v));
+        Slider(col, "Hue tint", -0.5, 0.5, 0.01, 0.0, v => Root.SetSunHue((float)v));
+
         col.AddChild(ToolTheme.Header("MAP"));
         _minimap = new MinimapPanel { Root = Root };
         col.AddChild(_minimap);

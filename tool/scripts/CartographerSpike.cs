@@ -89,6 +89,10 @@ public partial class CartographerSpike : Node3D
     public Vector3 CameraFocus => _cam?.FocusPoint ?? new Vector3(_widthM * 0.5f, 0f, _heightM * 0.5f);
     public float WorldWidthM => _widthM;
     public float WorldHeightM => _heightM;
+    public Vector2 SunMapDir => _sun?.MapDir ?? new Vector2(0.7f, 0.7f);
+    public void SetSunBrightness(float v) => _sun?.SetBrightness(v);
+    public void SetSunWarmth(float v) => _sun?.SetWarmth(v);
+    public void SetSunHue(float v) => _sun?.SetHue(v);
 
     /// Recenter the camera over a ground point (overview look-down) at a sensible altitude — the
     /// minimap calls this on click to fly there.
@@ -113,6 +117,8 @@ public partial class CartographerSpike : Node3D
     private Node3D _brush;
     private MeshInstance3D _brushFill, _brushRim;
     private StandardMaterial3D _brushFillMat, _brushRimMat;
+    private WorldSun _sun;
+    private bool _sunDragging;
 
     public override void _Ready()
     {
@@ -267,8 +273,10 @@ public partial class CartographerSpike : Node3D
         env.Set("ambient_light_energy", 1.2f);
         AddChild(new WorldEnvironment { Environment = env });
 
-        AddSun(new Vector3(-50, -40, 0), 0.9f);
-        AddSun(new Vector3(-85, 20, 0), 0.4f);
+        _sun = new WorldSun();
+        AddChild(_sun);
+        _sun.Configure(new Vector3(_widthM * 0.5f, 0f, _heightM * 0.5f), Mathf.Max(_widthM, _heightM));
+        AddSun(new Vector3(-85, 20, 0), 0.35f); // dim fixed fill so shadowed faces aren't pure black
 
         _cam = new OrbitCamera();
         AddChild(_cam);
@@ -503,12 +511,57 @@ public partial class CartographerSpike : Node3D
     {
         if (e is InputEventMouseButton mb && mb.ButtonIndex == MouseButton.Left)
         {
-            if (mb.Pressed) { _painting = true; _strokeTouchedLiquid = false; _hasLastPaint = false; PaintAt(mb.Position); }
-            else { _painting = false; EndStroke(); _ui?.RefreshMinimap(); }
+            if (mb.Pressed)
+            {
+                if (SunPick(mb.Position)) { _sunDragging = true; return; } // grabbed the sun — don't paint
+                _painting = true; _strokeTouchedLiquid = false; _hasLastPaint = false; PaintAt(mb.Position);
+            }
+            else
+            {
+                _sunDragging = false;
+                if (_painting) { _painting = false; EndStroke(); _ui?.RefreshMinimap(); }
+            }
             return;
         }
         if (e is InputEventMouseMotion mm && (mm.ButtonMask & MouseButtonMask.Left) != 0)
-            PaintAt(mm.Position);
+        {
+            if (_sunDragging) DragSun(mm.Position);
+            else PaintAt(mm.Position);
+        }
+    }
+
+    /// True if `screen` is over the sun sphere (screen-space pick) — grabs it for dragging.
+    private bool SunPick(Vector2 screen)
+    {
+        if (_sun == null) return false;
+        var cam = GetViewport().GetCamera3D();
+        if (cam == null) return false;
+        Vector3 sp = _sun.SunWorldPos;
+        if (cam.IsPositionBehind(sp)) return false;
+        return screen.DistanceTo(cam.UnprojectPosition(sp)) < 55f;
+    }
+
+    /// Move the sun to where the cursor points on the sky dome (a sphere of the sun's radius about
+    /// the world centre), then refresh the minimap shading.
+    private void DragSun(Vector2 screen)
+    {
+        if (_sun == null) return;
+        var cam = GetViewport().GetCamera3D();
+        if (cam == null) return;
+        Vector3 o = cam.ProjectRayOrigin(screen);
+        Vector3 d = cam.ProjectRayNormal(screen);
+        Vector3 c = _sun.Center;
+        float r = _sun.Radius;
+        Vector3 oc = o - c;
+        float b = oc.Dot(d);
+        float disc = b * b - (oc.Dot(oc) - r * r);
+        if (disc < 0f) return;
+        float t = -b + Mathf.Sqrt(disc); // exit point (camera sits inside the sky sphere)
+        if (t <= 0f) return;
+        Vector3 dir = (o + d * t - c).Normalized();
+        if (dir.Y < 0.05f) dir.Y = 0.05f; // keep the sun above the horizon
+        _sun.SetDirToSun(dir.Normalized());
+        _ui?.RefreshMinimap();
     }
 
     private void PaintAt(Vector2 screen)

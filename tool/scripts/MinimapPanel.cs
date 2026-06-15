@@ -27,7 +27,8 @@ public partial class MinimapPanel : Control
     public void Refresh()
     {
         if (Root?.Engine == null) return;
-        var bytes = Root.Engine.Call("minimap", N).As<byte[]>();
+        Vector2 dir = Root.SunMapDir; // minimap shades faces by the 3D sun's direction
+        var bytes = Root.Engine.Call("minimap", N, (double)dir.X, (double)dir.Y).As<byte[]>();
         if (bytes.Length != N * N * 4) return;
         var img = Image.CreateFromData(N, N, false, Image.Format.Rgba8, bytes);
         _tex = ImageTexture.CreateFromImage(img);
