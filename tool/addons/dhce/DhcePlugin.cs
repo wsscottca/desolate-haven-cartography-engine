@@ -16,6 +16,7 @@ public partial class DhcePlugin : EditorPlugin
     private readonly ToolState _tool = new();   // shared by the dock and the viewport picking
     private DhceWorld _edited;                   // the selected/edited DhceWorld (drives picking)
     private bool _painting;                      // a left-drag stroke is in progress
+    private bool _needRepaint, _needLiquid;      // coalesce brush-stroke re-tessellation to once/frame
     private MeshInstance3D _gizmo;               // brush-footprint ring under the cursor (ephemeral)
     private readonly List<Vector3> _polyVerts = new(); // in-progress Territory polygon (ground points)
     private MeshInstance3D _polyLine;            // polygon outline overlay (ephemeral)
@@ -48,6 +49,13 @@ public partial class DhcePlugin : EditorPlugin
         var world = FindWorld();
         _dock?.Bind(world);
         _dock?.SimTick();
+        _dock?.FlushDeferred(); // apply coalesced palette edits once per frame
+        // Flush the coalesced brush-stroke re-tessellation once per frame.
+        if (_edited != null && _edited.GenDone)
+        {
+            if (_needRepaint) { _edited.RepaintDirtyTerrain(); _needRepaint = false; }
+            if (_needLiquid) { _edited.RebuildLiquid(); _needLiquid = false; }
+        }
         if (world == null || !world.GenDone) return;
         var cam = GetEditorCamera();
         if (cam != null)
@@ -174,8 +182,10 @@ public partial class DhcePlugin : EditorPlugin
         }
 
         EditResult res = _tool.Apply(world.Engine, hit, world.Exaggeration);
-        if ((res & EditResult.Terrain) != 0) world.RepaintDirtyTerrain();
-        if ((res & EditResult.Liquid) != 0) world.RebuildLiquid();
+        // Coalesce: a fast drag dabs several times per frame; flush the re-tessellation once in
+        // _Process so a chunk is rebuilt at most once a frame (the core accumulates dirty chunks).
+        if ((res & EditResult.Terrain) != 0) _needRepaint = true;
+        if ((res & EditResult.Liquid) != 0) _needLiquid = true;
         return stop;
     }
 

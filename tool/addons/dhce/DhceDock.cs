@@ -45,6 +45,7 @@ public partial class DhceDock : ScrollContainer
     private CheckButton _scatterPreview;
     private CheckBox _slotInstances;
     private bool _loadingSlot;
+    private readonly Dictionary<int, Color> _palettePending = new(); // coalesce rapid ColorPicker drags
     private bool _loadingPalette, _loadingLandform;
 
     private double _shapeStrength = 1.0, _transitionWidthM = 200, _simFlow = 0.45, _simEvap = 0.001;
@@ -457,8 +458,20 @@ public partial class DhceDock : ScrollContainer
 
     private void OnPaletteColor(int slot, Color c)
     {
-        if (_loadingPalette || !HasWorld) return;
-        Eng.Call("set_base_palette_color", _palFamily.Selected, slot, (double)c.R, (double)c.G, (double)c.B);
+        // Defer: a ColorPicker drag fires many ColorChanged/frame; FlushDeferred applies once/frame
+        // (one 1.7M-cell recolor + minimap render instead of many) — smooth palette editing.
+        if (_loadingPalette) return;
+        _palettePending[slot] = c;
+    }
+
+    /// Apply any coalesced edits (palette) — called once per frame by the plugin's _Process.
+    public void FlushDeferred()
+    {
+        if (_palettePending.Count == 0 || !HasWorld) return;
+        int fam = _palFamily.Selected;
+        foreach (var kv in _palettePending)
+            Eng.Call("set_base_palette_color", fam, kv.Key, (double)kv.Value.R, (double)kv.Value.G, (double)kv.Value.B);
+        _palettePending.Clear();
         _world.RepaintDirtyTerrain();
         _minimap?.Refresh();
     }
