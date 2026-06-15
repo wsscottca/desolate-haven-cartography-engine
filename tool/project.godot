@@ -24,6 +24,10 @@ window/size/mode=2
 
 project/assembly_name="DhceCartographer"
 
+[editor_plugins]
+
+enabled=PackedStringArray("res://addons/dhce/plugin.cfg")
+
 [rendering]
 
 renderer/rendering_method="gl_compatibility"
