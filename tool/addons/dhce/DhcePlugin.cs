@@ -104,6 +104,9 @@ public partial class DhcePlugin : EditorPlugin
             if (onTerrain) hit = hits[0];
             _dock?.SetBiomeReadout(onTerrain ? world.Engine.Call("biome_label_at", hit.X, hit.Z).AsString() : null);
             _dock?.SetRegionReadout(onTerrain ? world.Engine.Call("region_id_at", hit.X, hit.Z).AsInt64() : -1);
+            _dock?.SetTraitReadout(
+                onTerrain ? world.Engine.Call("trait_at", hit.X, hit.Z, 4).AsDouble() : double.NaN,
+                onTerrain ? world.Engine.Call("trait_at", hit.X, hit.Z, 5).AsDouble() : double.NaN);
         }
 
         // Polygon Territory tool owns clicks; no brush gizmo while it's active.

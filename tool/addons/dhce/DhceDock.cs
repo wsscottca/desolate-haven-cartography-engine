@@ -19,6 +19,7 @@ public partial class DhceDock : ScrollContainer
     private Label _status;
     private Label _biomeReadout;
     private Label _regionReadout;
+    private Label _traitReadout;
     private OptionButton _regionPick;
     private VBoxContainer _col;
     private readonly ButtonGroup _toolGroup = new();
@@ -40,8 +41,8 @@ public partial class DhceDock : ScrollContainer
     private const int SimEveryNFrames = 6;
 
     private static readonly string[] ViewNames = { "Natural", "Temperature", "Moisture", "Elevation", "Biome", "Region" };
-    private static readonly int[] TraitEngineId = { 6, 7 };
-    private static readonly string[] TraitNames = { "Vegetation", "Palette family" };
+    private static readonly int[] TraitEngineId = { 4, 5, 6, 7 };
+    private static readonly string[] TraitNames = { "Temperature", "Moisture", "Vegetation", "Palette family" };
     private static readonly string[] LandNames = { "Jaggedness", "Relief", "Foothill falloff", "Erosion" };
     private static readonly string[] VegNames = { "Barren", "Grass", "Scrub", "Forest", "Evergreen", "Marsh", "Thorn" };
     private static readonly string[] FamilyNames = { "Verdant", "Arid", "Stone", "Ashen", "Frost", "Wetland", "Exotic" };
@@ -105,6 +106,15 @@ public partial class DhceDock : ScrollContainer
             : "Region: ?";
     }
 
+    /// Live numeric trait inspector (temperature / moisture) under the cursor; NaN ⇒ off-map.
+    public void SetTraitReadout(double temperature, double moisture)
+    {
+        if (_traitReadout == null) return;
+        _traitReadout.Text = double.IsNaN(temperature)
+            ? "Temp/Moist: —"
+            : $"Temp/Moist: {temperature:0.00} / {moisture:0.00}";
+    }
+
     private bool HasWorld => _world != null && _world.Engine != null;
     private GodotObject Eng => _world.Engine;
 
@@ -125,6 +135,8 @@ public partial class DhceDock : ScrollContainer
         _col.AddChild(_biomeReadout);
         _regionReadout = Dim("Region: —"); // named-Region (place) under the cursor (Stage 4)
         _col.AddChild(_regionReadout);
+        _traitReadout = Dim("Temp/Moist: —"); // numeric trait inspector under the cursor (Stage 5)
+        _col.AddChild(_traitReadout);
 
         Header("SAVE / LOAD");
         Button(_col, "Save world", () => { if (_world != null) SetStatus(_world.SaveToDisk()); });
@@ -276,7 +288,7 @@ public partial class DhceDock : ScrollContainer
         _simulate = new CheckButton { Text = "Simulate" };
         _col.AddChild(_simulate);
 
-        SelectTrait(0);
+        SelectTrait(0, arm: false); // configure the trait-brush UI but leave the active tool at Raise
     }
 
     // --- sim tick (driven by the plugin's _Process so it runs in-editor) ---
@@ -343,12 +355,12 @@ public partial class DhceDock : ScrollContainer
         SetStatus($"{ViewNames[mode]} view");
     }
 
-    private void SelectTrait(int dropdownIdx)
+    private void SelectTrait(int dropdownIdx, bool arm = true)
     {
         int engineId = TraitEngineId[dropdownIdx];
         _tool.TraitId = engineId;
-        _tool.Active = ToolKind.Trait;
-        bool isEnum = engineId == 6 || engineId == 7; // both current trait-brush traits are enums
+        if (arm) _tool.Active = ToolKind.Trait; // initial setup configures the UI without grabbing the tool
+        bool isEnum = engineId == 6 || engineId == 7; // 4/5 (temp/moisture) are scalars; 6/7 are enums
         _traitSlider.Visible = !isEnum;
         _traitSliderLabel.Visible = !isEnum;
         _traitEnum.Visible = isEnum;

@@ -183,13 +183,25 @@ Closes the gap flagged in Stage 3: the landform dials now reshape the terrain.
 `region_tier_assigns_via_polygon_and_persists` exercises `regions_in_polygon`+`assign_region`). 4b is
 viewport-interaction C# over those tested primitives — `dotnet build` + editor smoke are its gates.
 
-## Stage 5 — Per-trait editor panel + presets *(C#)*
+## Stage 5 — Per-trait editor panel + presets *(C#)* — ✅ done (2026-06-15, polish over the R4 dock)
 
-**Files:** `tool/scripts/` (editor panel, preset row).
+**Files:** `addons/dhce/DhceDock.cs`, `addons/dhce/DhcePlugin.cs`.
 
-- Brush panel: the 9 dials (Elevation, Jaggedness, Relief, Foothill falloff, Erosion, Temperature,
-  Moisture, Vegetation dropdown, Palette family) + biome-preset row (Forest/Plains/Rocky/Marsh…) +
-  Region selector. Editing a preset/Region writes back via the Stage 2–4 setters.
+Most of Stage 5 was already delivered by the R4 in-editor dock (REGION LANDFORM dials, palette editor,
+REGIONS-stamp preset swatches, Region picker, VIEW + contextual paint). The remaining polish:
+- **Unified per-cell trait brush:** the TRAIT BRUSH dropdown now covers **Temperature, Moisture,
+  Vegetation, Palette family** (temp/moisture were previously only paintable by switching VIEW) —
+  scalars use the value slider, enums the type dropdown. Together with sculpt (elevation) and the
+  per-Region landform dials, every paintable trait is reachable.
+- **Default-tool fix:** the dock no longer loads with the trait brush armed — it configures the
+  trait-brush UI but leaves the active tool at **Raise** (`SelectTrait(0, arm: false)`).
+- **Cursor trait inspector:** a live **"Temp/Moist: t / m"** numeric readout under the cursor
+  (via `trait_at`), beside the Biome + Region readouts.
+
+> The literal "single 9-dial panel" wasn't rebuilt — the dials live in their purpose-grouped sections
+> (sculpt / region-landform / trait-brush / palette), which is cleaner in a narrow editor dock. The
+> jaggedness/relief/foothill/erosion dials remain **per-Region** (REGION LANDFORM) by Stage 3c design,
+> not per-cell brushes.
 
 **Acceptance (whole model):** paint distinct areas (jagged rocky highland, rolling forest, plains,
 marsh); borders ease naturally; the HUD names the emergent biome; Regions name + accent the places;
