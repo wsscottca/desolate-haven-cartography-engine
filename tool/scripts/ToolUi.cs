@@ -30,6 +30,7 @@ public partial class ToolUi : CanvasLayer
     private double _simFlow = 0.45, _simEvap = 0.001;
     private int _simSubsteps = 10, _simTick;
     private CheckButton _simulate;
+    private MinimapPanel _minimap;
     private const int SimEveryNFrames = 6;
 
     private static readonly string[] BiomeNames =
@@ -197,7 +198,13 @@ public partial class ToolUi : CanvasLayer
         col.AddChild(clear);
         _simulate = new CheckButton { Text = "Simulate" };
         col.AddChild(_simulate);
+
+        col.AddChild(ToolTheme.Header("MAP"));
+        _minimap = new MinimapPanel { Root = Root };
+        col.AddChild(_minimap);
     }
+
+    public void RefreshMinimap() => _minimap?.Refresh();
 
     public override void _Process(double delta)
     {

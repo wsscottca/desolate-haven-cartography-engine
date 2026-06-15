@@ -46,6 +46,17 @@ fn paint_terrain_reports_and_raises_its_footprint() {
 }
 
 #[test]
+fn minimap_is_rgba_and_non_empty() {
+    let w = built();
+    let n = 64;
+    let img = w.minimap(n);
+    assert_eq!(img.len(), n * n * 4, "RGBA, n*n*4 bytes");
+    // At least some on-map cells are opaque (alpha = 255).
+    let opaque = (0..n * n).filter(|&i| img[i * 4 + 3] == 255).count();
+    assert!(opaque > 0, "minimap should have opaque on-map pixels");
+}
+
+#[test]
 fn height_at_resolves_inside_the_map_only() {
     let w = built();
     assert!(w.height_at(500.0, 500.0).is_some(), "center should resolve a region");

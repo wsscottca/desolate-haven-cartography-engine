@@ -86,6 +86,18 @@ public partial class CartographerSpike : Node3D
     public ToolState Tool { get; } = new ToolState();
     public GodotObject Engine => _engine;
     public float Exaggeration => _exaggeration;
+    public Vector3 CameraFocus => _cam?.FocusPoint ?? new Vector3(_widthM * 0.5f, 0f, _heightM * 0.5f);
+    public float WorldWidthM => _widthM;
+    public float WorldHeightM => _heightM;
+
+    /// Recenter the camera over a ground point (overview look-down) at a sensible altitude — the
+    /// minimap calls this on click to fly there.
+    public void FlyTo(float worldX, float worldZ)
+    {
+        if (_cam == null) return;
+        float dist = Mathf.Clamp(_cam.GlobalPosition.Y, _widthM * 0.04f, _widthM);
+        _cam.FrameOverhead(new Vector3(worldX, 0f, worldZ), dist);
+    }
 
     // Brush stroke state: spacing (don't pile dabs on one spot) + liquid settle on release.
     private const float BrushSpacingFrac = 0.25f;
@@ -175,7 +187,7 @@ public partial class CartographerSpike : Node3D
         }
 
         // A stroke released over a UI panel won't reach _UnhandledInput — settle here too.
-        if (_painting && !Input.IsMouseButtonPressed(MouseButton.Left)) { _painting = false; EndStroke(); }
+        if (_painting && !Input.IsMouseButtonPressed(MouseButton.Left)) { _painting = false; EndStroke(); _ui?.RefreshMinimap(); }
         UpdateBrushGizmo();
     }
 
@@ -221,6 +233,7 @@ public partial class CartographerSpike : Node3D
 
         HideSplash();
         _genDone = true;
+        _ui?.RefreshMinimap();
     }
 
     private void SetupSceneAndCamera()
@@ -491,7 +504,7 @@ public partial class CartographerSpike : Node3D
         if (e is InputEventMouseButton mb && mb.ButtonIndex == MouseButton.Left)
         {
             if (mb.Pressed) { _painting = true; _strokeTouchedLiquid = false; _hasLastPaint = false; PaintAt(mb.Position); }
-            else { _painting = false; EndStroke(); }
+            else { _painting = false; EndStroke(); _ui?.RefreshMinimap(); }
             return;
         }
         if (e is InputEventMouseMotion mm && (mm.ButtonMask & MouseButtonMask.Left) != 0)

@@ -271,6 +271,12 @@ impl DhceEngine {
     fn height_at(&self, x: f64, y: f64) -> f64 {
         self.world.height_at(x, y).unwrap_or(f64::NAN)
     }
+    /// Top-down minimap as an `n×n` RGBA byte buffer (biome colour + hill-shade + contours +
+    /// liquid). C#: `Image.CreateFromData(n, n, false, Image.Format.Rgba8, bytes)`.
+    #[func]
+    fn minimap(&self, n: i64) -> PackedByteArray {
+        PackedByteArray::from(self.world.minimap(n.max(1) as usize).as_slice())
+    }
     #[func]
     fn biome_at(&self, region: i64) -> i64 {
         self.world.biome_at(region.max(0) as usize) as i64

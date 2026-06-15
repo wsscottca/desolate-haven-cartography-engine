@@ -584,6 +584,87 @@ impl World {
         None
     }
 
+    /// Render a top-down minimap as an `n×n` RGBA image (row-major; row 0 = north, y = 0):
+    /// smoothed biome colour, NW hill-shading, elevation contour lines, and any painted liquid
+    /// (blue water / orange lava) overlaid. Drives the overview map panel. Empty until built.
+    pub fn minimap(&self, n: usize) -> Vec<u8> {
+        let mut out = vec![0u8; n * n * 4];
+        if self.mesh.is_none() || n == 0 {
+            return out;
+        }
+
+        // Pass 1: nearest region + its elevation per cell (NaN where off-map).
+        let mut elev = vec![f64::NAN; n * n];
+        let mut reg = vec![u32::MAX; n * n];
+        for gy in 0..n {
+            let y = (gy as f64 + 0.5) / n as f64 * self.height;
+            for gx in 0..n {
+                let x = (gx as f64 + 0.5) / n as f64 * self.width;
+                if let Some(r) = self.region_at(x, y) {
+                    reg[gy * n + gx] = r as u32;
+                    elev[gy * n + gx] = self.elevation_r[r];
+                }
+            }
+        }
+
+        const INTERVAL: f64 = 0.12; // contour spacing in normalized elevation
+        let band = |e: f64| (e / INTERVAL).floor() as i64;
+        for gy in 0..n {
+            for gx in 0..n {
+                let i = gy * n + gx;
+                let r = reg[i];
+                if r == u32::MAX {
+                    continue; // off-map → transparent
+                }
+                let r = r as usize;
+                let e = elev[i];
+
+                let (mut cr, mut cg, mut cb) = if 3 * r + 2 < self.color_cache.len() {
+                    (self.color_cache[3 * r] as f64, self.color_cache[3 * r + 1] as f64, self.color_cache[3 * r + 2] as f64)
+                } else {
+                    (0.5, 0.5, 0.5)
+                };
+
+                // NW hill-shade from the elevation gradient (edges clamp to self).
+                let at = |gx2: usize, gy2: usize| elev[gy2 * n + gx2];
+                let xl = if gx > 0 { at(gx - 1, gy) } else { e };
+                let xr = if gx + 1 < n { at(gx + 1, gy) } else { e };
+                let yu = if gy > 0 { at(gx, gy - 1) } else { e };
+                let yd = if gy + 1 < n { at(gx, gy + 1) } else { e };
+                let dzdx = if xr.is_nan() || xl.is_nan() { 0.0 } else { xr - xl };
+                let dzdy = if yd.is_nan() || yu.is_nan() { 0.0 } else { yd - yu };
+                let shade = (0.5 + (-dzdx - dzdy) * 6.0).clamp(0.35, 1.25);
+                cr *= shade;
+                cg *= shade;
+                cb *= shade;
+
+                // Contour where the elevation band changes vs the right / down neighbour.
+                let br = if !xr.is_nan() { band(xr) } else { band(e) };
+                let bd = if !yd.is_nan() { band(yd) } else { band(e) };
+                if band(e) != br || band(e) != bd {
+                    cr *= 0.5;
+                    cg *= 0.5;
+                    cb *= 0.5;
+                }
+
+                // Painted-liquid overlay.
+                if r < self.field.depth.len() && self.field.depth[r] > 0.02 {
+                    let (wr, wg, wb) = if self.field.kind[r] == 1 { (0.95, 0.35, 0.10) } else { (0.20, 0.45, 0.78) };
+                    cr = cr * 0.4 + wr * 0.6;
+                    cg = cg * 0.4 + wg * 0.6;
+                    cb = cb * 0.4 + wb * 0.6;
+                }
+
+                let px = i * 4;
+                out[px] = (cr.clamp(0.0, 1.0) * 255.0) as u8;
+                out[px + 1] = (cg.clamp(0.0, 1.0) * 255.0) as u8;
+                out[px + 2] = (cb.clamp(0.0, 1.0) * 255.0) as u8;
+                out[px + 3] = 255;
+            }
+        }
+        out
+    }
+
     /// Biome id (1..=14, 0 = none) at a region.
     pub fn biome_at(&self, region: usize) -> u8 {
         self.biome_r.get(region).copied().unwrap_or(0)

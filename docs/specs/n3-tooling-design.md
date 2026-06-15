@@ -220,6 +220,11 @@ rule changes.
 - Whether N3d needs the core `scatter` extension or tool-side rules suffice for proxy preview. *(N3d)*
 - Authoring-project save/load of biome profiles + scatter rules formally lands in N4; N3 keeps
   them resident + exportable via the existing `*_export`/`set_*` calls.
+- **Water physics needs a tuning revisit** (deferred 2026-06-14, user request): flow/settle feel
+  + amounts/look aren't dialled in yet. Functional but not final; tune after the biome slice.
+- **Overview = zoomable topographic minimap** (not 3D coarse LOD): the 3D view is capped to
+  near-detail render distance for perf; a `World::minimap(n)` RGBA render (biome colour + NW
+  hill-shade + contour lines + painted-liquid overlay) drives a zoomable, click-to-fly map panel.
 
 ## 6. Build sequence (ordered)
 
