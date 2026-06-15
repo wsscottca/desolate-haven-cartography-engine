@@ -26,6 +26,19 @@ const COURSE_WATER_GAIN: f64 = 3.0;
 const COLOR_SMOOTH_ITERS: usize = 2;
 const COLOR_SMOOTH_W: f32 = 0.4;
 const COLOR_VAR: f32 = 0.04;
+/// Trait-border blend (the transition buffer): neighbour-average weight per pass, and the
+/// pass-count cap so a wide Transition width can't stall the explicit Apply. See
+/// [`World::blend_traits`].
+const BLEND_W: f64 = 0.5;
+const MAX_BLEND_ITERS: usize = 24;
+/// Data-view modes for [`World::set_view_mode`] — which per-cell field drives the vertex colour.
+/// `Natural` is the composed terrain look; the rest are direct field readouts (heatmaps) of the
+/// same meshes, paintable in place. The minimap follows the same mode.
+pub const VIEW_NATURAL: u8 = 0;
+pub const VIEW_TEMPERATURE: u8 = 1;
+pub const VIEW_MOISTURE: u8 = 2;
+pub const VIEW_ELEVATION: u8 = 3;
+pub const VIEW_BIOME: u8 = 4;
 /// Elevation clamp shared by every sculpt/carve op (normalized terrain stays in range).
 const ELEV_MIN: f64 = -1.5;
 const ELEV_MAX: f64 = 1.5;
@@ -61,6 +74,16 @@ pub struct World {
     temperature_r: Vec<f64>,
     vegetation_r: Vec<u8>,
     palette_family_r: Vec<u8>,
+    /// Painted-base snapshots of the scalar trait fields. The brushes write these alongside the
+    /// live `*_r` fields above; [`blend_traits`](World::blend_traits) always diffuses *from* the
+    /// base, so re-applying it with the same width is idempotent (the skirt never compounds).
+    /// Enums (vegetation/palette_family) don't diffuse, so they need no base.
+    jaggedness_base: Vec<f64>,
+    relief_base: Vec<f64>,
+    foothill_falloff_base: Vec<f64>,
+    erosion_base: Vec<f64>,
+    temperature_base: Vec<f64>,
+    moisture_base: Vec<f64>,
     /// Legacy per-Region landform profile [jaggedness, relief, foothill_falloff, erosion] — kept
     /// for the `biome_landform` getter/setter; the live values are the per-cell trait fields above.
     biome_landform: Vec<[f32; 4]>,
@@ -89,6 +112,9 @@ pub struct World {
     chunk_cols: usize,
     chunk_rows: usize,
     color_cache: Vec<f32>,
+    /// Active data-view mode (see the `VIEW_*` consts). Off `Natural`, the colour cache holds a
+    /// direct readout of one field instead of the composed terrain colour.
+    view_mode: u8,
 }
 
 impl Default for World {
@@ -132,6 +158,12 @@ impl World {
             temperature_r: Vec::new(),
             vegetation_r: Vec::new(),
             palette_family_r: Vec::new(),
+            jaggedness_base: Vec::new(),
+            relief_base: Vec::new(),
+            foothill_falloff_base: Vec::new(),
+            erosion_base: Vec::new(),
+            temperature_base: Vec::new(),
+            moisture_base: Vec::new(),
             biome_landform,
             biome_water,
             biome_locked: Vec::new(),
@@ -147,6 +179,7 @@ impl World {
             chunk_cols: 0,
             chunk_rows: 0,
             color_cache: Vec::new(),
+            view_mode: VIEW_NATURAL,
         }
     }
 
@@ -207,6 +240,14 @@ impl World {
         self.temperature_r = temp;
         self.vegetation_r = vegc;
         self.palette_family_r = famc;
+        // The painted base starts equal to the seeded fields (nothing painted yet); the brushes
+        // keep base + live in step, and `blend_traits` diffuses live from base.
+        self.jaggedness_base = self.jaggedness_r.clone();
+        self.relief_base = self.relief_r.clone();
+        self.foothill_falloff_base = self.foothill_falloff_r.clone();
+        self.erosion_base = self.erosion_r.clone();
+        self.temperature_base = self.temperature_r.clone();
+        self.moisture_base = self.moisture_r.clone();
 
         // Spatial grid for O(brush) brush queries (keeps painting fast at high detail).
         let grid_cell = (width.max(height) / 64.0).max(1.0);
@@ -573,13 +614,15 @@ impl World {
                 }
                 let t = 1.0 - (d2 / r2).sqrt();
                 let w = t * t * (3.0 - 2.0 * t);
+                // Ease both the live field (what renders now) and the painted base (what a later
+                // `blend_traits` grades from), so a re-blend reproduces this stroke's footprint.
                 match trait_id {
-                    0 => ease_into(&mut self.jaggedness_r, ri, value, w),
-                    1 => ease_into(&mut self.relief_r, ri, value, w),
-                    2 => ease_into(&mut self.foothill_falloff_r, ri, value, w),
-                    3 => ease_into(&mut self.erosion_r, ri, value, w),
-                    4 => ease_into(&mut self.temperature_r, ri, value, w),
-                    5 => ease_into(&mut self.moisture_r, ri, value, w),
+                    0 => { ease_into(&mut self.jaggedness_r, ri, value, w); ease_into(&mut self.jaggedness_base, ri, value, w); }
+                    1 => { ease_into(&mut self.relief_r, ri, value, w); ease_into(&mut self.relief_base, ri, value, w); }
+                    2 => { ease_into(&mut self.foothill_falloff_r, ri, value, w); ease_into(&mut self.foothill_falloff_base, ri, value, w); }
+                    3 => { ease_into(&mut self.erosion_r, ri, value, w); ease_into(&mut self.erosion_base, ri, value, w); }
+                    4 => { ease_into(&mut self.temperature_r, ri, value, w); ease_into(&mut self.temperature_base, ri, value, w); }
+                    5 => { ease_into(&mut self.moisture_r, ri, value, w); ease_into(&mut self.moisture_base, ri, value, w); }
                     6 => {
                         if w > 0.5 && ri < self.vegetation_r.len() {
                             self.vegetation_r[ri] = value as u8;
@@ -625,6 +668,14 @@ impl World {
                     self.temperature_r[ri] = tr.temperature as f64;
                     self.vegetation_r[ri] = tr.vegetation;
                     self.palette_family_r[ri] = tr.palette_family;
+                    // The stamp is the new painted base for these cells (a later blend grades from
+                    // it). Moisture keeps its live value — the region preset doesn't define it.
+                    self.jaggedness_base[ri] = tr.jaggedness as f64;
+                    self.relief_base[ri] = tr.relief as f64;
+                    self.foothill_falloff_base[ri] = tr.foothill_falloff as f64;
+                    self.erosion_base[ri] = tr.erosion as f64;
+                    self.temperature_base[ri] = tr.temperature as f64;
+                    self.moisture_base[ri] = self.moisture_r[ri];
                 }
                 if ri < self.biome_r.len() {
                     self.biome_r[ri] = biome_id;
@@ -698,6 +749,61 @@ impl World {
                 *d = true;
             }
         }
+    }
+
+    /// Diffuse the scalar trait fields across their painted-region borders so abrupt paints ease
+    /// into natural skirts — the **transition buffer**. `transition_width_m` sets the band width;
+    /// it maps to a count of neighbour-average (Laplacian) passes over the cell graph. The pass
+    /// always starts from the painted base (`*_base`), so re-applying with the same width is
+    /// idempotent — it never compounds. A locally-uniform region is a fixed point of the average,
+    /// so only the bands around discontinuities move: the diffusion *is* the buffer.
+    ///
+    /// Each scalar grades at its own rate (they diffuse independently); enum traits (vegetation,
+    /// palette_family) keep their painted values. Recolours the world and flags every chunk dirty
+    /// (re-tessellate the meshed ones via [`take_dirty_chunks`](World::take_dirty_chunks); the
+    /// rest pick up the new colour when they next stream in).
+    pub fn blend_traits(&mut self, transition_width_m: f64) {
+        let n = self.elevation_r.len();
+        if n == 0 || self.neighbors.len() != n {
+            return;
+        }
+        // Width (m) → pass count. One pass spreads ~one cell-ring; the cell pitch is the mean
+        // spacing of the point set (√(area / cells)). Clamp so a wide setting can't stall Apply.
+        let pitch = (self.width * self.height / n as f64).sqrt().max(1.0);
+        let iters = ((transition_width_m / pitch).round() as usize).clamp(0, MAX_BLEND_ITERS);
+
+        self.jaggedness_r = diffuse_field(&self.jaggedness_base, &self.neighbors, iters);
+        self.relief_r = diffuse_field(&self.relief_base, &self.neighbors, iters);
+        self.foothill_falloff_r = diffuse_field(&self.foothill_falloff_base, &self.neighbors, iters);
+        self.erosion_r = diffuse_field(&self.erosion_base, &self.neighbors, iters);
+        self.temperature_r = diffuse_field(&self.temperature_base, &self.neighbors, iters);
+        self.moisture_r = diffuse_field(&self.moisture_base, &self.neighbors, iters);
+
+        // Colour reads temperature/moisture (+ the unchanged enums) → recolour the whole map.
+        self.color_cache = self.region_color();
+        for d in self.chunk_dirty.iter_mut() {
+            *d = true;
+        }
+    }
+
+    /// Switch the colour view (see the `VIEW_*` consts): `Natural` shows the composed terrain
+    /// colour; the data views recolour the same meshes by a single field (temperature/moisture/
+    /// elevation heatmaps, or flat biome accents) so the author can read and paint it directly.
+    /// Recolours the world and flags every chunk dirty (re-tessellate via [`take_dirty_chunks`]);
+    /// the minimap reads the same cache, so it follows automatically.
+    pub fn set_view_mode(&mut self, mode: u8) {
+        self.view_mode = mode;
+        if !self.elevation_r.is_empty() {
+            self.color_cache = self.region_color();
+            for d in self.chunk_dirty.iter_mut() {
+                *d = true;
+            }
+        }
+    }
+
+    /// The active data-view mode (see the `VIEW_*` consts).
+    pub fn view_mode(&self) -> u8 {
+        self.view_mode
     }
 
     // --- selection / boundary tools ---
@@ -871,8 +977,9 @@ impl World {
                     }
                 }
 
-                // Painted-liquid overlay.
-                if r < self.field.depth.len() && self.field.depth[r] > 0.02 {
+                // Painted-liquid overlay (Natural view only — blue water would clash with the
+                // heat/moisture ramps in a data view).
+                if self.view_mode == VIEW_NATURAL && r < self.field.depth.len() && self.field.depth[r] > 0.02 {
                     let (wr, wg, wb) = if self.field.kind[r] == 1 { (0.95, 0.35, 0.10) } else { (0.20, 0.45, 0.78) };
                     cr = cr * 0.4 + wr * 0.6;
                     cg = cg * 0.4 + wg * 0.6;
@@ -1063,6 +1170,23 @@ impl World {
     /// (before neighbour smoothing / jitter). The shared ramp ([`biomes::ground_color`]) is
     /// what ties biomes together; per-biome tokens give identity. Neutral if unsized.
     fn cell_color(&self, r: usize) -> [f32; 3] {
+        // Data views: recolour by a single field directly (heatmap), decoupled from Natural colour.
+        match self.view_mode {
+            VIEW_TEMPERATURE => {
+                return biomes::heat_ramp(self.temperature_r.get(r).copied().unwrap_or(0.5) as f32);
+            }
+            VIEW_MOISTURE => {
+                return biomes::wet_ramp(self.moisture_r.get(r).copied().unwrap_or(0.5) as f32);
+            }
+            VIEW_ELEVATION => {
+                return biomes::elevation_ramp(self.elevation_r.get(r).copied().unwrap_or(0.0) as f32);
+            }
+            VIEW_BIOME => {
+                let id = self.biome_r.get(r).copied().unwrap_or(0) as usize;
+                return self.biome_color.get(id).copied().unwrap_or([0.5, 0.5, 0.5]);
+            }
+            _ => {}
+        }
         let fam = self.palette_family_r.get(r).copied().unwrap_or(0) as usize;
         let base = if fam < self.base_palettes.len() {
             self.base_palettes[fam]
@@ -1089,6 +1213,11 @@ impl World {
             c[3 * r] = col[0];
             c[3 * r + 1] = col[1];
             c[3 * r + 2] = col[2];
+        }
+
+        // Data views show the raw field — no neighbour smoothing or jitter, so the heatmap is exact.
+        if self.view_mode != VIEW_NATURAL {
+            return c;
         }
 
         // Light-touch Laplacian smoothing toward the neighbour mean.
@@ -1202,8 +1331,13 @@ impl World {
             let r = rid as usize;
             if 3 * r + 2 < self.color_cache.len() {
                 let base = self.cell_color(r);
-                let h = hash_u32(r as u32);
-                let f = 1.0 + ((h & 0xffff) as f32 / 65535.0 - 0.5) * 2.0 * COLOR_VAR;
+                // Data views show the raw field; Natural adds the deterministic brightness jitter.
+                let f = if self.view_mode == VIEW_NATURAL {
+                    let h = hash_u32(r as u32);
+                    1.0 + ((h & 0xffff) as f32 / 65535.0 - 0.5) * 2.0 * COLOR_VAR
+                } else {
+                    1.0
+                };
                 for k in 0..3 {
                     self.color_cache[3 * r + k] = (base[k] * f).clamp(0.0, 1.0);
                 }
@@ -1361,6 +1495,36 @@ fn ease_into(v: &mut [f64], i: usize, target: f64, w: f64) {
         let cur = v[i];
         v[i] = cur + (target - cur) * w;
     }
+}
+
+/// `iters` Jacobi passes of neighbour-mean blending (weight [`BLEND_W`]) over the cell graph,
+/// starting from `base`. Averaging only — deterministic and convergent, with no transcendentals,
+/// so it holds the cross-target contract. A locally-constant region is a fixed point (the mean of
+/// equal neighbours is itself), so the field only changes in the bands around discontinuities.
+fn diffuse_field(base: &[f64], neighbors: &[Vec<u32>], iters: usize) -> Vec<f64> {
+    let n = base.len();
+    let mut cur = base.to_vec();
+    if iters == 0 || neighbors.len() != n {
+        return cur;
+    }
+    let mut next = cur.clone();
+    for _ in 0..iters {
+        for r in 0..n {
+            let nb = &neighbors[r];
+            if nb.is_empty() {
+                next[r] = cur[r];
+                continue;
+            }
+            let mut sum = 0.0;
+            for &j in nb {
+                sum += cur[j as usize];
+            }
+            let mean = sum / nb.len() as f64;
+            next[r] = cur[r] + (mean - cur[r]) * BLEND_W;
+        }
+        std::mem::swap(&mut cur, &mut next);
+    }
+    cur
 }
 
 /// Fast integer hash (fmix32-style) for deterministic per-region color jitter.

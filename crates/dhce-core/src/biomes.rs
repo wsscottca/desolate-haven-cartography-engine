@@ -144,6 +144,12 @@ pub fn vegetation_tint(v: u8) -> ([f32; 3], f32) {
 const TREELINE: f32 = 0.45;
 const ROCKLINE: f32 = 0.75;
 
+/// Moisture colour response in the *Natural* view: parched cover reads a touch lighter + warmer
+/// (tan), lush cover a touch darker + cooler. Kept subtle/realistic now that the dedicated Moisture
+/// data view (see [`wet_ramp`]) carries precise legibility. Centered at moisture 0.5 (no shift).
+const MOIST_VALUE_SWING: f32 = 0.14; // brightness: dry ×1.07 … wet ×0.93
+const MOIST_WARM_SWING: f32 = 0.06;  // hue tilt: dry +0.03 R / −0.03 B … wet the reverse
+
 /// Resolve a cell's ground colour: `base_palette[family]` ramped by elevation, tinted by
 /// vegetation, with snow/frost driven by `temperature` (so cold *lowlands* frost over and warm
 /// *peaks* stay bare). `e` normalized elevation (≈[-1.5,1.5]); `temperature`/`moisture` in 0..1.
@@ -154,11 +160,19 @@ pub fn resolve_color(base: &BasePalette, vegetation: u8, e: f32, temperature: f3
         t = t * t; // hold the dark depths
         return lerp3(base.water_deep, base.water_shallow, t);
     }
-    // Cover = low terrain tinted by vegetation, slightly darkened when wet.
+    // Cover = low terrain tinted by vegetation.
     let (tint, strength) = vegetation_tint(vegetation);
     let mut cover = lerp3(base.low, tint, strength);
-    let wet = 1.0 - 0.10 * clamp01(moisture);
-    cover = [cover[0] * wet, cover[1] * wet, cover[2] * wet];
+    // Moisture: parched cover reads lighter & warmer (tan); lush cover darker & cooler. Centered at
+    // 0.5 (dryness 0) so a mid-moisture map stays neutral, and strong enough to read across a map.
+    let dryness = 0.5 - clamp01(moisture);
+    let val = 1.0 + dryness * MOIST_VALUE_SWING;
+    let warm = dryness * MOIST_WARM_SWING;
+    cover = [
+        clamp01(cover[0] * val + warm),
+        clamp01(cover[1] * val),
+        clamp01(cover[2] * val - warm),
+    ];
     // Cold lowlands frost over regardless of altitude (temperature decoupled from elevation).
     let frost = clamp01((0.25 - temperature) / 0.25);
     cover = lerp3(cover, base.cap_cold, frost * 0.6);
@@ -175,6 +189,36 @@ pub fn resolve_color(base: &BasePalette, vegetation: u8, e: f32, temperature: f3
         let t = clamp01((e - ROCKLINE) / (1.0 - ROCKLINE));
         lerp3(base.rock, cap, t)
     }
+}
+
+// --- data-view ramps (toggleable heatmap views of the same meshes) -----------------------------
+//
+// These recolour the terrain by a single field so the author can read/edit it directly, decoupled
+// from the composed Natural colour. All are lerp-only (deterministic). `t`/`e` come straight from
+// the per-cell trait fields; the data views skip neighbour smoothing so the readout is exact.
+
+/// Two-stop lerp through `lo → mid → hot` at `t∈[0,1]` (mid at 0.5).
+fn ramp3(lo: [f32; 3], mid: [f32; 3], hi: [f32; 3], t: f32) -> [f32; 3] {
+    let t = clamp01(t);
+    if t < 0.5 { lerp3(lo, mid, t * 2.0) } else { lerp3(mid, hi, (t - 0.5) * 2.0) }
+}
+
+/// Temperature view: cold → hot as blue → pale → red.
+pub fn heat_ramp(t: f32) -> [f32; 3] {
+    ramp3(c(0x2C5AA8), c(0xEDE6B0), c(0xC23A2A), t)
+}
+
+/// Moisture view: dry → wet as tan → green → teal-blue.
+pub fn wet_ramp(t: f32) -> [f32; 3] {
+    ramp3(c(0xC9A86A), c(0x6FA05A), c(0x1E6F8C), t)
+}
+
+/// Elevation view: a hypsometric ramp; `e` normalized (≈[-1.5, 1.5]) → deep water … snow peak.
+pub fn elevation_ramp(e: f32) -> [f32; 3] {
+    let stops = [c(0x0A1A3A), c(0x2E6E9E), c(0x4E8C50), c(0x8C7A4A), c(0xF2F2F6)];
+    let x = clamp01((e + 1.5) / 3.0) * (stops.len() - 1) as f32;
+    let i = (x as usize).min(stops.len() - 2);
+    lerp3(stops[i], stops[i + 1], clamp01(x - i as f32))
 }
 
 // --- region presets (the 14 canon places) -------------------------------------------------------

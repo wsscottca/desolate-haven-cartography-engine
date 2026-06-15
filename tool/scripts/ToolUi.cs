@@ -45,7 +45,11 @@ public partial class ToolUi : CanvasLayer
         { "Verdant", "Arid", "Stone", "Ashen", "Frost", "Wetland", "Exotic" };
     private static readonly string[] SlotNames =
         { "Deep water", "Shallows", "Low cover", "Rock", "Cap (warm)", "Cap (snow)" };
+    // Colour views (DhceEngine view_mode order): 0 Natural … 4 Biome.
+    private static readonly string[] ViewNames =
+        { "Natural", "Temperature", "Moisture", "Elevation", "Biome" };
 
+    private double _transitionWidthM = 200; // Trait-border blend band width (Blend borders button)
     private double _simFlow = 0.45, _simEvap = 0.001;
     private int _simSubsteps = 10, _simTick;
     private CheckButton _simulate;
@@ -208,6 +212,20 @@ public partial class ToolUi : CanvasLayer
         _traitEnum.ItemSelected += idx => { Root.Tool.TraitValue = (int)idx; Root.Tool.Active = ToolKind.Trait; };
         col.AddChild(_traitEnum);
 
+        // Ease painted-region borders into natural skirts. One-shot (not a brush): the core
+        // diffuses the scalar trait fields from their painted base, so re-applying is idempotent.
+        col.AddChild(ToolTheme.Header("TRANSITIONS"));
+        Slider(col, "Width (m)", 0, 1200, 25, _transitionWidthM, v => _transitionWidthM = v);
+        var blend = GhostButton("Blend borders");
+        blend.Pressed += () =>
+        {
+            Root.Engine.Call("blend_traits", _transitionWidthM);
+            Root.RepaintDirtyTerrain();
+            RefreshMinimap();
+            SetStatus($"blended trait borders @ {_transitionWidthM:0} m");
+        };
+        col.AddChild(blend);
+
         SelectTrait(0); // default to Vegetation
     }
 
@@ -285,9 +303,41 @@ public partial class ToolUi : CanvasLayer
 
         BuildPaletteEditor(col);
 
+        col.AddChild(ToolTheme.Header("VIEW"));
+        var viewHint = new Label
+        {
+            Text = "Recolour the terrain + map by a data layer; paint to edit it directly.",
+            AutowrapMode = TextServer.AutowrapMode.WordSmart,
+        };
+        viewHint.AddThemeColorOverride("font_color", ToolTheme.InkDim);
+        col.AddChild(viewHint);
+        var view = new OptionButton();
+        for (int i = 0; i < ViewNames.Length; i++) view.AddItem(ViewNames[i], i);
+        view.Selected = 0;
+        view.ItemSelected += idx => SelectView((int)idx);
+        col.AddChild(view);
+
         col.AddChild(ToolTheme.Header("MAP"));
         _minimap = new MinimapPanel { Root = Root };
         col.AddChild(_minimap);
+    }
+
+    /// Switch the colour view. Temperature/Moisture also arm the matching trait brush (and jump to
+    /// the Biomes tab, where its controls live) so you can paint the field you're looking at.
+    private void SelectView(int mode)
+    {
+        Root.SetViewMode(mode);
+        if (mode == 1 || mode == 2) // Temperature / Moisture → arm the matching trait brush
+        {
+            SetTab(false);
+            int dropdownIdx = mode == 1 ? 6 : 7; // TraitEngineId: temperature 4 → idx 6, moisture 5 → idx 7
+            if (_traitPick != null) { _traitPick.Selected = dropdownIdx; SelectTrait(dropdownIdx); }
+            SetStatus($"{ViewNames[mode]} view — paint to edit");
+        }
+        else
+        {
+            SetStatus($"{ViewNames[mode]} view");
+        }
     }
 
     /// Editor for the 7 shared base palettes: pick a family, then edit its 6 light→dark slots.

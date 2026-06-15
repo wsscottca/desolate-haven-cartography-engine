@@ -51,6 +51,20 @@ fn vegetation_tints_the_cover() {
 }
 
 #[test]
+fn moisture_shifts_the_cover_visibly() {
+    let base = base_palettes()[biomes::fam::VERDANT as usize];
+    let dry = resolve_color(&base, biomes::veg::GRASS, 0.2, 0.5, 0.0);
+    let wet = resolve_color(&base, biomes::veg::GRASS, 0.2, 0.5, 1.0);
+    // Parched cover reads clearly lighter than lush cover — a legible swing, not the old ~10%.
+    assert!(luma(dry) > luma(wet) + 0.05, "dry cover is visibly lighter than wet: {dry:?} vs {wet:?}");
+    // …and warmer (more red- vs blue-leaning) when dry.
+    assert!(dry[0] - dry[2] > wet[0] - wet[2], "dry cover tilts warmer than wet: {dry:?} vs {wet:?}");
+    // Mid moisture is the neutral midpoint (no shift), so existing maps keep their overall look.
+    let mid = resolve_color(&base, biomes::veg::GRASS, 0.2, 0.5, 0.5);
+    assert!(luma(mid) < luma(dry) && luma(mid) > luma(wet), "0.5 sits between dry and wet");
+}
+
+#[test]
 fn resolve_is_deterministic() {
     let base = base_palettes()[biomes::fam::STONE as usize];
     let a = resolve_color(&base, biomes::veg::SCRUB, 0.3, 0.4, 0.6);

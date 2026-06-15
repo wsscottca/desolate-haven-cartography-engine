@@ -61,6 +61,8 @@ public partial class CartographerSpike : Node3D
     private ArrayMesh[] _chunkMeshes;
     private bool[] _built;
     private StandardMaterial3D _mat;
+    private StandardMaterial3D _dataMat; // unshaded material for data views (colours are the raw field)
+    private int _viewMode;               // 0 Natural; see SetViewMode / DhceEngine view_mode
     private MeshInstance3D _liquid;
     private ArrayMesh _liquidMesh;
     private StandardMaterial3D _liquidMat;
@@ -233,7 +235,7 @@ public partial class CartographerSpike : Node3D
         for (int i = 0; i < n; i++)
         {
             var am = new ArrayMesh();
-            var mi = new MeshInstance3D { Mesh = am, MaterialOverride = _mat };
+            var mi = new MeshInstance3D { Mesh = am, MaterialOverride = CurrentViewMat() };
             AddChild(mi);
             _chunks[i] = mi;
             _chunkMeshes[i] = am;
@@ -259,6 +261,12 @@ public partial class CartographerSpike : Node3D
         // Double-sided: the Y-up remap flips triangle winding, so backface culling hides the
         // terrain top-down. (cull_mode 2 = CULL_DISABLED, set by id to dodge enum-name risk.)
         _mat.Set("cull_mode", 2);
+
+        // Data-view material: unshaded, so the heatmap colours read as the raw field (no sun
+        // shading muddying the readout). Same double-sided culling as the terrain material.
+        _dataMat = new StandardMaterial3D { VertexColorUseAsAlbedo = true };
+        _dataMat.Set("shading_mode", 0); // SHADING_MODE_UNSHADED
+        _dataMat.Set("cull_mode", 2);    // CULL_DISABLED
 
         _liquidMat = new StandardMaterial3D
         {
@@ -362,6 +370,23 @@ public partial class CartographerSpike : Node3D
             if (ci >= 0 && ci < _chunkMeshes.Length && _built[ci]) BuildChunk(ci);
         return dirty.Length;
     }
+
+    /// Switch the colour view (0 Natural, 1 Temperature, 2 Moisture, 3 Elevation, 4 Biome). Data
+    /// views recolour the same meshes by one field (a heatmap) via an unshaded material, so the
+    /// colours are the raw field. The core recolours + flags all chunks dirty; we swap the material
+    /// on every chunk node and re-tessellate the meshed ones (out-of-range chunks pick it up when
+    /// they next stream in). The minimap reads the same cache, so it follows too.
+    public void SetViewMode(int mode)
+    {
+        _viewMode = mode;
+        _engine.Call("set_view_mode", mode);
+        var m = CurrentViewMat();
+        if (_chunks != null) foreach (var mi in _chunks) if (mi != null) mi.MaterialOverride = m;
+        RepaintDirtyTerrain();
+        _ui?.RefreshMinimap();
+    }
+
+    private StandardMaterial3D CurrentViewMat() => _viewMode == 0 ? _mat : _dataMat;
 
     /// Re-tessellate the whole liquid surface and re-upload it. Whole-surface (water is sparse);
     /// chunked liquid is a deferred optimization. Vertex colour comes from liquid_types

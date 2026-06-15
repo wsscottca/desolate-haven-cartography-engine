@@ -180,6 +180,69 @@ fn paint_trait_sets_the_field_under_the_brush() {
 }
 
 #[test]
+fn blend_traits_grades_a_painted_border() {
+    // Cold on the left, hot on the right, with a gap between the two stamps. After blending, the
+    // seam reads as a cold→hot gradient instead of a hard step.
+    let mut w = built();
+    w.paint_trait(250.0, 500.0, 220.0, 4, 0.0); // left: temperature cold
+    w.paint_trait(750.0, 500.0, 220.0, 4, 1.0); // right: temperature hot
+    w.blend_traits(400.0);
+    let left = w.trait_at(300.0, 500.0, 4).expect("left cell");
+    let mid = w.trait_at(500.0, 500.0, 4).expect("seam cell");
+    let right = w.trait_at(700.0, 500.0, 4).expect("right cell");
+    assert!(left < mid && mid < right, "temperature grades cold→hot across the seam: {left} {mid} {right}");
+}
+
+#[test]
+fn blend_traits_is_idempotent_on_rerun() {
+    // Re-applying the same width must not over-smooth: the pass always grades from the painted
+    // base, so the colour buffer is bit-identical on the second run.
+    let mut w = built();
+    w.paint_trait(300.0, 500.0, 150.0, 4, 0.0);
+    w.paint_trait(700.0, 500.0, 150.0, 4, 1.0);
+    w.blend_traits(250.0);
+    let first: Vec<u32> = w.surface(100.0).expect("surface").colors.iter().map(|v| v.to_bits()).collect();
+    w.blend_traits(250.0);
+    let second: Vec<u32> = w.surface(100.0).expect("surface").colors.iter().map(|v| v.to_bits()).collect();
+    assert_eq!(first, second, "re-blending from the painted base must not compound");
+}
+
+#[test]
+fn blend_traits_leaves_a_uniform_field_unchanged() {
+    // A locally-constant field is a fixed point of the neighbour average — a whole-map stamp must
+    // survive the blend untouched (no drift from the diffusion).
+    let mut w = built();
+    w.paint_region_traits(500.0, 500.0, 5000.0, 4); // Temperate Forest over the whole map
+    let before = w.trait_at(500.0, 500.0, 4).expect("cell");
+    w.blend_traits(300.0);
+    let after = w.trait_at(500.0, 500.0, 4).expect("cell");
+    assert!((before - after).abs() < 1e-9, "a uniform field is a fixed point of the blend: {before} vs {after}");
+}
+
+#[test]
+fn temperature_view_maps_the_field_to_a_heat_ramp() {
+    // The Temperature data view recolours the same mesh by the field: hot reads red-dominant,
+    // cold blue-dominant — independent of the composed Natural colour.
+    let mut w = built();
+    w.paint_trait(250.0, 500.0, 200.0, 4, 1.0); // hot patch (left)
+    w.paint_trait(750.0, 500.0, 200.0, 4, 0.0); // cold patch (right)
+    w.set_view_mode(1); // VIEW_TEMPERATURE
+    let s = w.surface(100.0).expect("surface");
+    let hot = w.region_at(250.0, 500.0).expect("hot region");
+    let cold = w.region_at(750.0, 500.0).expect("cold region");
+    assert!(s.colors[3 * hot] > s.colors[3 * hot + 2], "hot reads red-dominant");
+    assert!(s.colors[3 * cold + 2] > s.colors[3 * cold], "cold reads blue-dominant");
+    // Back to Natural, the same hot cell is not the heat-ramp red (composed terrain colour).
+    w.set_view_mode(0);
+    let s2 = w.surface(100.0).expect("surface");
+    assert!(
+        (s2.colors[3 * hot] - s.colors[3 * hot]).abs() > 0.05
+            || (s2.colors[3 * hot + 2] - s.colors[3 * hot + 2]).abs() > 0.05,
+        "Natural view differs from the heat view"
+    );
+}
+
+#[test]
 fn chunk_grid_is_empty_before_build() {
     let w = World::new();
     assert_eq!(w.chunk_grid(), (0, 0), "no grid before build");

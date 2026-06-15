@@ -19,7 +19,7 @@ colour path (`region_color`/`after_edit`/`color_cache`), and neighbour smoothing
 
 ---
 
-## Stage 1 — Trait substrate *(Rust core + DLL rebuild)*
+## Stage 1 — Trait substrate *(Rust core + DLL rebuild)* — ✅ done (2026-06-14)
 
 **Files:** `crates/dhce-core/src/biomes.rs`, `crates/dhce-core/src/world.rs`,
 `crates/dhce-core/tests/biomes.rs`, `crates/dhce-core/tests/world.rs`.
@@ -65,19 +65,49 @@ smoke clean; user F5.
 
 **Tests:** representative trait bundles classify to the expected label; locked cells keep theirs.
 
-## Stage 3 — Brush + transition buffer + blend pass *(Rust core + C#)*
+## Stage 3 — Brush + transition buffer + blend pass *(Rust core + C#)* — ✅ done (2026-06-14)
 
-**Files:** `world.rs` (+ test), `lib.rs`, `tool/scripts/ToolState.cs`, `CartographerSpike.cs`, `ToolUi.cs`.
+**Files:** `world.rs` (+ test), `lib.rs`, `tool/scripts/ToolUi.cs`.
 
-- `paint_trait(cx,cy,r, trait_id, value)` and `stamp_preset(cx,cy,r, preset)` — set targets in the
-  footprint, mark a **transition buffer** band (cells within `width` of a value discontinuity).
-- `blend_traits(transition_width_m)` — param-field diffusion (Laplacian average over `neighbors`)
-  on each scalar field across the buffer; idempotent layered model (store painted-base vs blended).
-  One **Transition width** control → `k`.
-- C#: brush picks a trait/preset; Transition-width slider; Apply triggers `blend_traits`.
+- `paint_trait` / `paint_region_traits` now keep a **painted-base** snapshot (`*_base`) of the six
+  scalar fields in step with the live `*_r` fields.
+- `blend_traits(transition_width_m)` — `width → k` passes of Laplacian (`diffuse_field`) over
+  `neighbors`, always **from the painted base**, so it's idempotent (re-run never compounds) and a
+  uniform region is a fixed point. Whole-field diffusion makes the transition buffer *emergent*
+  (interiors don't drift) — no explicit discontinuity band to track. Enums (vegetation,
+  palette_family) keep their painted values; only the six scalars grade. Recolours + flags all
+  chunks dirty (same refresh path as the palette editor).
+- C#: Biomes-tab **TRANSITIONS** section — a Width (m) slider + a **Blend borders** button calling
+  `blend_traits`, then re-tessellating via `RepaintDirtyTerrain` + minimap refresh.
 
-**Tests:** blend idempotent on re-run; diffusion converges + is symmetric; a mountain-vs-plains
-paint yields a graded skirt (jaggedness + vegetation fall at independent rates).
+**Tests (world.rs):** `blend_traits_is_idempotent_on_rerun`, `blend_traits_grades_a_painted_border`
+(temperature cold→hot across the seam), `blend_traits_leaves_a_uniform_field_unchanged`.
+
+> **Visible scope:** the blend grades *every* scalar (including the landform dials), but only
+> temperature/moisture currently change anything on screen (colour). Jaggedness/relief/foothill/
+> erosion now grade in the field, yet stay invisible until a **shaping pass** consumes them to
+> perturb elevation — that's the natural next slice (no plan stage owns it yet).
+
+## Stage 3b — Data-layer view modes *(Rust core + C#)* — ✅ done (2026-06-14)
+
+Toggleable **views** that recolour the same meshes (and the minimap) by a single field, so a data
+layer can be read and painted directly — decoupling authoring legibility from the composed Natural
+look. (Added in response to "can't really see moisture": a dedicated Moisture view carries the
+legibility, so the Natural view stays realistic.)
+
+**Files:** `biomes.rs`, `world.rs` (+ test), `lib.rs`, `CartographerSpike.cs`, `ToolUi.cs`.
+
+- Core: `view_mode` (`VIEW_NATURAL|TEMPERATURE|MOISTURE|ELEVATION|BIOME`) + `set_view_mode`.
+  `cell_color` branches to a heat / wet / hypsometric ramp (`biomes::heat_ramp` / `wet_ramp` /
+  `elevation_ramp`) or flat biome accents; data views skip neighbour smoothing + jitter (exact
+  readout) and the minimap drops its liquid overlay. Same recolour + flag-all-dirty refresh path.
+- C#: an unshaded `_dataMat` (raw field colours, no sun shading) + `SetViewMode`; a **VIEW** selector
+  in the right panel. Picking Temperature/Moisture arms the matching trait brush so you paint in-view.
+- Natural-view moisture tint softened to subtle (`MOIST_VALUE_SWING` 0.32 → 0.14) now that the
+  Moisture view carries precise legibility.
+
+**Test (world.rs):** `temperature_view_maps_the_field_to_a_heat_ramp` (hot = red / cold = blue, and
+differs from Natural).
 
 ## Stage 4 — Border tool (scopes) + Region tier *(Rust core + C#)*
 

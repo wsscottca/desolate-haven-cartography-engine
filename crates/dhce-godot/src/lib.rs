@@ -272,6 +272,25 @@ impl DhceEngine {
     fn set_base_palette_color(&mut self, family: i64, slot: i64, r: f64, g: f64, b: f64) {
         self.world.set_base_palette_color(family.max(0) as usize, slot.max(0) as usize, r as f32, g as f32, b as f32);
     }
+    /// Diffuse the scalar trait fields across painted-region borders so they ease into natural
+    /// skirts (the transition buffer). `transition_width_m` sets the band width. Idempotent on
+    /// re-run; recolours the world (flags all chunks dirty — re-tessellate via `take_dirty_chunks`).
+    #[func]
+    fn blend_traits(&mut self, transition_width_m: f64) {
+        self.world.blend_traits(transition_width_m);
+    }
+    /// Switch the colour view: 0 Natural, 1 Temperature, 2 Moisture, 3 Elevation, 4 Biome. Data
+    /// views recolour the same meshes by one field (a heatmap) so it can be read/painted directly.
+    /// Recolours the world (flags all chunks dirty); the minimap follows the same mode.
+    #[func]
+    fn set_view_mode(&mut self, mode: i64) {
+        self.world.set_view_mode(mode.max(0) as u8);
+    }
+    /// The active colour view (see `set_view_mode`).
+    #[func]
+    fn view_mode(&self) -> i64 {
+        self.world.view_mode() as i64
+    }
 
     // --- selection / boundary tools ---
 
