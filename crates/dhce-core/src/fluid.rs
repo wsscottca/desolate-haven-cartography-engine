@@ -266,11 +266,12 @@ pub fn liquid_surface(
         wet[r] = field.depth[r] > MIN_RENDER_DEPTH;
     }
     if neighbors.len() == nr {
+        // Double-buffered Laplacian: each `next[r]` reads only the *previous* `surf` → a pure
+        // index→value map, parallelised bit-identically (the per-iter cost dominates liquid build).
         for _ in 0..RENDER_SMOOTH_ITERS {
-            let mut next = surf.clone();
-            for r in 0..nr {
+            surf = crate::util::par_map(nr, |r| {
                 if !wet[r] {
-                    continue;
+                    return surf[r];
                 }
                 let mut sum = 0.0;
                 let mut cnt = 0.0;
@@ -283,10 +284,11 @@ pub fn liquid_surface(
                 }
                 if cnt > 0.0 {
                     let mean = sum / cnt;
-                    next[r] = surf[r] + (mean - surf[r]) * RENDER_SMOOTH_W;
+                    surf[r] + (mean - surf[r]) * RENDER_SMOOTH_W
+                } else {
+                    surf[r]
                 }
-            }
-            surf = next;
+            });
         }
     }
     // The smoothed sheet must never sink below its own bed.

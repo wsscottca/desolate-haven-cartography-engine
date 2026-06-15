@@ -464,6 +464,15 @@ fn build_is_invariant_to_thread_count() {
     let sa = a.surface(100.0).expect("surface");
     let sb = b.surface(100.0).expect("surface");
     assert_eq!(bits(sa.colors), bits(sb.colors), "colours identical across thread counts");
+
+    // Liquid surface smoothing is parallelised too — flood some water and compare across thread counts.
+    let mut la = built();
+    let mut lb = built();
+    la.paint_liquid(500.0, 500.0, 300.0, 0.4, 0);
+    lb.paint_liquid(500.0, 500.0, 300.0, 0.4, 0);
+    let qa = one.install(|| la.liquid_surface(100.0)).expect("liquid");
+    let qb = many.install(|| lb.liquid_surface(100.0)).expect("liquid");
+    assert_eq!(bits(qa.positions), bits(qb.positions), "liquid surface identical across thread counts");
 }
 
 #[test]
