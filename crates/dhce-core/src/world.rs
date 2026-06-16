@@ -14,7 +14,7 @@
 use crate::fluid::{self, LiquidField, LiquidSurface};
 use crate::mesh::Mesh;
 use crate::scatter::Instance;
-use crate::{biomes, elevation, geometry, scatter, streams, volumetric};
+use crate::{biomes, elevation, geometry, rainfall, scatter, streams, volumetric};
 use std::collections::HashMap;
 
 /// Channel-carve depth per unit tool intensity (Course tool).
@@ -367,6 +367,15 @@ impl World {
 
     // --- liquid simulation ---
 
+    /// Lowest authored elevation across the world (normalized); `0.0` before [`build`]. Lets the
+    /// front-end seat a default sea level a fixed height above the terrain's deepest basin.
+    pub fn min_elevation(&self) -> f64 {
+        if self.elevation_r.is_empty() {
+            return 0.0;
+        }
+        self.elevation_r.iter().copied().fold(f64::INFINITY, f64::min)
+    }
+
     /// Fill every region below `level` with water (instant sea + lakes).
     pub fn set_sea_level(&mut self, level: f64) {
         self.sea_level = level;
@@ -377,6 +386,33 @@ impl World {
     /// Add a uniform `amount` of rainfall to land above the current sea level.
     pub fn rain(&mut self, amount: f64) {
         fluid::add_rain(&mut self.field, &self.elevation_r, self.sea_level, amount);
+        self.mark_all_liquid_changed();
+    }
+
+    /// Deposit climate-driven rainfall: a per-cell field derived from each biome's water profile
+    /// (raininess / rain-shadow / evaporation) plus the per-cell moisture / temperature traits and
+    /// an orographic term (terrain rising into the prevailing wind rains more; the lee sits in
+    /// shadow). Run [`step_fluid`](World::step_fluid) afterwards to let it pool and drain.
+    pub fn apply_rainfall(&mut self) {
+        let n = self.elevation_r.len();
+        if n == 0 || self.mesh.is_none() {
+            return;
+        }
+        let positions: Vec<[f64; 2]> = {
+            let mesh = self.mesh.as_ref().unwrap();
+            (0..n).map(|r| mesh.pos_of_r(r)).collect()
+        };
+        let rain = rainfall::compute_rainfall(
+            &self.elevation_r,
+            &self.moisture_r,
+            &self.temperature_r,
+            &self.biome_r,
+            &self.biome_water,
+            &positions,
+            &self.neighbors,
+            self.sea_level,
+        );
+        fluid::add_rain_field(&mut self.field, &self.elevation_r, self.sea_level, &rain);
         self.mark_all_liquid_changed();
     }
 
@@ -1010,6 +1046,48 @@ impl World {
         for d in self.chunk_dirty.iter_mut() {
             *d = true;
         }
+    }
+
+    /// Locally blend the scalar trait fields within the brush footprint — the **transition brush**.
+    /// A drag across a biome seam softens just the cells under the brush (Laplacian passes over the
+    /// footprint only), unlike the global [`blend_traits`] bake. `blend_width_m` maps to a pass count
+    /// the same way as the global bake. Smooths the live `*_r` fields in place (strokes accumulate);
+    /// leaves the painted `*_base` snapshots untouched, so a later global blend still grades from the
+    /// original paints. Returns the cells touched (for the front-end's dirty repaint).
+    pub fn blend_brush(&mut self, cx: f64, cy: f64, radius: f64, blend_width_m: f64) -> Vec<u32> {
+        let n = self.elevation_r.len();
+        if self.mesh.is_none() || n == 0 || self.neighbors.len() != n {
+            return Vec::new();
+        }
+        let r2 = radius * radius;
+        let candidates = self.brush_candidates(cx, cy, radius);
+        let (bexag, bhy) = (self.brush_exag, self.brush_hit_y);
+        let mut footprint: Vec<u32> = Vec::new();
+        {
+            let mesh = self.mesh.as_ref().unwrap();
+            for &rid in &candidates {
+                let ri = rid as usize;
+                let p = mesh.pos_of_r(ri);
+                let dv = self.elevation_r[ri] * bexag - bhy; // 3D sphere: vertical term
+                if (p[0] - cx).powi(2) + (p[1] - cy).powi(2) + dv * dv < r2 {
+                    footprint.push(rid);
+                }
+            }
+        }
+        if footprint.is_empty() {
+            return footprint;
+        }
+        // Width (m) → pass count, same mapping as blend_traits (one pass ≈ one cell-ring).
+        let pitch = (self.width * self.height / n as f64).sqrt().max(1.0);
+        let iters = ((blend_width_m / pitch).round() as usize).clamp(1, MAX_BLEND_ITERS);
+        diffuse_subset(&mut self.jaggedness_r, &self.neighbors, &footprint, iters);
+        diffuse_subset(&mut self.relief_r, &self.neighbors, &footprint, iters);
+        diffuse_subset(&mut self.foothill_falloff_r, &self.neighbors, &footprint, iters);
+        diffuse_subset(&mut self.erosion_r, &self.neighbors, &footprint, iters);
+        diffuse_subset(&mut self.temperature_r, &self.neighbors, &footprint, iters);
+        diffuse_subset(&mut self.moisture_r, &self.neighbors, &footprint, iters);
+        self.after_edit(&footprint);
+        footprint
     }
 
     /// Switch the colour view (see the `VIEW_*` consts): `Natural` shows the composed terrain
@@ -2170,10 +2248,20 @@ impl World {
     }
 
     /// Rule-based scatter (the N3d model-slot library): deterministic placement from authored rules
-    /// over the trait fields (vegetation / region / elevation). `Instance::species` is the slot index.
+    /// over the trait fields (vegetation / biome / region / elevation). `Instance::species` is the
+    /// slot index.
     pub fn scatter_by_rules(&self, rules: &[scatter::ScatterRule], exaggeration: f64, seed: u64) -> Vec<Instance> {
         match &self.mesh {
-            Some(mesh) => scatter::scatter_by_rules(seed, mesh, &self.elevation_r, &self.vegetation_r, &self.region_r, rules, exaggeration),
+            Some(mesh) => scatter::scatter_by_rules(
+                seed,
+                mesh,
+                &self.elevation_r,
+                &self.vegetation_r,
+                &self.region_r,
+                &self.biome_r,
+                rules,
+                exaggeration,
+            ),
             None => Vec::new(),
         }
     }
@@ -2496,6 +2584,36 @@ fn diffuse_field(base: &[f64], neighbors: &[Vec<u32>], iters: usize) -> Vec<f64>
         std::mem::swap(&mut cur, &mut next);
     }
     cur
+}
+
+/// Laplacian-smooth only the `subset` cells of `field` in place (Jacobi iteration: each pass reads
+/// the field state from the start of that pass, so it's order-independent and deterministic).
+/// Neighbours outside the subset act as fixed anchors — that's what pulls the brushed seam toward
+/// its surroundings. Used by [`World::blend_brush`].
+fn diffuse_subset(field: &mut [f64], neighbors: &[Vec<u32>], subset: &[u32], iters: usize) {
+    if iters == 0 || subset.is_empty() {
+        return;
+    }
+    let mut new_vals = vec![0.0f64; subset.len()];
+    for _ in 0..iters {
+        for (k, &rid) in subset.iter().enumerate() {
+            let r = rid as usize;
+            let nb = &neighbors[r];
+            if nb.is_empty() {
+                new_vals[k] = field[r];
+                continue;
+            }
+            let mut sum = 0.0;
+            for &j in nb {
+                sum += field[j as usize];
+            }
+            let mean = sum / nb.len() as f64;
+            new_vals[k] = field[r] + (mean - field[r]) * BLEND_W;
+        }
+        for (k, &rid) in subset.iter().enumerate() {
+            field[rid as usize] = new_vals[k];
+        }
+    }
 }
 
 /// Fast integer hash (fmix32-style) for deterministic per-region color jitter.

@@ -1,5 +1,5 @@
 ---
-status: draft
+status: active
 date: 2026-06-15
 owner: wsscottca
 ---
@@ -7,7 +7,34 @@ owner: wsscottca
 # DHCE — next-session backlog
 
 Captured at end of the 2026-06-15 session (after the dock theme/collapsible + unified contextual
-brushes redesign). Everything below is **for the next session** — nothing here is done yet.
+brushes redesign).
+
+## Progress — 2026-06-16
+
+- **Items 1–4** (UI moves): done in commit `1b041be` (prior session).
+- **Item 6** (climate-driven rain): done. New core `rainfall::compute_rainfall` + `fluid::add_rain_field`
+  + `world::apply_rainfall`; GDExtension `apply_rainfall`. Manual Rain brush + cloud/particle rig
+  removed from `DhceWorld`/`DhcePlugin`/`DhceDock`/`ToolState`; dock "Apply rainfall" button added.
+- **Item 8** (default sea level): done. Core `min_elevation`; `DhceWorld.OnGenDone` seats sea level
+  ~1 km above the lowest basin on a fresh generate; dock slider syncs; `SeaLevel` persists in state.
+- **Item 7** (per-biome scatter): done with a true `biome_mask` (small core change — the "no core
+  change" assumption was wrong: `region_mask` gates the named Region, not the painted biome).
+  `ScatterRule.biome_mask` + gate; 8→9-float rule array; `DhceScatterSlot.BiomeMask` + dock biome grid.
+- **Item 5** (transitions brush): done alongside the global bake. Core `world::blend_brush` +
+  `diffuse_subset`; GDExtension `blend_brush`; `ToolKind.Transition` + dock brush + width slider +
+  `transition.svg` icon. Global "Blend borders" kept.
+- **Bug 10** (all-white map): addressed by removing the rain cloud/particle rig (item 6, the leading
+  suspect). Needs a visual confirm in the editor.
+- **Bug 9** (WASD freelook): diagnosed — no DHCE code defect. The plugin forwards keyboard + RMB, so
+  Godot's native editor flythrough (hold RMB + WASD) is not blocked; the play-mode `OrbitCamera`
+  RMB→WASD path is correct. Most likely an expectation/context issue; revisit only if it still
+  misbehaves after a real repro (optionally add a no-RMB "fly" toggle).
+
+Core tests green (`cargo test -p dhce-core`, 33 tests incl. new rainfall/biome_mask); DLL rebuilt +
+copied; C# project builds (0 errors). Remaining: open the editor to import `transition.svg` + reload
+the DLL, then the visual checks for bugs 9/10.
+
+Original captured items below (for reference).
 
 ## Context / where we left off
 

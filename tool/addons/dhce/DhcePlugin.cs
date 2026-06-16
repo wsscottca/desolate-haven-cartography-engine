@@ -114,9 +114,6 @@ public partial class DhcePlugin : EditorPlugin
         {
             if (_needRepaint) { _edited.RepaintDirtyTerrain(); _needRepaint = false; }
             if (_needLiquid) { _edited.RebuildLiquid(); _needLiquid = false; }
-            // Progressive rain runs every frame while the Rain tool is active; any other tool stops it.
-            if (_tool.Active == ToolKind.Rain) _edited.StepRain(delta);
-            else if (_edited.RainActive) _edited.StopRain();
         }
         if (world == null || !world.GenDone) return;
         var cam = GetEditorCamera();
@@ -260,25 +257,12 @@ public partial class DhcePlugin : EditorPlugin
                 return stop;
             }
 
-            // Rain tool: a click starts progressive rainfall over the area (a drifting cloud rains down).
-            if (_tool.Active == ToolKind.Rain)
-            {
-                world.StartRain(hit, _tool.RadiusM, _tool.RainRate);
-                _painting = true;
-                _dock?.SetStatus("raining — drag to move the cloud, switch tools to stop");
-                return stop;
-            }
             _painting = true;
         }
         else // motion
         {
             var mm = (InputEventMouseMotion)@event;
             if (_tool.Active == ToolKind.RegionSelect) return pass; // Select is click-only
-            if (_tool.Active == ToolKind.Rain) // drag relocates the rain area
-            {
-                if (_painting && mm.ButtonMask.HasFlag(MouseButtonMask.Left) && onTerrain) world.MoveRain(hit, _tool.RadiusM);
-                return stop;
-            }
             if (!_painting || !mm.ButtonMask.HasFlag(MouseButtonMask.Left) || !onTerrain) return pass;
         }
 

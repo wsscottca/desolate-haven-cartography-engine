@@ -5,7 +5,7 @@ namespace DesolateHaven.Cartography;
 /// The authoring tools, in toolbar order. Shortcuts 1–7 map to these (see ToolUi).
 /// (Named ToolKind so the `Tool` name is free for CartographerSpike's ToolState property.)
 /// `Biome` stamps a Region preset's whole trait bundle; `Trait` paints a single trait.
-public enum ToolKind { Raise, Carve, Level, Crest, River, Flood, Biome, Trait, Region, Territory, RegionSelect, Cave, Rain }
+public enum ToolKind { Raise, Carve, Level, Crest, River, Flood, Biome, Trait, Region, Territory, RegionSelect, Cave, Transition }
 
 /// What a stroke changed, so the caller knows which render surface(s) to refresh.
 [System.Flags]
@@ -41,7 +41,7 @@ public sealed class ToolState
     public int LiquidKind = 0;         // 0 water, 1 lava (River + Flood)
     public float CourseIntensity = 0.05f; // small: course water/carve gains are large in the core
     public float FloodAmount = 0.04f;     // small per dab; the stroke settles on release
-    public float RainRate = 0.002f;       // water added per frame across the Rain area (progressive)
+    public float BlendWidthM = 200f;      // transition-brush band width (m) → blend_brush
 
     /// Apply the active tool at world-ground point `hit` (Godot XZ plane → core x,y). Returns
     /// which surfaces changed. `exaggeration` converts the metre sculpt step to the core's
@@ -67,6 +67,7 @@ public sealed class ToolState
             case ToolKind.Biome: engine.Call("paint_region_traits", x, z, r, BiomeId); return EditResult.Terrain;
             case ToolKind.Trait: engine.Call("paint_trait", x, z, r, TraitId, (double)TraitValue); return EditResult.Terrain;
             case ToolKind.Region: engine.Call("paint_region", x, z, r, RegionId); return EditResult.Terrain;
+            case ToolKind.Transition: engine.Call("blend_brush", x, z, r, (double)BlendWidthM); return EditResult.Terrain;
             default: return EditResult.None;
         }
     }

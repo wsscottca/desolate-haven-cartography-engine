@@ -509,7 +509,7 @@ fn rule_scatter_respects_vegetation_and_elevation() {
 
     let forest = [ScatterRule {
         slot: 0, density: 1.0, scale_min: 1.0, scale_max: 2.0,
-        elev_min: -10.0, elev_max: 10.0, veg_mask: 1 << 3 /* Forest */, region_mask: 0,
+        elev_min: -10.0, elev_max: 10.0, veg_mask: 1 << 3 /* Forest */, region_mask: 0, biome_mask: 0,
     }];
     let inst = w.scatter_by_rules(&forest, 100.0, 7);
     assert!(!inst.is_empty(), "the forest rule places on the painted patch");
@@ -519,9 +519,29 @@ fn rule_scatter_respects_vegetation_and_elevation() {
     // An elevation band above the terrain ceiling matches nothing.
     let too_high = [ScatterRule {
         slot: 0, density: 1.0, scale_min: 1.0, scale_max: 1.0,
-        elev_min: 5.0, elev_max: 10.0, veg_mask: 0, region_mask: 0,
+        elev_min: 5.0, elev_max: 10.0, veg_mask: 0, region_mask: 0, biome_mask: 0,
     }];
     assert!(w.scatter_by_rules(&too_high, 100.0, 7).is_empty(), "no cell sits above elevation 5");
+}
+
+#[test]
+fn rule_scatter_respects_biome_mask() {
+    use dhce_core::scatter::ScatterRule;
+    let mut w = built();
+    w.paint_biome(500.0, 500.0, 300.0, 5); // paint biome id 5 over the centre patch
+
+    let masked = [ScatterRule {
+        slot: 0, density: 1.0, scale_min: 1.0, scale_max: 1.0,
+        elev_min: -10.0, elev_max: 10.0, veg_mask: 0, region_mask: 0, biome_mask: 1 << 4, // biome 5
+    }];
+    let any = [ScatterRule {
+        slot: 0, density: 1.0, scale_min: 1.0, scale_max: 1.0,
+        elev_min: -10.0, elev_max: 10.0, veg_mask: 0, region_mask: 0, biome_mask: 0,
+    }];
+    let masked_n = w.scatter_by_rules(&masked, 100.0, 9).len();
+    let any_n = w.scatter_by_rules(&any, 100.0, 9).len();
+    assert!(masked_n > 0, "the biome-masked rule places on the painted patch");
+    assert!(any_n >= masked_n, "an unmasked rule places at least as widely as the masked one");
 }
 
 #[test]

@@ -150,6 +150,15 @@ public partial class DhceWorld : Node3D
         _built = new bool[n];
         _chunkLod = new int[n];
         _genDone = true;
+        if (!_loadingState)
+        {
+            // Default sea level: ~1 km above the terrain's lowest basin. _exaggeration is metres per
+            // normalized unit (= TerrainHeightKm·1000 / ElevSpan), so 1000 / _exaggeration is 1 km in
+            // normalized elevation. (A Load() restores the saved level instead — see Load.)
+            float minElev = (float)_engine.Call("min_elevation").As<double>();
+            SeaLevelNorm = minElev + 1000f / _exaggeration;
+            _engine.Call("set_sea_level", (double)SeaLevelNorm);
+        }
         UpdateStreaming(WorldCenter); // seed the centre so something shows immediately
     }
 
@@ -157,7 +166,6 @@ public partial class DhceWorld : Node3D
     {
         PreviewScatter(false); // drop any scatter preview before discarding the world
         PreviewCaves(false);
-        StopRain(); // drop any rain cloud/particles before discarding the world
         if (_chunks != null) foreach (var mi in _chunks) mi?.QueueFree();
         if (_liquidChunks != null) foreach (var mi in _liquidChunks) mi?.QueueFree();
         _chunks = null;
@@ -309,123 +317,35 @@ public partial class DhceWorld : Node3D
             if (ci >= 0 && ci < _liquidChunkMeshes.Length && _built[ci]) BuildLiquidChunk(ci);
     }
 
-    // --- progressive rain: gradual area rainfall + a drifting cloud / falling-rain visualization ---
+    // --- sea level ---
 
-    private bool _rainActive;
-    private Vector3 _rainCenter;        // core space; XZ = area centre, Y ≈ surface height under it
-    private float _rainRadius = 500f;
-    private float _rainRate = 0.002f;
-    private double _rainPhase;          // cloud-drift accumulator
-    private Node3D _rainRig;            // ephemeral cloud + rain particles under _renderRoot
+    private bool _loadingState; // true while Load() runs, so a fresh-generate default doesn't fire
 
-    public bool RainActive => _rainActive;
+    /// Current water level (normalized elevation), tracked here for save/load. Defaulted at generate
+    /// to 1 km above the terrain's lowest basin (see OnGenDone).
+    public float SeaLevelNorm { get; private set; }
 
-    /// Begin progressive rainfall over an area centred on `coreCenter` (core space; Y is the surface
-    /// height under the cursor). Radius comes from the brush size; rate from the rain-rate control.
-    public void StartRain(Vector3 coreCenter, float radius, float rate)
+    /// Set the water level (normalized elevation), refill, and track it for save/load.
+    public void SetSeaLevel(double level)
     {
-        _rainCenter = coreCenter;
-        _rainRadius = Mathf.Max(radius, 1f);
-        _rainRate = Mathf.Max(rate, 0f);
-        _rainActive = true;
-        if (_rainRig != null && GodotObject.IsInstanceValid(_rainRig)) _rainRig.QueueFree();
-        _rainRig = null; // rebuild so a new radius resizes the cloud + emitter
-        EnsureRainRig();
-        UpdateRainRig();
-    }
-
-    /// Drag the rain area to a new spot (cheap: move only, no rebuild).
-    public void MoveRain(Vector3 coreCenter, float radius)
-    {
-        if (!_rainActive) { StartRain(coreCenter, radius, _rainRate); return; }
-        _rainCenter = coreCenter;
-        _rainRadius = Mathf.Max(radius, 1f);
-        UpdateRainRig();
-    }
-
-    public void StopRain()
-    {
-        _rainActive = false;
-        if (_rainRig != null && GodotObject.IsInstanceValid(_rainRig)) _rainRig.QueueFree();
-        _rainRig = null;
-    }
-
-    /// Per-frame progressive rainfall: spread a little water across the area (smoothstep falloff),
-    /// settle it a few steps so it pools and runs downhill, and drift the cloud. The plugin calls this
-    /// each frame while the Rain tool is active — replaces the old one-shot whole-map flood.
-    public void StepRain(double delta)
-    {
-        if (!_rainActive || _engine == null || !_genDone) return;
-        _engine.Call("paint_liquid", (double)_rainCenter.X, (double)_rainCenter.Z, (double)_rainRadius, (double)_rainRate, 0);
-        _engine.Call("step_fluid", 0.45, 0.0015, 6);
+        SeaLevelNorm = (float)level;
+        if (_engine == null) return;
+        _engine.Call("set_sea_level", level);
         RebuildLiquid();
-        _rainPhase += delta * 0.4;
-        UpdateRainRig();
     }
 
-    private void EnsureRainRig()
+    // --- climate-driven rainfall: derive a per-cell rain field in the core, then settle it ---
+
+    /// Deposit climate-driven rainfall — a per-cell field the core derives from each biome's water
+    /// profile (raininess / rain-shadow / evaporation) plus the per-cell moisture / temperature
+    /// traits and an orographic term — then settle it a few steps so it pools and runs downhill.
+    /// Replaces the old manual rain brush + drifting-cloud rig.
+    public void ApplyRainfall()
     {
-        if (_rainRig != null && GodotObject.IsInstanceValid(_rainRig)) return;
-        EnsureRenderRoot();
-        _rainRig = new Node3D { Name = "DhceRain" };
-        _renderRoot.AddChild(_rainRig); // owner left null → ephemeral preview
-
-        float r = _rainRadius;
-        var cloudMat = new StandardMaterial3D
-        {
-            ShadingMode = BaseMaterial3D.ShadingModeEnum.Unshaded,
-            AlbedoColor = new Color(0.55f, 0.58f, 0.62f, 0.55f),
-            Transparency = BaseMaterial3D.TransparencyEnum.Alpha,
-            CullMode = BaseMaterial3D.CullModeEnum.Disabled,
-        };
-        _rainRig.AddChild(new MeshInstance3D
-        {
-            Name = "Cloud",
-            Mesh = new SphereMesh { Radius = r * 1.2f, Height = r * 0.9f },
-            MaterialOverride = cloudMat,
-            Scale = new Vector3(1f, 0.35f, 1f),
-            CastShadow = GeometryInstance3D.ShadowCastingSetting.Off,
-        });
-
-        var rainMat = new StandardMaterial3D
-        {
-            ShadingMode = BaseMaterial3D.ShadingModeEnum.Unshaded,
-            AlbedoColor = new Color(0.55f, 0.70f, 0.95f, 0.7f),
-            Transparency = BaseMaterial3D.TransparencyEnum.Alpha,
-            BillboardMode = BaseMaterial3D.BillboardModeEnum.Enabled,
-        };
-        var quad = new QuadMesh { Size = new Vector2(Mathf.Max(r * 0.01f, 1f), Mathf.Max(r * 0.12f, 12f)), Material = rainMat };
-        var pm = new ParticleProcessMaterial
-        {
-            EmissionShape = ParticleProcessMaterial.EmissionShapeEnum.Box,
-            EmissionBoxExtents = new Vector3(r, 10f, r),
-            Direction = new Vector3(0f, -1f, 0f),
-            Spread = 0f,
-            Gravity = new Vector3(0f, -3000f, 0f),
-            InitialVelocityMin = 400f,
-            InitialVelocityMax = 700f,
-        };
-        _rainRig.AddChild(new GpuParticles3D
-        {
-            Name = "Fall",
-            Amount = 600,
-            Lifetime = 1.6,
-            DrawPass1 = quad,
-            ProcessMaterial = pm,
-            CastShadow = GeometryInstance3D.ShadowCastingSetting.Off,
-        });
-    }
-
-    private void UpdateRainRig()
-    {
-        if (_rainRig == null || !GodotObject.IsInstanceValid(_rainRig)) return;
-        float cloudH = _rainCenter.Y + Mathf.Max(_rainRadius * 1.5f, 1500f);
-        float driftX = Mathf.Cos((float)_rainPhase) * _rainRadius * 0.15f;
-        float driftZ = Mathf.Sin((float)_rainPhase) * _rainRadius * 0.15f;
-        if (_rainRig.GetNodeOrNull<Node3D>("Cloud") is { } cloud)
-            cloud.Position = new Vector3(_rainCenter.X + driftX, cloudH, _rainCenter.Z + driftZ);
-        if (_rainRig.GetNodeOrNull<GpuParticles3D>("Fall") is { } fall)
-            fall.Position = new Vector3(_rainCenter.X, cloudH, _rainCenter.Z);
+        if (_engine == null || !_genDone) return;
+        _engine.Call("apply_rainfall");
+        _engine.Call("step_fluid", 0.45, 0.0015, 8);
+        RebuildLiquid();
     }
 
     /// Switch the colour view (0 Natural … 4 Biome); data views use the unshaded material.
@@ -518,7 +438,7 @@ public partial class DhceWorld : Node3D
         return new DhceWorldState
         {
             Seed = Seed, WorldSizeKm = WorldSizeKm, SpacingM = SpacingM, Octaves = Octaves,
-            TerrainHeightKm = TerrainHeightKm, ChunkSizeM = ChunkSizeM,
+            TerrainHeightKm = TerrainHeightKm, ChunkSizeM = ChunkSizeM, SeaLevel = SeaLevelNorm,
             Elevation = _engine.Call("elevation_export").As<float[]>(),
             Biome = _engine.Call("biome_export").As<byte[]>(),
             BiomeLocked = _engine.Call("biome_locked_export").As<byte[]>(),
@@ -539,8 +459,14 @@ public partial class DhceWorld : Node3D
         if (s == null) return;
         Seed = s.Seed; WorldSizeKm = s.WorldSizeKm; SpacingM = s.SpacingM; Octaves = s.Octaves;
         TerrainHeightKm = s.TerrainHeightKm; ChunkSizeM = s.ChunkSizeM;
-        Generate(); // deterministic mesh + chunk slots from the params
+        _loadingState = true;
+        Generate(); // deterministic mesh + chunk slots from the params (skips the default sea level)
+        _loadingState = false;
         if (_engine == null) return;
+
+        // Restore the saved sea level before the saved liquid overrides the fill below.
+        SeaLevelNorm = s.SeaLevel;
+        _engine.Call("set_sea_level", (double)s.SeaLevel);
 
         void SetF(string fn, float[] a) { if (a is { Length: > 0 }) _engine.Call(fn, a); }
         void SetB(string fn, byte[] a) { if (a is { Length: > 0 }) _engine.Call(fn, a); }

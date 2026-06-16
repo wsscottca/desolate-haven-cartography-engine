@@ -287,9 +287,21 @@ impl DhceEngine {
     fn set_sea_level(&mut self, level: f64) {
         self.world.set_sea_level(level);
     }
+    /// Lowest authored elevation (normalized); lets the tool seat a default sea level a fixed height
+    /// above the deepest basin at generate.
+    #[func]
+    fn min_elevation(&self) -> f64 {
+        self.world.min_elevation()
+    }
     #[func]
     fn rain(&mut self, amount: f64) {
         self.world.rain(amount);
+    }
+    /// Deposit climate-driven rainfall (per-biome raininess / rain-shadow / evaporation + per-cell
+    /// moisture / temperature + orographic lift). Step the fluid solver afterwards to settle it.
+    #[func]
+    fn apply_rainfall(&mut self) {
+        self.world.apply_rainfall();
     }
     #[func]
     fn step_fluid(&mut self, flow_rate: f64, evaporation: f64, substeps: i64) {
@@ -448,6 +460,12 @@ impl DhceEngine {
     #[func]
     fn paint_region_traits(&mut self, cx: f64, cy: f64, radius: f64, biome_id: i64) -> PackedInt32Array {
         u32_to_packed(&self.world.paint_region_traits(cx, cy, radius, biome_id.max(0) as u8))
+    }
+    /// Transition brush: locally blend the scalar traits within the footprint (soften one seam),
+    /// `width_m` controlling the band — unlike the global `blend_traits` bake. Returns cells touched.
+    #[func]
+    fn blend_brush(&mut self, cx: f64, cy: f64, radius: f64, width_m: f64) -> PackedInt32Array {
+        u32_to_packed(&self.world.blend_brush(cx, cy, radius, width_m))
     }
     /// Per-cell trait at world `(x, y)`; `trait_id` as in `paint_trait` (enums → index). NaN off-map.
     #[func]
@@ -652,8 +670,9 @@ impl DhceEngine {
         self.pack_scatter(inst);
     }
     /// Rule-based scatter (the N3d library) over the whole world; read via `scatter_data`/`count`.
-    /// `rules_flat` is 8 floats per slot: `[slot, density, scale_min, scale_max, elev_min, elev_max,
-    /// veg_mask, region_mask]`. `Instance::species` (the 5th packed float) carries the slot index.
+    /// `rules_flat` is 9 floats per slot: `[slot, density, scale_min, scale_max, elev_min, elev_max,
+    /// veg_mask, region_mask, biome_mask]`. `Instance::species` (the 5th packed float) carries the
+    /// slot index.
     #[func]
     fn tessellate_scatter_rules(&mut self, rules_flat: PackedFloat32Array, exaggeration: f64, seed: f64) {
         let rules = parse_rules(&rules_flat);
@@ -689,11 +708,11 @@ impl DhceEngine {
     }
 }
 
-/// Parse a flat scatter-rule array (8 floats per slot) into core [`ScatterRule`]s.
+/// Parse a flat scatter-rule array (9 floats per slot) into core [`ScatterRule`]s.
 fn parse_rules(flat: &PackedFloat32Array) -> Vec<ScatterRule> {
     let v = flat.to_vec();
-    let mut out = Vec::with_capacity(v.len() / 8);
-    for c in v.chunks_exact(8) {
+    let mut out = Vec::with_capacity(v.len() / 9);
+    for c in v.chunks_exact(9) {
         out.push(ScatterRule {
             slot: c[0] as u32,
             density: c[1] as f64,
@@ -703,6 +722,7 @@ fn parse_rules(flat: &PackedFloat32Array) -> Vec<ScatterRule> {
             elev_max: c[5] as f64,
             veg_mask: c[6] as u32,
             region_mask: c[7] as u32,
+            biome_mask: c[8] as u32,
         });
     }
     out

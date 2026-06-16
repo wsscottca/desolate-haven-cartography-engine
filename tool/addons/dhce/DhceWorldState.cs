@@ -22,6 +22,7 @@ public partial class DhceWorldState : Resource
     [Export] public int Octaves = 6;
     [Export] public float TerrainHeightKm = 2.4f;
     [Export] public float ChunkSizeM = 256f;
+    [Export] public float SeaLevel = 0f; // water level (normalized elevation); default set at generate
 
     // Authored per-cell fields (restored after a deterministic build).
     [Export] public float[] Elevation = System.Array.Empty<float>();

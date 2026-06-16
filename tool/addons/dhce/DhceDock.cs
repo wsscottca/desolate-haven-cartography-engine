@@ -39,7 +39,9 @@ public partial class DhceDock : ScrollContainer
     private LineEdit _exportPath;
 
     // Contextual brush-option groups — only the active tool's group is shown (see RefreshBrushOptions).
-    private VBoxContainer _optSize, _optStrength, _optLiquid, _optRain, _optCave, _optBiome, _optRegion, _optTrait;
+    private VBoxContainer _optSize, _optStrength, _optLiquid, _optTransition, _optCave, _optBiome, _optRegion, _optTrait;
+    private HSlider _seaLevelSlider;
+    private Label _seaLevelLabel;
 
     // Scatter (N3d) model-slot editor.
     private OptionButton _slotPick;
@@ -47,6 +49,7 @@ public partial class DhceDock : ScrollContainer
     private HSlider _slotDensity;
     private SpinBox _slotScaleMin, _slotScaleMax, _slotElevMin, _slotElevMax, _slotVisEnd;
     private CheckBox[] _slotVeg;
+    private CheckBox[] _slotBiome;
     private CheckButton _scatterPreview;
     private CheckBox _slotInstances;
     private bool _loadingSlot;
@@ -215,7 +218,7 @@ public partial class DhceDock : ScrollContainer
         AddTraitBrushButton(toolRow, "vegetation", "Vegetation", 2);
         AddTraitBrushButton(toolRow, "palette", "Palette family", 3);
         AddToolButton(toolRow, "cave", "Cave", ToolKind.Cave);
-        AddToolButton(toolRow, null, "Rain", ToolKind.Rain);
+        AddToolButton(toolRow, "transition", "Transition", ToolKind.Transition);
 
         // SIZE — applies to every tool, always shown.
         _optSize = NewGroup(sec);
@@ -237,11 +240,11 @@ public partial class DhceDock : ScrollContainer
         Button(_optLiquid, "Generate streams", () => { if (HasWorld) { Eng.Call("generate_streams", 0.5, 1.0); _world.RepaintDirtyTerrain(); _world.RebuildLiquid(); } });
         _target = sec;
 
-        // RAIN.
-        _optRain = NewGroup(sec);
-        _target = _optRain;
-        Slider("Rain rate", 0.0, 0.01, 0.0005, _tool.RainRate, v => _tool.RainRate = (float)v);
-        _optRain.AddChild(Dim("Drag over terrain; a cloud drifts and rains, water pools and flows."));
+        // TRANSITION brush — local blend across a biome seam (the global "Blend borders" bake stays).
+        _optTransition = NewGroup(sec);
+        _target = _optTransition;
+        Slider("Width (m)", 0, 1200, 25, _tool.BlendWidthM, v => _tool.BlendWidthM = (float)v);
+        _optTransition.AddChild(Dim("Drag across a biome seam to soften just that border. Global 'Blend borders' (TRANSITIONS) still blends the whole map."));
         _target = sec;
 
         // CAVE.
@@ -305,7 +308,7 @@ public partial class DhceDock : ScrollContainer
         bool region = a == ToolKind.Region || a == ToolKind.Territory || a == ToolKind.RegionSelect;
         if (_optStrength != null) _optStrength.Visible = sculpt;
         if (_optLiquid != null) _optLiquid.Visible = liquid;
-        if (_optRain != null) _optRain.Visible = a == ToolKind.Rain;
+        if (_optTransition != null) _optTransition.Visible = a == ToolKind.Transition;
         if (_optCave != null) _optCave.Visible = a == ToolKind.Cave;
         if (_optBiome != null) _optBiome.Visible = a == ToolKind.Biome;
         if (_optRegion != null) _optRegion.Visible = region;
@@ -365,12 +368,19 @@ public partial class DhceDock : ScrollContainer
     private void BuildPhysicsSection()
     {
         Header("PHYSICS", open: false);
-        Slider("Sea level", -1.0, 1.0, 0.01, 0.0, v => { if (HasWorld) { Eng.Call("set_sea_level", v); _world.RebuildLiquid(); } });
+        // Sea level — captured so it syncs to the generated default (1 km above the lowest basin).
+        _seaLevelLabel = Dim("Sea level: 0.00");
+        _target.AddChild(_seaLevelLabel);
+        _seaLevelSlider = new HSlider { MinValue = -1.5, MaxValue = 1.5, Step = 0.01, Value = 0.0, SizeFlagsHorizontal = SizeFlags.ExpandFill };
+        _seaLevelSlider.ValueChanged += v => { _seaLevelLabel.Text = $"Sea level: {v:0.00}"; if (HasWorld) _world.SetSeaLevel(v); };
+        _target.AddChild(_seaLevelSlider);
+
         Slider("Flow rate", 0.0, 0.5, 0.01, _simFlow, v => _simFlow = v);
         Slider("Evaporation", 0.0, 0.02, 0.0005, _simEvap, v => _simEvap = v);
         Slider("Substeps", 1, 40, 1, _simSubsteps, v => _simSubsteps = (int)v);
+        Button(_target, "Apply rainfall", () => { if (HasWorld) { _world.ApplyRainfall(); _minimap?.Refresh(); SetStatus("applied climate rainfall — Settle further if needed"); } });
         Button(_target, "Settle (1 step)", () => { if (HasWorld) { Eng.Call("step_fluid", _simFlow, _simEvap, _simSubsteps); _world.RebuildLiquid(); } });
-        Button(_target, "Clear liquid", () => { if (HasWorld) { _world.StopRain(); Eng.Call("clear_liquid"); _world.RebuildLiquid(); } });
+        Button(_target, "Clear liquid", () => { if (HasWorld) { Eng.Call("clear_liquid"); _world.RebuildLiquid(); } });
         _simulate = new CheckButton { Text = "Simulate" };
         _target.AddChild(_simulate);
     }
@@ -410,6 +420,11 @@ public partial class DhceDock : ScrollContainer
         _size.Value = _world.WorldSizeKm;
         _spacing.Value = _world.SpacingM;
         _chunk.Value = _world.ChunkSizeM;
+        if (_seaLevelSlider != null)
+        {
+            _seaLevelSlider.SetValueNoSignal(_world.SeaLevelNorm);
+            if (_seaLevelLabel != null) _seaLevelLabel.Text = $"Sea level: {_world.SeaLevelNorm:0.00}";
+        }
     }
 
     private void SelectTrait(int dropdownIdx, bool arm = true)
@@ -616,6 +631,18 @@ public partial class DhceDock : ScrollContainer
         }
         _target.AddChild(vegGrid);
 
+        _target.AddChild(Dim("Appears in biomes (none ticked = any):"));
+        var biomeGrid = new GridContainer { Columns = 2 };
+        _slotBiome = new CheckBox[BiomeNames.Length];
+        for (int i = 0; i < BiomeNames.Length; i++)
+        {
+            var cb = new CheckBox { Text = BiomeNames[i] };
+            cb.Toggled += _ => { var s = SelectedSlot(); if (s != null && !_loadingSlot) s.BiomeMask = BiomeMaskFromChecks(); };
+            _slotBiome[i] = cb;
+            biomeGrid.AddChild(cb);
+        }
+        _target.AddChild(biomeGrid);
+
         _slotInstances = new CheckBox { Text = "Bake as individual instances (hand-editable)" };
         _slotInstances.Toggled += on => { var s = SelectedSlot(); if (s != null && !_loadingSlot) s.BakeAsInstances = on; };
         _target.AddChild(_slotInstances);
@@ -636,6 +663,13 @@ public partial class DhceDock : ScrollContainer
     {
         int m = 0;
         for (int i = 0; i < _slotVeg.Length; i++) if (_slotVeg[i].ButtonPressed) m |= 1 << i;
+        return m;
+    }
+
+    private int BiomeMaskFromChecks()
+    {
+        int m = 0;
+        for (int i = 0; i < _slotBiome.Length; i++) if (_slotBiome[i].ButtonPressed) m |= 1 << i;
         return m;
     }
 
@@ -687,6 +721,7 @@ public partial class DhceDock : ScrollContainer
         _slotElevMin.Value = s.ElevMin;
         _slotElevMax.Value = s.ElevMax;
         for (int i = 0; i < _slotVeg.Length; i++) _slotVeg[i].ButtonPressed = (s.VegetationMask & (1 << i)) != 0;
+        for (int i = 0; i < _slotBiome.Length; i++) _slotBiome[i].ButtonPressed = (s.BiomeMask & (1 << i)) != 0;
         _slotInstances.ButtonPressed = s.BakeAsInstances;
         _slotVisEnd.Value = s.VisibilityEndM;
         _loadingSlot = false;
