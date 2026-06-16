@@ -3,11 +3,9 @@ using Godot;
 
 namespace DesolateHaven.Cartography;
 
-/// Viewport overlay docked directly under the minimap: the live readouts for the surface under the
-/// cursor (emergent biome, named region, temperature/moisture) plus the VIEW selector — which
-/// recolours both the 3D view and the overview map — and its contextual temperature/moisture paint
-/// slider. Kept out of the dock so all map-related info reads together with the overview. Fed by the
-/// plugin each frame: `SetWorld` (for the view switch) and the per-hover `Set*Readout` calls.
+/// Viewport overlay docked under the minimap, styled with the game theme: the surface readouts
+/// (emergent biome / named region / temp-moist) and the VIEW (map-layer) selector with its
+/// contextual temperature/moisture paint slider. Fed by the plugin each frame.
 public partial class DhceMapPanel : PanelContainer
 {
     private static readonly string[] ViewNames = { "Natural", "Temperature", "Moisture", "Elevation", "Biome", "Region" };
@@ -26,30 +24,27 @@ public partial class DhceMapPanel : PanelContainer
     private OptionButton _view;
     private HSlider _viewBrushSlider;
 
-    /// Build the panel once; the plugin passes the shared ToolState + the minimap, then calls
-    /// `SetWorld` each frame and `Set*Readout` from the hover raycast.
     public void Init(ToolState tool, DhceMinimap minimap)
     {
         _tool = tool;
         _minimap = minimap;
-        MouseFilter = MouseFilterEnum.Ignore; // empty panel area never blocks viewport navigation
+        Theme = DhceUi.Theme;
         CustomMinimumSize = new Vector2(232, 0);
 
         var col = new VBoxContainer { SizeFlagsHorizontal = SizeFlags.ExpandFill };
         AddChild(col);
 
-        _biome = Dim("Biome: —"); col.AddChild(_biome);
-        _region = Dim("Region: —"); col.AddChild(_region);
-        _trait = Dim("Temp/Moist: —"); col.AddChild(_trait);
+        _biome = DhceUi.Dim("Biome: —"); col.AddChild(_biome);
+        _region = DhceUi.Dim("Region: —"); col.AddChild(_region);
+        _trait = DhceUi.Dim("Temp/Moist: —"); col.AddChild(_trait);
 
-        col.AddChild(new HSeparator());
         _view = new OptionButton();
         for (int i = 0; i < ViewNames.Length; i++) _view.AddItem(ViewNames[i], i);
         _view.Selected = 0;
         _view.ItemSelected += idx => SelectView((int)idx);
         col.AddChild(_view);
-        _viewHint = Dim(""); col.AddChild(_viewHint);
-        _viewBrushLabel = Dim("Paint value: 0.5"); _viewBrushLabel.Visible = false; col.AddChild(_viewBrushLabel);
+        _viewHint = DhceUi.Dim(""); col.AddChild(_viewHint);
+        _viewBrushLabel = DhceUi.Dim("Paint value: 0.5"); _viewBrushLabel.Visible = false; col.AddChild(_viewBrushLabel);
         _viewBrushSlider = new HSlider { MinValue = 0, MaxValue = 1, Step = 0.01, Value = 0.5, Visible = false };
         _viewBrushSlider.ValueChanged += v =>
         {
@@ -63,13 +58,18 @@ public partial class DhceMapPanel : PanelContainer
     /// Track the scene's current DhceWorld so the VIEW switch can recolour it. Cheap; called per frame.
     public void SetWorld(DhceWorld world) => _world = world;
 
-    /// Live emergent-biome descriptor under the cursor (fed by the plugin's hover raycast).
+    // Hug content so the panel sizes to the readouts + View.
+    public void HugContent()
+    {
+        var m = GetCombinedMinimumSize();
+        if (!Size.IsEqualApprox(m)) Size = m;
+    }
+
     public void SetBiomeReadout(string label)
     {
         if (_biome != null) _biome.Text = string.IsNullOrEmpty(label) ? "Biome: —" : $"Biome: {label}";
     }
 
-    /// Live named-Region under the cursor (`-1` off-map, `0` unassigned, else a place id 1..14).
     public void SetRegionReadout(long id)
     {
         if (_region == null) return;
@@ -79,7 +79,6 @@ public partial class DhceMapPanel : PanelContainer
             : "Region: ?";
     }
 
-    /// Live numeric trait inspector (temperature / moisture) under the cursor; NaN ⇒ off-map.
     public void SetTraitReadout(double temperature, double moisture)
     {
         if (_trait == null) return;
@@ -90,7 +89,7 @@ public partial class DhceMapPanel : PanelContainer
     private void SelectView(int mode)
     {
         _world?.SetViewMode(mode);
-        _minimap?.Refresh(); // the core recolours its cache to the view; the overview tracks it
+        _minimap?.Refresh();
         bool paintable = mode == 1 || mode == 2; // Temperature / Moisture
         _viewBrushSlider.Visible = paintable;
         _viewBrushLabel.Visible = paintable;
@@ -111,13 +110,6 @@ public partial class DhceMapPanel : PanelContainer
                 _ => "",
             };
         }
-    }
-
-    private static Label Dim(string text)
-    {
-        var l = new Label { Text = text, AutowrapMode = TextServer.AutowrapMode.WordSmart };
-        l.Modulate = new Color(1, 1, 1, 0.65f);
-        return l;
     }
 }
 #endif

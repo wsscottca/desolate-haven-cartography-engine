@@ -25,6 +25,7 @@ public partial class DhceWorld : Node3D
     [Export] public int ChunksPerFrame = 8;    // chunks tessellated per streaming tick
     [Export] public int LodDistance = 3;       // chunks within this (tiles) render full TIN; beyond → coarse LOD
     [Export] public int LodGridN = 8;          // coarse LOD grid resolution per chunk
+    [Export] public bool RegenerateOnLoad = true; // on open: Load(State) if assigned, else Generate() from params
     [Export] public DhceWorldState State;      // persisted snapshot; regenerated from on open (R5)
     [Export] public DhceScatterLibrary Scatter; // authored scatter model slots + rules (N3d)
     [Export] public Godot.Collections.Array<Vector4> Caves = new(); // volumetric carve spheres: xyz centre + w radius (N5)
@@ -498,10 +499,13 @@ public partial class DhceWorld : Node3D
 
     // --- persistence (R5): regenerate from a compact DhceWorldState, no mesh bake ---
 
-    /// On scene open, restore from the assigned state (regenerate + overwrite fields). No-op if none.
+    /// On scene open: restore the assigned saved state if present, otherwise regenerate from the node's
+    /// params (so reopening always shows a world without a manual Generate). Turn off via RegenerateOnLoad.
     public override void _Ready()
     {
-        if (State != null && !_genDone) Load(State);
+        if (_genDone) return;
+        if (State != null) Load(State);
+        else if (RegenerateOnLoad) Generate();
     }
 
     private string StatePath => $"res://{Name}_dhce.res";

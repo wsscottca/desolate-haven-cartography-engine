@@ -25,17 +25,19 @@ public partial class DhcePlugin : EditorPlugin
     private Node3D _caveOverlay;                 // translucent carve-sphere gizmos (ephemeral)
     private int _caveOverlayCount = -1;          // cave count the overlay was built for
     private Vector3? _lastBrushHit;              // last terrain hit (core space) — a streaming anchor
+    private Vector3 _lastCaveHit;               // last cave-brush sphere centre (core space)
 
     public override void _EnterTree()
     {
+        // Themed dock (all controls) + the under-minimap readouts/View panel + the overview minimap.
         _dock = new DhceDock();
-        _dock.Init(_tool);
-        AddControlToDock(DockSlot.RightUl, _dock);
         _minimap = new DhceMinimap();
-        AddMinimapOverlay(_minimap);
-        _dock.SetMinimap(_minimap); // the dock drives Bind/Refresh; the plugin owns its placement
         _mapPanel = new DhceMapPanel();
         _mapPanel.Init(_tool, _minimap);
+        _dock.SetMinimap(_minimap);
+        _dock.Init(_tool);
+        AddControlToDock(DockSlot.RightUl, _dock);
+        AddMinimapOverlay(_minimap);
         AddMapPanelOverlay(_mapPanel);
         SetProcess(true);
     }
@@ -79,16 +81,19 @@ public partial class DhcePlugin : EditorPlugin
         mm.OffsetTop = margin; mm.OffsetBottom = margin + size;
     }
 
-    /// Float the readouts + VIEW panel directly beneath the minimap, same width and right margin.
+    /// Float the biome panel directly beneath the minimap (top-right), pinned to the right edge and
+    /// growing left + down so it hugs its (collapsible) content.
     private static void AddMapPanelOverlay(DhceMapPanel p)
     {
         var vp = EditorInterface.Singleton.GetEditorViewport3D(0);
         if (vp == null) return;
         vp.AddChild(p);
-        const float size = 232f, margin = 12f, gap = 8f, height = 210f;
+        const float size = 232f, margin = 12f, gap = 8f;
         p.AnchorLeft = 1f; p.AnchorRight = 1f; p.AnchorTop = 0f; p.AnchorBottom = 0f;
-        p.OffsetLeft = -(size + margin); p.OffsetRight = -margin;
-        p.OffsetTop = margin + size + gap; p.OffsetBottom = margin + size + gap + height;
+        p.GrowHorizontal = Control.GrowDirection.Begin; // width extends left from the right edge
+        p.GrowVertical = Control.GrowDirection.End;      // height extends downward
+        p.OffsetRight = -margin;
+        p.OffsetTop = margin + size + gap;               // below the minimap
     }
 
     public override void _Process(double delta)
@@ -98,6 +103,7 @@ public partial class DhcePlugin : EditorPlugin
             AddMinimapOverlay(_minimap);
         if (_mapPanel != null && GodotObject.IsInstanceValid(_mapPanel) && _mapPanel.GetParent() == null)
             AddMapPanelOverlay(_mapPanel);
+        if (_mapPanel != null && GodotObject.IsInstanceValid(_mapPanel)) _mapPanel.HugContent();
 
         var world = FindWorld();
         _dock?.Bind(world);
@@ -200,18 +206,31 @@ public partial class DhcePlugin : EditorPlugin
             return HandlePolygon(world, @event, hit, onTerrain) ? stop : pass;
         }
 
-        // Cave tool places volumetric carve spheres (carved into geometry at export); sphere gizmos, no ring.
+        // Cave brush: a left-drag lays a tube of carve spheres (spaced ~half the zoom-coupled radius);
+        // spheres show as gizmos and bake into geometry on export / preview. No sculpt ring.
         if (_tool.Active == ToolKind.Cave)
         {
             FreeGizmo();
             UpdateCaveOverlay(world, true);
+            float cr = Mathf.Max(_tool.RadiusM, 1f);
             if (@event is InputEventMouseButton cb && cb.ButtonIndex == MouseButton.Left)
             {
-                if (!cb.Pressed) return stop;
-                if (!onTerrain) return pass;
-                world.AddCave(hit, Mathf.Max(_tool.RadiusM, 1f));
+                if (!cb.Pressed) { _painting = false; return stop; }
+                if (!onTerrain) { _painting = false; return pass; }
+                _painting = true;
+                world.AddCave(hit, cr);
+                _lastCaveHit = hit;
                 RebuildCaveOverlay(world);
-                _dock?.SetStatus($"placed cave ({world.CaveCount}) — carved into geometry on export");
+                _dock?.SetStatus($"caves: {world.CaveCount} — drag to carve a tunnel");
+                return stop;
+            }
+            if (@event is InputEventMouseMotion cm && _painting && onTerrain
+                && cm.ButtonMask.HasFlag(MouseButtonMask.Left) && hit.DistanceTo(_lastCaveHit) >= cr * 0.5f)
+            {
+                world.AddCave(hit, cr);
+                _lastCaveHit = hit;
+                RebuildCaveOverlay(world);
+                _dock?.SetStatus($"caves: {world.CaveCount}");
                 return stop;
             }
             return pass;
