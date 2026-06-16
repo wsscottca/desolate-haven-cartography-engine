@@ -19,11 +19,11 @@ public partial class DhceDock : ScrollContainer
     private Label _status;
     private Label _scaleReadout;
     private OptionButton _regionPick;
+    private OptionButton _viewPick;      // map-layer (VIEW) selector — moved here from DhceMapPanel
     private VBoxContainer _col;          // the sidebar dock column (this ScrollContainer's content)
     private Container _panelRoot;        // the root a new Header() opens a collapsible section under
     private VBoxContainer _target;       // the container helper controls add into (a section's content)
-    private readonly ButtonGroup _toolGroup = new();   // the 6 sculpt tools (one active)
-    private readonly ButtonGroup _traitGroup = new();  // the 4 trait brushes (one active)
+    private readonly ButtonGroup _toolGroup = new();   // every brush button (one active)
     private readonly ButtonGroup _sizeGroup = new();   // the 6 brush-size icons (one active)
     private readonly List<Button> _toolButtons = new();
     private static readonly Dictionary<string, Texture2D> _iconCache = new();
@@ -58,6 +58,7 @@ public partial class DhceDock : ScrollContainer
     private const int SimEveryNFrames = 6;
 
     private static readonly int[] TraitEngineId = { 4, 5, 6, 7 };
+    private static readonly string[] ViewNames = { "Natural", "Temperature", "Moisture", "Elevation", "Biome", "Region" };
     private static readonly string[] LandNames = { "Jaggedness", "Relief", "Foothill falloff", "Erosion" };
     private static readonly string[] VegNames = { "Barren", "Grass", "Scrub", "Forest", "Evergreen", "Marsh", "Thorn" };
     private static readonly string[] FamilyNames = { "Verdant", "Arid", "Stone", "Ashen", "Frost", "Wetland", "Exotic" };
@@ -147,6 +148,13 @@ public partial class DhceDock : ScrollContainer
         _scaleReadout = Dim("View: —"); // context-aware scale bar (LOD): viewport span at the focus
         _target.AddChild(_scaleReadout);
 
+        Header("MAP VIEW"); // map-layer selector — recolours the terrain + minimap; readouts stay under the minimap
+        _viewPick = new OptionButton();
+        for (int i = 0; i < ViewNames.Length; i++) _viewPick.AddItem(ViewNames[i], i);
+        _viewPick.Selected = 0;
+        _viewPick.ItemSelected += idx => { _world?.SetViewMode((int)idx); _minimap?.Refresh(); };
+        _target.AddChild(_viewPick);
+
         Header("WORLD");
         _seed = SpinRow("Seed", 0, 999999, 1, 12345);
         _oct = SpinRow("Octaves", 1, 12, 1, 6);
@@ -154,6 +162,12 @@ public partial class DhceDock : ScrollContainer
         _spacing = SpinRow("Spacing (m)", 4, 60, 1, 10);
         _chunk = SpinRow("Chunk size (m)", 32, 2048, 32, 256);
         Slider("Height (km)", 0.1, 10, 0.1, 5.0, v => _world?.SetTerrainHeight((float)v));
+
+        BuildBrushes();        // all paint tools + their contextual options
+        BuildShapingSection(); // region landform + shaping + transitions (not brushes)
+        BuildPaletteEditor();  // render: per-family palette colours
+        BuildPhysicsSection(); // sea level / flow / evaporation / substeps / settle / clear / simulate
+        BuildScatterSection(); // model scatter (per-slot; per-biome rework is a separate phase)
 
         Header("SAVE / LOAD", open: false);
         Button(_target, "Save world", () => { if (_world != null) SetStatus(_world.SaveToDisk()); });
@@ -168,12 +182,6 @@ public partial class DhceDock : ScrollContainer
             _minimap?.Bind(Eng, _world.WorldWidthM, _world.WorldHeightM);
             _minimap?.Refresh();
         });
-
-        BuildBrushes();        // all paint tools + their contextual options
-        BuildShapingSection(); // region landform + shaping + transitions (not brushes)
-        BuildPaletteEditor();  // render: per-family palette colours
-        BuildPhysicsSection(); // sea level / flow / evaporation / substeps / settle / clear / simulate
-        BuildScatterSection(); // model scatter (per-slot; per-biome rework is a separate phase)
 
         Header("EXPORT", open: false);
         _exportPath = new LineEdit { Text = DhceLevelSlicer.DefaultExportDir(), TooltipText = "Export folder; a 'levels' subfolder is created here" };
@@ -199,10 +207,14 @@ public partial class DhceDock : ScrollContainer
         AddToolButton(toolRow, "crest", "Crest", ToolKind.Crest);
         AddToolButton(toolRow, "river", "River", ToolKind.River);
         AddToolButton(toolRow, "flood", "Flood", ToolKind.Flood);
-        AddToolButton(toolRow, null, "Biome", ToolKind.Biome);
-        AddToolButton(toolRow, null, "Region", ToolKind.Region);
-        AddToolButton(toolRow, null, "Trait", ToolKind.Trait);
-        AddToolButton(toolRow, null, "Cave", ToolKind.Cave);
+        AddToolButton(toolRow, "biome", "Biome", ToolKind.Biome);
+        AddToolButton(toolRow, "region", "Region", ToolKind.Region);
+        // Trait brushes, promoted to top-level — each arms ToolKind.Trait via SelectTrait (sets TraitId + options).
+        AddTraitBrushButton(toolRow, "temperature", "Temperature", 0);
+        AddTraitBrushButton(toolRow, "moisture", "Moisture", 1);
+        AddTraitBrushButton(toolRow, "vegetation", "Vegetation", 2);
+        AddTraitBrushButton(toolRow, "palette", "Palette family", 3);
+        AddToolButton(toolRow, "cave", "Cave", ToolKind.Cave);
         AddToolButton(toolRow, null, "Rain", ToolKind.Rain);
 
         // SIZE — applies to every tool, always shown.
@@ -267,14 +279,9 @@ public partial class DhceDock : ScrollContainer
         AddModeButton(regionModes, "select", "Select", ToolKind.RegionSelect);
         _optRegion.AddChild(regionModes);
 
-        // TRAIT brush.
+        // TRAIT brush options — the four trait brush buttons live in the BRUSHES row above; this
+        // group holds only their shared contextual options (scalar value slider or enum type).
         _optTrait = NewGroup(sec);
-        var traitRow = new HFlowContainer();
-        _optTrait.AddChild(traitRow);
-        AddTraitButton(traitRow, "temperature", "Temperature", 0);
-        AddTraitButton(traitRow, "moisture", "Moisture", 1);
-        AddTraitButton(traitRow, "vegetation", "Vegetation", 2);
-        AddTraitButton(traitRow, "palette", "Palette family", 3);
         _traitSliderLabel = Dim("Value: 1");
         _traitSlider = new HSlider { MinValue = 0, MaxValue = 1, Step = 0.01, Value = 1 };
         _traitSlider.ValueChanged += v => { _traitSliderLabel.Text = $"Value: {v:0.##}"; _tool.TraitValue = (float)v; _tool.Active = ToolKind.Trait; };
@@ -544,13 +551,16 @@ public partial class DhceDock : ScrollContainer
         _toolButtons.Add(b);
     }
 
-    private void AddTraitButton(Container parent, string iconName, string tooltip, int dropdownIdx)
+    // A trait brush in the main BRUSHES row: shares _toolGroup with every other brush (mutually
+    // exclusive), and on press arms ToolKind.Trait via SelectTrait (which sets TraitId + options).
+    private void AddTraitBrushButton(Container parent, string iconName, string tooltip, int dropdownIdx)
     {
-        var b = new Button { ToggleMode = true, ButtonGroup = _traitGroup };
+        var b = new Button { ToggleMode = true, ButtonGroup = _toolGroup };
         StyleIcon(b, iconName, tooltip);
         b.Pressed += () => SelectTrait(dropdownIdx);
-        if (dropdownIdx == 0) b.ButtonPressed = true; // mirrors SelectTrait(0) initial config below
+        if (_tool.Active == ToolKind.Trait && _tool.TraitId == TraitEngineId[dropdownIdx]) b.ButtonPressed = true;
         parent.AddChild(b);
+        _toolButtons.Add(b);
     }
 
     /// One of the 6 progressively-larger brush-size icons; selecting it sets the size level (the actual

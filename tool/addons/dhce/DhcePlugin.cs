@@ -14,7 +14,7 @@ public partial class DhcePlugin : EditorPlugin
 {
     private DhceDock _dock;
     private DhceMinimap _minimap;                // overview map, floated in the 3D viewport's top-right corner
-    private DhceMapPanel _mapPanel;              // readouts + VIEW selector, docked under the minimap
+    private DhceMapPanel _mapPanel;              // surface readouts, docked under the minimap (VIEW selector now lives in the dock)
     private readonly ToolState _tool = new();   // shared by the dock and the viewport picking
     private DhceWorld _edited;                   // the selected/edited DhceWorld (drives picking)
     private bool _painting;                      // a left-drag stroke is in progress
@@ -29,11 +29,11 @@ public partial class DhcePlugin : EditorPlugin
 
     public override void _EnterTree()
     {
-        // Themed dock (all controls) + the under-minimap readouts/View panel + the overview minimap.
+        // Themed dock (all controls, incl. the VIEW selector) + the under-minimap readouts + the overview minimap.
         _dock = new DhceDock();
         _minimap = new DhceMinimap();
         _mapPanel = new DhceMapPanel();
-        _mapPanel.Init(_tool, _minimap);
+        _mapPanel.Init();
         _dock.SetMinimap(_minimap);
         _dock.Init(_tool);
         AddControlToDock(DockSlot.RightUl, _dock);
@@ -107,7 +107,6 @@ public partial class DhcePlugin : EditorPlugin
 
         var world = FindWorld();
         _dock?.Bind(world);
-        _mapPanel?.SetWorld(world); // so the VIEW switch can recolour the current world
         _dock?.SimTick();
         _dock?.FlushDeferred(); // apply coalesced palette edits once per frame
         // Flush the coalesced brush-stroke re-tessellation once per frame.
