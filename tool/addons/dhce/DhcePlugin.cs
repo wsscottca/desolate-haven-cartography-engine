@@ -13,6 +13,8 @@ namespace DesolateHaven.Cartography;
 public partial class DhcePlugin : EditorPlugin
 {
     private DhceDock _dock;
+    private DhceMinimap _minimap;                // overview map, floated in the 3D viewport's top-right corner
+    private DhceMapPanel _mapPanel;              // readouts + VIEW selector, docked under the minimap
     private readonly ToolState _tool = new();   // shared by the dock and the viewport picking
     private DhceWorld _edited;                   // the selected/edited DhceWorld (drives picking)
     private bool _painting;                      // a left-drag stroke is in progress
@@ -22,12 +24,19 @@ public partial class DhcePlugin : EditorPlugin
     private MeshInstance3D _polyLine;            // polygon outline overlay (ephemeral)
     private Node3D _caveOverlay;                 // translucent carve-sphere gizmos (ephemeral)
     private int _caveOverlayCount = -1;          // cave count the overlay was built for
+    private Vector3? _lastBrushHit;              // last terrain hit (core space) — a streaming anchor
 
     public override void _EnterTree()
     {
         _dock = new DhceDock();
         _dock.Init(_tool);
         AddControlToDock(DockSlot.RightUl, _dock);
+        _minimap = new DhceMinimap();
+        AddMinimapOverlay(_minimap);
+        _dock.SetMinimap(_minimap); // the dock drives Bind/Refresh; the plugin owns its placement
+        _mapPanel = new DhceMapPanel();
+        _mapPanel.Init(_tool, _minimap);
+        AddMapPanelOverlay(_mapPanel);
         SetProcess(true);
     }
 
@@ -36,6 +45,18 @@ public partial class DhcePlugin : EditorPlugin
         FreeGizmo();
         ClearPolygon();
         FreeCaveOverlay();
+        if (_minimap != null && GodotObject.IsInstanceValid(_minimap))
+        {
+            _minimap.GetParent()?.RemoveChild(_minimap);
+            _minimap.QueueFree();
+        }
+        _minimap = null;
+        if (_mapPanel != null && GodotObject.IsInstanceValid(_mapPanel))
+        {
+            _mapPanel.GetParent()?.RemoveChild(_mapPanel);
+            _mapPanel.QueueFree();
+        }
+        _mapPanel = null;
         if (_dock != null)
         {
             RemoveControlFromDocks(_dock);
@@ -44,10 +65,43 @@ public partial class DhcePlugin : EditorPlugin
         }
     }
 
+    /// Float the overview map in the 3D viewport's top-right corner. Added as a child of the editor's
+    /// 3D SubViewport so it renders over the view (the SubViewportContainer forwards GUI input, so the
+    /// minimap's own wheel-zoom / drag-pan keep working); anchored top-right with a small margin.
+    private static void AddMinimapOverlay(DhceMinimap mm)
+    {
+        var vp = EditorInterface.Singleton.GetEditorViewport3D(0);
+        if (vp == null) return;
+        vp.AddChild(mm);
+        const float size = 232f, margin = 12f;
+        mm.AnchorLeft = 1f; mm.AnchorRight = 1f; mm.AnchorTop = 0f; mm.AnchorBottom = 0f;
+        mm.OffsetLeft = -(size + margin); mm.OffsetRight = -margin;
+        mm.OffsetTop = margin; mm.OffsetBottom = margin + size;
+    }
+
+    /// Float the readouts + VIEW panel directly beneath the minimap, same width and right margin.
+    private static void AddMapPanelOverlay(DhceMapPanel p)
+    {
+        var vp = EditorInterface.Singleton.GetEditorViewport3D(0);
+        if (vp == null) return;
+        vp.AddChild(p);
+        const float size = 232f, margin = 12f, gap = 8f, height = 210f;
+        p.AnchorLeft = 1f; p.AnchorRight = 1f; p.AnchorTop = 0f; p.AnchorBottom = 0f;
+        p.OffsetLeft = -(size + margin); p.OffsetRight = -margin;
+        p.OffsetTop = margin + size + gap; p.OffsetBottom = margin + size + gap + height;
+    }
+
     public override void _Process(double delta)
     {
+        // The 3D viewport may not exist yet at _EnterTree; attach the overlays the first frame it does.
+        if (_minimap != null && GodotObject.IsInstanceValid(_minimap) && _minimap.GetParent() == null)
+            AddMinimapOverlay(_minimap);
+        if (_mapPanel != null && GodotObject.IsInstanceValid(_mapPanel) && _mapPanel.GetParent() == null)
+            AddMapPanelOverlay(_mapPanel);
+
         var world = FindWorld();
         _dock?.Bind(world);
+        _mapPanel?.SetWorld(world); // so the VIEW switch can recolour the current world
         _dock?.SimTick();
         _dock?.FlushDeferred(); // apply coalesced palette edits once per frame
         // Flush the coalesced brush-stroke re-tessellation once per frame.
@@ -55,16 +109,25 @@ public partial class DhcePlugin : EditorPlugin
         {
             if (_needRepaint) { _edited.RepaintDirtyTerrain(); _needRepaint = false; }
             if (_needLiquid) { _edited.RebuildLiquid(); _needLiquid = false; }
+            // Progressive rain runs every frame while the Rain tool is active; any other tool stops it.
+            if (_tool.Active == ToolKind.Rain) _edited.StepRain(delta);
+            else if (_edited.RainActive) _edited.StopRain();
         }
         if (world == null || !world.GenDone) return;
         var cam = GetEditorCamera();
         if (cam != null)
         {
-            Vector3 focus = GroundFocus(cam, world);
-            world.UpdateStreaming(focus);
-            _dock?.SetMapFocus(focus);
-            // Scale bar: the world span the viewport covers at the focus depth.
-            float dist = cam.GlobalPosition.DistanceTo(focus);
+            Vector3 ClampCore(Vector3 p) => new Vector3(
+                Mathf.Clamp(p.X, 0f, world.WorldWidthM), 0f,
+                Mathf.Clamp(p.Z, 0f, world.WorldHeightM));
+            Vector3 ground = GroundFocus(cam);                       // editor-space point the camera looks at
+            Vector3 look = ClampCore(world.ToCore(ground));          // look ring + the map marker
+            Vector3 camFoot = ClampCore(world.ToCore(cam.GlobalPosition)); // footprint: keeps ground under us loaded
+            Vector3 brush = _lastBrushHit.HasValue ? ClampCore(_lastBrushHit.Value) : look;
+            world.UpdateStreaming(camFoot, look, brush);
+            _dock?.SetMapFocus(look);
+            // Scale bar: the world span the viewport covers at the focus depth (editor-space distance).
+            float dist = cam.GlobalPosition.DistanceTo(ground);
             _dock?.SetViewScale(2.0 * dist * Mathf.Tan(Mathf.DegToRad(cam.Fov) * 0.5));
         }
     }
@@ -112,16 +175,22 @@ public partial class DhcePlugin : EditorPlugin
         if (!isKey)
         {
             Vector2 mouse = isButton ? ((InputEventMouseButton)@event).Position : ((InputEventMouseMotion)@event).Position;
-            Vector3 origin = camera.ProjectRayOrigin(mouse);
+            // Ray into core space: shift the origin by the centring offset; the render-root is
+            // translation-only so the direction is unchanged. Hits come back in core space.
+            Vector3 origin = world.ToCore(camera.ProjectRayOrigin(mouse));
             Vector3 dir = camera.ProjectRayNormal(mouse);
             var hits = world.Engine.Call("raycast_terrain", origin, dir, (double)world.Exaggeration).As<Vector3[]>();
             onTerrain = hits.Length > 0;
-            if (onTerrain) hit = hits[0];
-            _dock?.SetBiomeReadout(onTerrain ? world.Engine.Call("biome_label_at", hit.X, hit.Z).AsString() : null);
-            _dock?.SetRegionReadout(onTerrain ? world.Engine.Call("region_id_at", hit.X, hit.Z).AsInt64() : -1);
-            _dock?.SetTraitReadout(
+            if (onTerrain) { hit = hits[0]; _lastBrushHit = hit; }
+            _mapPanel?.SetBiomeReadout(onTerrain ? world.Engine.Call("biome_label_at", hit.X, hit.Z).AsString() : null);
+            _mapPanel?.SetRegionReadout(onTerrain ? world.Engine.Call("region_id_at", hit.X, hit.Z).AsInt64() : -1);
+            _mapPanel?.SetTraitReadout(
                 onTerrain ? world.Engine.Call("trait_at", hit.X, hit.Z, 4).AsDouble() : double.NaN,
                 onTerrain ? world.Engine.Call("trait_at", hit.X, hit.Z, 5).AsDouble() : double.NaN);
+            // Zoom-coupled brush: radius = fraction of the camera→cursor distance, so the ring keeps a
+            // constant on-screen size at any zoom. hit is core space → convert to editor space to measure.
+            if (onTerrain)
+                _tool.RadiusM = Mathf.Max(_tool.RadiusFraction * camera.GlobalPosition.DistanceTo(world.ToEditor(hit)), 1f);
         }
 
         // Polygon Territory tool owns clicks; no brush gizmo while it's active.
@@ -172,12 +241,26 @@ public partial class DhcePlugin : EditorPlugin
                 }
                 return stop;
             }
+
+            // Rain tool: a click starts progressive rainfall over the area (a drifting cloud rains down).
+            if (_tool.Active == ToolKind.Rain)
+            {
+                world.StartRain(hit, _tool.RadiusM, _tool.RainRate);
+                _painting = true;
+                _dock?.SetStatus("raining — drag to move the cloud, switch tools to stop");
+                return stop;
+            }
             _painting = true;
         }
         else // motion
         {
             var mm = (InputEventMouseMotion)@event;
             if (_tool.Active == ToolKind.RegionSelect) return pass; // Select is click-only
+            if (_tool.Active == ToolKind.Rain) // drag relocates the rain area
+            {
+                if (_painting && mm.ButtonMask.HasFlag(MouseButtonMask.Left) && onTerrain) world.MoveRain(hit, _tool.RadiusM);
+                return stop;
+            }
             if (!_painting || !mm.ButtonMask.HasFlag(MouseButtonMask.Left) || !onTerrain) return pass;
         }
 
@@ -241,11 +324,11 @@ public partial class DhcePlugin : EditorPlugin
 
     private void UpdatePolyOverlay(DhceWorld world, Vector3? cursor)
     {
-        if (_polyLine == null || !GodotObject.IsInstanceValid(_polyLine) || _polyLine.GetParent() != world)
+        if (_polyLine == null || !GodotObject.IsInstanceValid(_polyLine) || _polyLine.GetParent() != world.RenderRoot)
         {
             FreePoly();
             _polyLine = new MeshInstance3D { CastShadow = GeometryInstance3D.ShadowCastingSetting.Off };
-            world.AddChild(_polyLine); // owner left null → ephemeral
+            world.RenderRoot.AddChild(_polyLine); // owner left null → ephemeral
         }
         var mat = new StandardMaterial3D
         {
@@ -279,7 +362,7 @@ public partial class DhcePlugin : EditorPlugin
     private void UpdateCaveOverlay(DhceWorld world, bool show)
     {
         if (!show) { FreeCaveOverlay(); return; }
-        if (_caveOverlay == null || !GodotObject.IsInstanceValid(_caveOverlay) || _caveOverlay.GetParent() != world || _caveOverlayCount != world.Caves.Count)
+        if (_caveOverlay == null || !GodotObject.IsInstanceValid(_caveOverlay) || _caveOverlay.GetParent() != world.RenderRoot || _caveOverlayCount != world.Caves.Count)
             RebuildCaveOverlay(world);
     }
 
@@ -287,7 +370,7 @@ public partial class DhcePlugin : EditorPlugin
     {
         FreeCaveOverlay();
         _caveOverlay = new Node3D { Name = "DhceCaveGizmos" };
-        world.AddChild(_caveOverlay); // owner left null → ephemeral
+        world.RenderRoot.AddChild(_caveOverlay); // owner left null → ephemeral
         var mat = new StandardMaterial3D
         {
             ShadingMode = BaseMaterial3D.ShadingModeEnum.Unshaded,
@@ -319,17 +402,17 @@ public partial class DhcePlugin : EditorPlugin
 
     private void UpdateGizmo(DhceWorld world, Vector3 pos, bool show)
     {
-        if (_gizmo == null || !GodotObject.IsInstanceValid(_gizmo) || _gizmo.GetParent() != world)
+        if (_gizmo == null || !GodotObject.IsInstanceValid(_gizmo) || _gizmo.GetParent() != world.RenderRoot)
         {
             FreeGizmo();
             _gizmo = BuildGizmo();
-            world.AddChild(_gizmo); // owner left null → ephemeral, never serialized
+            world.RenderRoot.AddChild(_gizmo); // owner left null → ephemeral, never serialized
         }
         _gizmo.Visible = show;
         if (!show) return;
         float r = Mathf.Max(_tool.RadiusM, 1f);
         _gizmo.Scale = new Vector3(r, 1f, r);
-        _gizmo.GlobalPosition = pos;
+        _gizmo.Position = pos; // pos is core space; the render-root applies the centring offset
     }
 
     private void FreeGizmo()
@@ -385,18 +468,15 @@ public partial class DhcePlugin : EditorPlugin
         return vp?.GetCamera3D();
     }
 
-    /// Project the editor camera's forward ray to the ground (Y = 0), clamped to world bounds — the
-    /// streaming focus. Falls back to the camera's XZ when it isn't looking down.
-    private static Vector3 GroundFocus(Camera3D cam, DhceWorld world)
+    /// Project the editor camera's forward ray to the ground plane (Y = 0) in editor/global space — the
+    /// point the camera is looking at. Falls back to the camera's own XZ when it isn't looking down.
+    /// `_Process` converts this to core space (and clamps to world bounds) for streaming.
+    private static Vector3 GroundFocus(Camera3D cam)
     {
         Vector3 o = cam.GlobalPosition;
         Vector3 d = -cam.GlobalTransform.Basis.Z; // forward
         float t = d.Y < -1e-3f ? -o.Y / d.Y : 0f;
-        Vector3 g = t > 0f ? o + d * t : o;
-        return new Vector3(
-            Mathf.Clamp(g.X, 0f, world.WorldWidthM),
-            0f,
-            Mathf.Clamp(g.Z, 0f, world.WorldHeightM));
+        return t > 0f ? o + d * t : o;
     }
 }
 #endif

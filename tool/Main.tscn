@@ -1,11 +1,8 @@
-[gd_scene format=3 uid="uid://cdvhtjcrwjcdj"]
+[gd_scene format=3 uid="uid://du6vgd8wn1tgj"]
 
-[ext_resource type="Script" uid="uid://cciqift31mdg4" path="res://scripts/CartographerSpike.cs" id="1_glv2v"]
+[ext_resource type="Script" uid="uid://dmnundkqt0175" path="res://addons/dhce/DhceWorld.cs" id="1_glv2v"]
 
-[node name="CartographerSpike" type="Node3D" unique_id=1143501762]
+[node name="DhceWorld" type="Node3D" unique_id=1252092208]
 script = ExtResource("1_glv2v")
-WorldSizeKm = 20.0
-SpacingM = 12.0
-Octaves = 8
-TerrainHeightKm = 1.5
-metadata/_custom_type_script = "uid://cciqift31mdg4"
+TerrainHeightKm = 10.0
+metadata/_custom_type_script = "uid://dmnundkqt0175"

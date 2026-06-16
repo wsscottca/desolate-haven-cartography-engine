@@ -5,7 +5,7 @@ namespace DesolateHaven.Cartography;
 /// The authoring tools, in toolbar order. Shortcuts 1–7 map to these (see ToolUi).
 /// (Named ToolKind so the `Tool` name is free for CartographerSpike's ToolState property.)
 /// `Biome` stamps a Region preset's whole trait bundle; `Trait` paints a single trait.
-public enum ToolKind { Raise, Carve, Level, Crest, River, Flood, Biome, Trait, Region, Territory, RegionSelect, Cave }
+public enum ToolKind { Raise, Carve, Level, Crest, River, Flood, Biome, Trait, Region, Territory, RegionSelect, Cave, Rain }
 
 /// What a stroke changed, so the caller knows which render surface(s) to refresh.
 [System.Flags]
@@ -18,9 +18,22 @@ public enum EditResult { None = 0, Terrain = 1, Liquid = 2 }
 public sealed class ToolState
 {
     public ToolKind Active = ToolKind.Raise;
-    public float RadiusFraction = 0.12f; // brush radius as a fraction of the camera→cursor distance
-    public float RadiusM = 350f;         // effective radius (m); recomputed each dab from the fraction
+    /// Brush size as a fraction of the camera→cursor distance, so the brush keeps a constant apparent
+    /// size as you zoom (DhcePlugin recomputes `RadiusM` each dab from this × distance). The editor
+    /// dock exposes 6 discrete levels (`SizeFractions`, via `SetSizeLevel`) as progressively larger
+    /// icons; the runtime ToolUi sets `RadiusFraction` directly from its own slider.
+    public static readonly float[] SizeFractions = { 0.02f, 0.05f, 0.10f, 0.18f, 0.30f, 0.45f };
+    public int SizeLevel = 2;            // index of the active size icon (mirrors RadiusFraction)
+    public float RadiusFraction = 0.10f; // = SizeFractions[SizeLevel]; settable for the runtime ToolUi
+    public float RadiusM = 350f;         // effective radius (m); recomputed each dab from RadiusFraction × distance
     public float StrengthM = 50f;        // sculpt step in METRES (→ normalized via exaggeration)
+
+    /// Pick one of the 6 size levels (used by the dock's brush-size icons).
+    public void SetSizeLevel(int level)
+    {
+        SizeLevel = Mathf.Clamp(level, 0, SizeFractions.Length - 1);
+        RadiusFraction = SizeFractions[SizeLevel];
+    }
     public int BiomeId = 1;            // 1..=14 Region preset for the Biome (stamp) tool
     public int RegionId = 1;           // 1..=14 named place for the Region (assign) tool
     public int TraitId = 6;            // engine trait id for the Trait tool (6 = vegetation)
@@ -28,6 +41,7 @@ public sealed class ToolState
     public int LiquidKind = 0;         // 0 water, 1 lava (River + Flood)
     public float CourseIntensity = 0.05f; // small: course water/carve gains are large in the core
     public float FloodAmount = 0.04f;     // small per dab; the stroke settles on release
+    public float RainRate = 0.002f;       // water added per frame across the Rain area (progressive)
 
     /// Apply the active tool at world-ground point `hit` (Godot XZ plane → core x,y). Returns
     /// which surfaces changed. `exaggeration` converts the metre sculpt step to the core's

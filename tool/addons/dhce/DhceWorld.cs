@@ -15,11 +15,11 @@ namespace DesolateHaven.Cartography;
 [GlobalClass]
 public partial class DhceWorld : Node3D
 {
-    [Export] public float WorldSizeKm = 20f;   // requested size; snapped to a whole number of chunks
-    [Export] public float SpacingM = 12f;      // metres between regions (~1.7M @ 20 km / 12 m)
+    [Export] public float WorldSizeKm = 30f;   // requested size; snapped to a whole number of chunks
+    [Export] public float SpacingM = 10f;      // metres between regions (~3.6M @ 30 km / 10 m)
     [Export] public int Seed = 12345;
     [Export] public int Octaves = 6;
-    [Export] public float TerrainHeightKm = 2.4f;
+    [Export] public float TerrainHeightKm = 5.0f;
     [Export] public float ChunkSizeM = 256f;   // fixed chunk edge (m); smaller ⇒ finer, lighter streaming
     [Export] public int RenderDistance = 8;    // chunk tiles (Chebyshev) kept meshed around the focus
     [Export] public int ChunksPerFrame = 8;    // chunks tessellated per streaming tick
@@ -50,6 +50,8 @@ public partial class DhceWorld : Node3D
     private readonly List<Node> _scatterPreview = new(); // ephemeral N3d scatter preview nodes
     private MeshInstance3D _cavePreview;        // ephemeral N5 carved-cave preview
     private StandardMaterial3D _caveMat;
+    private Node3D _renderRoot;                 // ephemeral parent for all preview geometry, offset so
+                                                // the world centres on the origin (the editor camera's focus)
 
     private static readonly Color WaterColor = new Color(0.20f, 0.45f, 0.75f, 0.6f);
     private static readonly Color LavaColor = new Color(0.95f, 0.35f, 0.10f, 0.9f);
@@ -60,6 +62,23 @@ public partial class DhceWorld : Node3D
     public float WorldWidthM => _widthM;
     public float WorldHeightM => _heightM;
     public Vector3 WorldCenter => new Vector3(_widthM * 0.5f, 0f, _heightM * 0.5f);
+
+    /// The ephemeral node all preview geometry hangs under. It's shifted by `-WorldCenter` so the
+    /// world's middle sits on the scene origin (where the editor camera looks by default); core
+    /// generation/picking stays in `[0, size]` space. Picking/focus code converts via `ToCore`/`ToEditor`.
+    public Node3D RenderRoot => _renderRoot;
+
+    /// Editor/global-space point → core (generation) space, `[0, size]`. Identity before Generate.
+    public Vector3 ToCore(Vector3 editorPoint) => _renderRoot != null ? _renderRoot.ToLocal(editorPoint) : editorPoint;
+    /// Core-space point → editor/global space (the centred preview). Identity before Generate.
+    public Vector3 ToEditor(Vector3 corePoint) => _renderRoot != null ? _renderRoot.ToGlobal(corePoint) : corePoint;
+
+    private void EnsureRenderRoot()
+    {
+        if (_renderRoot != null && GodotObject.IsInstanceValid(_renderRoot)) return;
+        _renderRoot = new Node3D { Name = "DhceRender" };
+        AddChild(_renderRoot); // owner left null → ephemeral, never serialized into the .tscn
+    }
 
     private void EnsureEngine()
     {
@@ -99,6 +118,12 @@ public partial class DhceWorld : Node3D
         _widthM = _heightM = perSide * chunk;
         _engine.Call("set_chunk_size_m", (double)chunk);
 
+        // Centre the world on the origin: the core generates in [0, size] (origin at a corner), but the
+        // editor camera looks at the origin — so shift the preview by -WorldCenter to put the world's
+        // middle under the camera. Without this, Generate succeeds but the terrain sits ~10 km off-screen.
+        EnsureRenderRoot();
+        _renderRoot.Position = new Vector3(-_widthM * 0.5f, 0f, -_heightM * 0.5f);
+
         var sw = Stopwatch.StartNew();
         _engine.Call("build", _widthM, _heightM, SpacingM, (float)Seed, Octaves);
         sw.Stop();
@@ -131,6 +156,7 @@ public partial class DhceWorld : Node3D
     {
         PreviewScatter(false); // drop any scatter preview before discarding the world
         PreviewCaves(false);
+        StopRain(); // drop any rain cloud/particles before discarding the world
         if (_chunks != null) foreach (var mi in _chunks) mi?.QueueFree();
         if (_liquidChunks != null) foreach (var mi in _liquidChunks) mi?.QueueFree();
         _chunks = null;
@@ -141,28 +167,49 @@ public partial class DhceWorld : Node3D
         _genDone = false;
     }
 
-    /// Stream chunks around `focus` (world-space): build in-range, free out-of-range. Called each
-    /// frame by whoever owns the camera (the editor plugin in the tool; the game otherwise).
-    public void UpdateStreaming(Vector3 focus)
+    /// Stream chunks around a single focus (seed / game use): all three anchors collapse to it.
+    public void UpdateStreaming(Vector3 focus) => UpdateStreaming(focus, focus, focus);
+
+    /// Stream chunks around up to three world-space (core) anchors — the camera's own footprint
+    /// (`camPos`), the look focus (`lookFocus`), and the last brush-cursor hit (`brush`). A chunk is
+    /// kept if it's in range of *any* anchor and freed only when out of range of *all* of them, so the
+    /// existing look ring still streams ahead. The 2×2 block of chunks directly under the camera is
+    /// **pinned**: always meshed at full TIN and never freed — so looking up or around the horizon
+    /// never unloads the ground beneath you (the look ray would otherwise project to the world edge).
+    /// Called each frame by whoever owns the camera (the editor plugin in the tool; the game otherwise).
+    public void UpdateStreaming(Vector3 camPos, Vector3 lookFocus, Vector3 brush)
     {
         if (!_genDone || _chunks == null) return;
-        int camGx = Mathf.Clamp((int)(focus.X / _sx), 0, Mathf.Max(_cols - 1, 0));
-        int camGy = Mathf.Clamp((int)(focus.Z / _sy), 0, Mathf.Max(_rows - 1, 0));
+        int maxGx = Mathf.Max(_cols - 1, 0), maxGy = Mathf.Max(_rows - 1, 0);
+        int CellX(float x) => Mathf.Clamp((int)(x / _sx), 0, maxGx);
+        int CellY(float z) => Mathf.Clamp((int)(z / _sy), 0, maxGy);
+        int camGx = CellX(camPos.X), camGy = CellY(camPos.Z);
+        int lookGx = CellX(lookFocus.X), lookGy = CellY(lookFocus.Z);
+        int brGx = CellX(brush.X), brGy = CellY(brush.Z);
+
+        // The four chunks whose centres bracket the camera footprint (the nearest 2×2 block); pin them.
+        int bx = Mathf.Clamp(Mathf.FloorToInt(camPos.X / _sx - 0.5f), 0, maxGx);
+        int by = Mathf.Clamp(Mathf.FloorToInt(camPos.Z / _sy - 0.5f), 0, maxGy);
+        int bx2 = Mathf.Min(bx + 1, maxGx), by2 = Mathf.Min(by + 1, maxGy);
+        int p0 = by * _cols + bx, p1 = by * _cols + bx2, p2 = by2 * _cols + bx, p3 = by2 * _cols + bx2;
 
         _pending.Clear();
         for (int ci = 0; ci < _chunks.Length; ci++)
         {
             int gx = ci % _cols;
             int gy = ci / _cols;
-            int dist = Mathf.Max(Mathf.Abs(gx - camGx), Mathf.Abs(gy - camGy));
-            if (dist > RenderDistance) { if (_built[ci]) FreeChunk(ci); continue; }
-            bool lod = dist > LodDistance; // near = full TIN, far = coarse LOD
+            bool pin = ci == p0 || ci == p1 || ci == p2 || ci == p3;
+            int dist = Mathf.Min(Mathf.Max(Mathf.Abs(gx - camGx), Mathf.Abs(gy - camGy)),
+                       Mathf.Min(Mathf.Max(Mathf.Abs(gx - lookGx), Mathf.Abs(gy - lookGy)),
+                                 Mathf.Max(Mathf.Abs(gx - brGx), Mathf.Abs(gy - brGy))));
+            if (!pin && dist > RenderDistance) { if (_built[ci]) FreeChunk(ci); continue; }
+            bool lod = !pin && dist > LodDistance; // near = full TIN, far = coarse LOD; pinned always full
             // Build if not meshed, or re-mesh when a chunk crosses the LOD threshold as the camera moves.
-            if (!_built[ci] || (_chunkLod[ci] == 1) != lod) _pending.Add((dist, ci, lod));
+            if (!_built[ci] || (_chunkLod[ci] == 1) != lod) _pending.Add((pin ? -1 : dist, ci, lod));
         }
         if (_pending.Count > 0)
         {
-            _pending.Sort((a, b) => a.dist.CompareTo(b.dist));
+            _pending.Sort((a, b) => a.dist.CompareTo(b.dist)); // pinned (-1) first, then nearest
             int budget = Mathf.Min(ChunksPerFrame, _pending.Count);
             for (int k = 0; k < budget; k++) BuildChunk(_pending[k].ci, _pending[k].lod);
         }
@@ -174,7 +221,7 @@ public partial class DhceWorld : Node3D
         {
             var m = new ArrayMesh();
             var mi = new MeshInstance3D { Mesh = m, MaterialOverride = CurrentViewMat() };
-            AddChild(mi); // owner left null → ephemeral preview, not serialized into the scene
+            _renderRoot.AddChild(mi); // owner left null → ephemeral preview, not serialized into the scene
             _chunks[i] = mi;
             _chunkMeshes[i] = m;
         }
@@ -210,7 +257,7 @@ public partial class DhceWorld : Node3D
         {
             var lam = new ArrayMesh();
             var lmi = new MeshInstance3D { Mesh = lam, MaterialOverride = _liquidMat };
-            AddChild(lmi);
+            _renderRoot.AddChild(lmi);
             _liquidChunks[i] = lmi;
             _liquidChunkMeshes[i] = lam;
         }
@@ -259,6 +306,125 @@ public partial class DhceWorld : Node3D
         int[] dirty = _engine.Call("take_dirty_liquid_chunks").As<int[]>();
         foreach (int ci in dirty)
             if (ci >= 0 && ci < _liquidChunkMeshes.Length && _built[ci]) BuildLiquidChunk(ci);
+    }
+
+    // --- progressive rain: gradual area rainfall + a drifting cloud / falling-rain visualization ---
+
+    private bool _rainActive;
+    private Vector3 _rainCenter;        // core space; XZ = area centre, Y ≈ surface height under it
+    private float _rainRadius = 500f;
+    private float _rainRate = 0.002f;
+    private double _rainPhase;          // cloud-drift accumulator
+    private Node3D _rainRig;            // ephemeral cloud + rain particles under _renderRoot
+
+    public bool RainActive => _rainActive;
+
+    /// Begin progressive rainfall over an area centred on `coreCenter` (core space; Y is the surface
+    /// height under the cursor). Radius comes from the brush size; rate from the rain-rate control.
+    public void StartRain(Vector3 coreCenter, float radius, float rate)
+    {
+        _rainCenter = coreCenter;
+        _rainRadius = Mathf.Max(radius, 1f);
+        _rainRate = Mathf.Max(rate, 0f);
+        _rainActive = true;
+        if (_rainRig != null && GodotObject.IsInstanceValid(_rainRig)) _rainRig.QueueFree();
+        _rainRig = null; // rebuild so a new radius resizes the cloud + emitter
+        EnsureRainRig();
+        UpdateRainRig();
+    }
+
+    /// Drag the rain area to a new spot (cheap: move only, no rebuild).
+    public void MoveRain(Vector3 coreCenter, float radius)
+    {
+        if (!_rainActive) { StartRain(coreCenter, radius, _rainRate); return; }
+        _rainCenter = coreCenter;
+        _rainRadius = Mathf.Max(radius, 1f);
+        UpdateRainRig();
+    }
+
+    public void StopRain()
+    {
+        _rainActive = false;
+        if (_rainRig != null && GodotObject.IsInstanceValid(_rainRig)) _rainRig.QueueFree();
+        _rainRig = null;
+    }
+
+    /// Per-frame progressive rainfall: spread a little water across the area (smoothstep falloff),
+    /// settle it a few steps so it pools and runs downhill, and drift the cloud. The plugin calls this
+    /// each frame while the Rain tool is active — replaces the old one-shot whole-map flood.
+    public void StepRain(double delta)
+    {
+        if (!_rainActive || _engine == null || !_genDone) return;
+        _engine.Call("paint_liquid", (double)_rainCenter.X, (double)_rainCenter.Z, (double)_rainRadius, (double)_rainRate, 0);
+        _engine.Call("step_fluid", 0.45, 0.0015, 6);
+        RebuildLiquid();
+        _rainPhase += delta * 0.4;
+        UpdateRainRig();
+    }
+
+    private void EnsureRainRig()
+    {
+        if (_rainRig != null && GodotObject.IsInstanceValid(_rainRig)) return;
+        EnsureRenderRoot();
+        _rainRig = new Node3D { Name = "DhceRain" };
+        _renderRoot.AddChild(_rainRig); // owner left null → ephemeral preview
+
+        float r = _rainRadius;
+        var cloudMat = new StandardMaterial3D
+        {
+            ShadingMode = BaseMaterial3D.ShadingModeEnum.Unshaded,
+            AlbedoColor = new Color(0.55f, 0.58f, 0.62f, 0.55f),
+            Transparency = BaseMaterial3D.TransparencyEnum.Alpha,
+            CullMode = BaseMaterial3D.CullModeEnum.Disabled,
+        };
+        _rainRig.AddChild(new MeshInstance3D
+        {
+            Name = "Cloud",
+            Mesh = new SphereMesh { Radius = r * 1.2f, Height = r * 0.9f },
+            MaterialOverride = cloudMat,
+            Scale = new Vector3(1f, 0.35f, 1f),
+            CastShadow = GeometryInstance3D.ShadowCastingSetting.Off,
+        });
+
+        var rainMat = new StandardMaterial3D
+        {
+            ShadingMode = BaseMaterial3D.ShadingModeEnum.Unshaded,
+            AlbedoColor = new Color(0.55f, 0.70f, 0.95f, 0.7f),
+            Transparency = BaseMaterial3D.TransparencyEnum.Alpha,
+            BillboardMode = BaseMaterial3D.BillboardModeEnum.Enabled,
+        };
+        var quad = new QuadMesh { Size = new Vector2(Mathf.Max(r * 0.01f, 1f), Mathf.Max(r * 0.12f, 12f)), Material = rainMat };
+        var pm = new ParticleProcessMaterial
+        {
+            EmissionShape = ParticleProcessMaterial.EmissionShapeEnum.Box,
+            EmissionBoxExtents = new Vector3(r, 10f, r),
+            Direction = new Vector3(0f, -1f, 0f),
+            Spread = 0f,
+            Gravity = new Vector3(0f, -3000f, 0f),
+            InitialVelocityMin = 400f,
+            InitialVelocityMax = 700f,
+        };
+        _rainRig.AddChild(new GpuParticles3D
+        {
+            Name = "Fall",
+            Amount = 600,
+            Lifetime = 1.6,
+            DrawPass1 = quad,
+            ProcessMaterial = pm,
+            CastShadow = GeometryInstance3D.ShadowCastingSetting.Off,
+        });
+    }
+
+    private void UpdateRainRig()
+    {
+        if (_rainRig == null || !GodotObject.IsInstanceValid(_rainRig)) return;
+        float cloudH = _rainCenter.Y + Mathf.Max(_rainRadius * 1.5f, 1500f);
+        float driftX = Mathf.Cos((float)_rainPhase) * _rainRadius * 0.15f;
+        float driftZ = Mathf.Sin((float)_rainPhase) * _rainRadius * 0.15f;
+        if (_rainRig.GetNodeOrNull<Node3D>("Cloud") is { } cloud)
+            cloud.Position = new Vector3(_rainCenter.X + driftX, cloudH, _rainCenter.Z + driftZ);
+        if (_rainRig.GetNodeOrNull<GpuParticles3D>("Fall") is { } fall)
+            fall.Position = new Vector3(_rainCenter.X, cloudH, _rainCenter.Z);
     }
 
     /// Switch the colour view (0 Natural … 4 Biome); data views use the unshaded material.
@@ -310,7 +476,7 @@ public partial class DhceWorld : Node3D
         am.AddSurfaceFromArrays(Mesh.PrimitiveType.Triangles, arrays);
         if (_caveMat == null) { _caveMat = new StandardMaterial3D { AlbedoColor = new Color(0.40f, 0.38f, 0.36f), Roughness = 0.95f }; _caveMat.Set("cull_mode", 2); }
         _cavePreview = new MeshInstance3D { Mesh = am, MaterialOverride = _caveMat };
-        AddChild(_cavePreview); // owner left null → ephemeral preview
+        _renderRoot.AddChild(_cavePreview); // owner left null → ephemeral preview
     }
 
     /// Toggle the in-editor scatter preview: per-slot MultiMesh (low-poly proxy/import-LOD), capped.
@@ -325,7 +491,7 @@ public partial class DhceWorld : Node3D
         int count = _engine.Call("scatter_count").As<int>();
         foreach (var node in DhceLevelSlicer.BuildScatterMeshes(Scatter, data, count, 30000, preferProxy: true, embed: false))
         {
-            AddChild(node); // owner left null → ephemeral preview, not serialized
+            _renderRoot.AddChild(node); // owner left null → ephemeral preview, not serialized
             _scatterPreview.Add(node);
         }
     }

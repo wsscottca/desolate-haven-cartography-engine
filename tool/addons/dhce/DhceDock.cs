@@ -17,19 +17,19 @@ public partial class DhceDock : ScrollContainer
     private bool _wasGenDone;         // edge-detect gen completion to reload engine-backed values
 
     private Label _status;
-    private Label _biomeReadout;
-    private Label _regionReadout;
-    private Label _traitReadout;
     private Label _scaleReadout;
     private OptionButton _regionPick;
     private VBoxContainer _col;
-    private readonly ButtonGroup _toolGroup = new();
+    private readonly ButtonGroup _toolGroup = new();   // the 6 sculpt tools (one active)
+    private readonly ButtonGroup _traitGroup = new();  // the 4 trait brushes (one active)
+    private readonly ButtonGroup _sizeGroup = new();   // the 6 brush-size icons (one active)
     private readonly List<Button> _toolButtons = new();
+    private static readonly Dictionary<string, Texture2D> _iconCache = new();
 
     private SpinBox _seed, _oct, _size, _spacing, _chunk;
-    private OptionButton _liquidKind, _traitPick, _traitEnum, _view, _palFamily, _landRegion;
-    private HSlider _traitSlider, _viewBrushSlider;
-    private Label _traitSliderLabel, _traitEnumLabel, _viewEditHint, _viewBrushLabel;
+    private OptionButton _liquidKind, _traitEnum, _palFamily, _landRegion;
+    private HSlider _traitSlider;
+    private Label _traitSliderLabel, _traitEnumLabel;
     private ColorPickerButton[] _palPickers;
     private SpinBox[] _landSpins;
     private CheckButton _simulate;
@@ -52,9 +52,7 @@ public partial class DhceDock : ScrollContainer
     private int _simSubsteps = 10, _simTick;
     private const int SimEveryNFrames = 6;
 
-    private static readonly string[] ViewNames = { "Natural", "Temperature", "Moisture", "Elevation", "Biome", "Region" };
     private static readonly int[] TraitEngineId = { 4, 5, 6, 7 };
-    private static readonly string[] TraitNames = { "Temperature", "Moisture", "Vegetation", "Palette family" };
     private static readonly string[] LandNames = { "Jaggedness", "Relief", "Foothill falloff", "Erosion" };
     private static readonly string[] VegNames = { "Barren", "Grass", "Scrub", "Forest", "Evergreen", "Marsh", "Thorn" };
     private static readonly string[] FamilyNames = { "Verdant", "Arid", "Stone", "Ashen", "Frost", "Wetland", "Exotic" };
@@ -93,12 +91,16 @@ public partial class DhceDock : ScrollContainer
             {
                 LoadPaletteColors();
                 LoadRegionLandform();
-                _minimap.Bind(Eng, _world.WorldWidthM, _world.WorldHeightM);
-                _minimap.Refresh();
+                _minimap?.Bind(Eng, _world.WorldWidthM, _world.WorldHeightM);
+                _minimap?.Refresh();
             }
         }
         _wasGenDone = gen;
     }
+
+    /// The overview map lives in the 3D viewport (owned + placed by the plugin); the dock just drives
+    /// its data (Bind / Refresh / focus marker). Set once, right after Init.
+    public void SetMinimap(DhceMinimap m) => _minimap = m;
 
     /// Editor-camera ground focus → the minimap marker (fed by the plugin each frame).
     public void SetMapFocus(Vector3 f) => _minimap?.SetFocus(f);
@@ -113,55 +115,36 @@ public partial class DhceDock : ScrollContainer
             : $"View: ~{metresAcross / 1000.0:0.0} km across";
     }
 
-    /// Live emergent-biome descriptor under the cursor (fed by the plugin's hover raycast).
-    public void SetBiomeReadout(string label)
-    {
-        if (_biomeReadout != null) _biomeReadout.Text = string.IsNullOrEmpty(label) ? "Biome: —" : $"Biome: {label}";
-    }
-
-    /// Live named-Region under the cursor (`-1` off-map, `0` unassigned, else a place id 1..14).
-    public void SetRegionReadout(long id)
-    {
-        if (_regionReadout == null) return;
-        _regionReadout.Text = id < 0 ? "Region: —"
-            : id == 0 ? "Region: unassigned"
-            : id <= BiomeNames.Length ? $"Region: {BiomeNames[(int)id - 1]}"
-            : "Region: ?";
-    }
-
-    /// Live numeric trait inspector (temperature / moisture) under the cursor; NaN ⇒ off-map.
-    public void SetTraitReadout(double temperature, double moisture)
-    {
-        if (_traitReadout == null) return;
-        _traitReadout.Text = double.IsNaN(temperature)
-            ? "Temp/Moist: —"
-            : $"Temp/Moist: {temperature:0.00} / {moisture:0.00}";
-    }
-
     private bool HasWorld => _world != null && _world.Engine != null;
     private GodotObject Eng => _world.Engine;
 
     // --- layout ---
 
+    // Sections are ordered by authoring workflow: GENERATE → SCULPT → SHAPE → BIOMES & REGIONS →
+    // WATER → SCATTER & CAVES → EXPORT. The biome/region/temp-moist readouts and the VIEW selector
+    // now live under the minimap (DhceMapPanel), not here.
     private void BuildUi()
     {
         var title = new Label { Text = "DHCE Cartographer" };
         title.AddThemeFontSizeOverride("font_size", 16);
         _col.AddChild(title);
 
+        // --- GENERATE ---
         var gen = new Button { Text = "Generate / Regenerate" };
         gen.Pressed += OnGenerate;
         _col.AddChild(gen);
         _status = new Label { Text = "Add a DhceWorld, set params, Generate.", AutowrapMode = TextServer.AutowrapMode.WordSmart };
         _col.AddChild(_status);
-        _biomeReadout = Dim("Biome: —"); // emergent descriptor under the cursor (Stage 2)
-        _col.AddChild(_biomeReadout);
-        _regionReadout = Dim("Region: —"); // named-Region (place) under the cursor (Stage 4)
-        _col.AddChild(_regionReadout);
-        _traitReadout = Dim("Temp/Moist: —"); // numeric trait inspector under the cursor (Stage 5)
-        _col.AddChild(_traitReadout);
         _scaleReadout = Dim("View: —"); // context-aware scale bar (LOD): viewport span at the focus
         _col.AddChild(_scaleReadout);
+
+        Header("WORLD");
+        _seed = SpinRow("Seed", 0, 999999, 1, 12345);
+        _oct = SpinRow("Octaves", 1, 12, 1, 6);
+        _size = SpinRow("Size (km)", 1, 60, 1, 30);
+        _spacing = SpinRow("Spacing (m)", 4, 60, 1, 10);
+        _chunk = SpinRow("Chunk size (m)", 32, 2048, 32, 256);
+        Slider("Height (km)", 0.1, 10, 0.1, 5.0, v => _world?.SetTerrainHeight((float)v));
 
         Header("SAVE / LOAD");
         Button(_col, "Save world", () => { if (_world != null) SetStatus(_world.SaveToDisk()); });
@@ -173,97 +156,31 @@ public partial class DhceDock : ScrollContainer
             PullWorldParams();
             LoadPaletteColors();
             LoadRegionLandform();
-            _minimap.Bind(Eng, _world.WorldWidthM, _world.WorldHeightM);
-            _minimap.Refresh();
+            _minimap?.Bind(Eng, _world.WorldWidthM, _world.WorldHeightM);
+            _minimap?.Refresh();
         });
 
-        Header("SLICE LEVELS");
-        _exportPath = new LineEdit { Text = DhceLevelSlicer.DefaultExportDir(), TooltipText = "Export folder; a 'levels' subfolder is created here" };
-        _col.AddChild(_exportPath);
-        Button(_col, "Slice into levels", () => { if (_world != null) SetStatus(DhceLevelSlicer.Slice(_world, _exportPath.Text)); });
-        _col.AddChild(Dim("Bakes each assigned Region → levels/<Name>.tscn + world_master.res + regions.json."));
-
-        BuildScatterSection();
-        BuildCavesSection();
-
+        // --- SCULPT ---
         Header("TOOLS");
-        var grid = new GridContainer { Columns = 3 };
-        _col.AddChild(grid);
-        AddToolButton(grid, "Raise", ToolKind.Raise);
-        AddToolButton(grid, "Carve", ToolKind.Carve);
-        AddToolButton(grid, "Level", ToolKind.Level);
-        AddToolButton(grid, "Crest", ToolKind.Crest);
-        AddToolButton(grid, "River", ToolKind.River);
-        AddToolButton(grid, "Flood", ToolKind.Flood);
+        var toolRow = new HFlowContainer();
+        _col.AddChild(toolRow);
+        AddToolButton(toolRow, "raise", "Raise", ToolKind.Raise);
+        AddToolButton(toolRow, "carve", "Carve", ToolKind.Carve);
+        AddToolButton(toolRow, "level", "Level", ToolKind.Level);
+        AddToolButton(toolRow, "crest", "Crest", ToolKind.Crest);
+        AddToolButton(toolRow, "river", "River", ToolKind.River);
+        AddToolButton(toolRow, "flood", "Flood", ToolKind.Flood);
         Button(_col, "Generate streams", () => { if (HasWorld) { Eng.Call("generate_streams", 0.5, 1.0); _world.RepaintDirtyTerrain(); _world.RebuildLiquid(); } });
 
         Header("BRUSH");
-        Slider("Radius (m)", 50, 2000, 1, _tool.RadiusM, v => _tool.RadiusM = (float)v);
+        _col.AddChild(Dim("Size (scales with zoom):"));
+        var sizeRow = new HFlowContainer();
+        _col.AddChild(sizeRow);
+        for (int lvl = 0; lvl < ToolState.SizeFractions.Length; lvl++) AddSizeButton(sizeRow, lvl);
         Slider("Strength (m)", 1, 400, 1, _tool.StrengthM, v => _tool.StrengthM = (float)v);
         _liquidKind = Options(new[] { "Water", "Lava" }, 0, idx => _tool.LiquidKind = (int)idx);
 
-        Header("WORLD");
-        _seed = SpinRow("Seed", 0, 999999, 1, 12345);
-        _oct = SpinRow("Octaves", 1, 12, 1, 6);
-        _size = SpinRow("Size (km)", 1, 60, 1, 20);
-        _spacing = SpinRow("Spacing (m)", 4, 60, 1, 12);
-        _chunk = SpinRow("Chunk size (m)", 32, 2048, 32, 256);
-        Slider("Height (km)", 0.1, 10, 0.1, 2.4, v => _world?.SetTerrainHeight((float)v));
-
-        Header("VIEW");
-        _view = Options(ViewNames, 0, idx => SelectView((int)idx));
-        _viewEditHint = Dim("");
-        _viewBrushLabel = Dim("Paint value: 0.5");
-        _viewBrushSlider = new HSlider { MinValue = 0, MaxValue = 1, Step = 0.01, Value = 0.5, Visible = false };
-        _viewBrushLabel.Visible = false;
-        _viewBrushSlider.ValueChanged += v =>
-        {
-            _viewBrushLabel.Text = $"Paint value: {v:0.##}";
-            _tool.TraitValue = (float)v;
-            _tool.Active = ToolKind.Trait;
-        };
-        _col.AddChild(_viewBrushSlider);
-
-        Header("MAP");
-        _minimap = new DhceMinimap();
-        _col.AddChild(_minimap);
-        Button(_col, "Refresh map", () => _minimap.Refresh());
-
-        Header("REGIONS (stamp)");
-        var swatches = new GridContainer { Columns = 2 };
-        _col.AddChild(swatches);
-        for (int id = 1; id <= BiomeNames.Length; id++) swatches.AddChild(SwatchButton(id, BiomeNames[id - 1]));
-
-        Header("ASSIGN REGION (place)");
-        _col.AddChild(Dim("Pick a place, paint with the Region tool, then VIEW → Region to see them."));
-        _regionPick = new OptionButton();
-        for (int id = 1; id <= BiomeNames.Length; id++) _regionPick.AddItem(BiomeNames[id - 1], id);
-        _regionPick.Selected = 0;
-        _regionPick.ItemSelected += idx =>
-        {
-            _tool.RegionId = (int)_regionPick.GetItemId((int)idx);
-            _tool.Active = ToolKind.Region;
-            SetStatus($"Region tool: {BiomeNames[_tool.RegionId - 1]}");
-        };
-        _col.AddChild(_regionPick);
-        var regionModes = new HBoxContainer();
-        AddModeButton(regionModes, "Brush", ToolKind.Region);
-        AddModeButton(regionModes, "Polygon", ToolKind.Territory);
-        AddModeButton(regionModes, "Select", ToolKind.RegionSelect);
-        _col.AddChild(regionModes);
-        _col.AddChild(Dim("Polygon: click vertices, right-click closes, Esc cancels. Select: click an area to flood-assign."));
-
-        Header("TRAIT BRUSH");
-        _traitPick = Options(TraitNames, 0, idx => SelectTrait((int)idx));
-        _traitSliderLabel = Dim("Value: 1");
-        _traitSlider = new HSlider { MinValue = 0, MaxValue = 1, Step = 0.01, Value = 1 };
-        _traitSlider.ValueChanged += v => { _traitSliderLabel.Text = $"Value: {v:0.##}"; _tool.TraitValue = (float)v; _tool.Active = ToolKind.Trait; };
-        _col.AddChild(_traitSlider);
-        _traitEnumLabel = Dim("Type");
-        _traitEnum = new OptionButton();
-        _traitEnum.ItemSelected += idx => { _tool.TraitValue = (int)idx; _tool.Active = ToolKind.Trait; };
-        _col.AddChild(_traitEnum);
-
+        // --- SHAPE ---
         Header("REGION LANDFORM");
         _col.AddChild(Dim("Set a region's terrain character, then Apply shaping."));
         _landRegion = new OptionButton();
@@ -303,18 +220,72 @@ public partial class DhceDock : ScrollContainer
             SetStatus($"blended borders @ {_transitionWidthM:0} m");
         });
 
+        // --- BIOMES & REGIONS ---
+        Header("REGIONS (stamp)");
+        var swatches = new GridContainer { Columns = 2 };
+        _col.AddChild(swatches);
+        for (int id = 1; id <= BiomeNames.Length; id++) swatches.AddChild(SwatchButton(id, BiomeNames[id - 1]));
+
+        Header("ASSIGN REGION (place)");
+        _col.AddChild(Dim("Pick a place, paint with the Region tool, then set VIEW → Region (under the minimap) to see them."));
+        _regionPick = new OptionButton();
+        for (int id = 1; id <= BiomeNames.Length; id++) _regionPick.AddItem(BiomeNames[id - 1], id);
+        _regionPick.Selected = 0;
+        _regionPick.ItemSelected += idx =>
+        {
+            _tool.RegionId = (int)_regionPick.GetItemId((int)idx);
+            _tool.Active = ToolKind.Region;
+            SetStatus($"Region tool: {BiomeNames[_tool.RegionId - 1]}");
+        };
+        _col.AddChild(_regionPick);
+        var regionModes = new HBoxContainer();
+        AddModeButton(regionModes, "brush", "Brush", ToolKind.Region);
+        AddModeButton(regionModes, "polygon", "Polygon", ToolKind.Territory);
+        AddModeButton(regionModes, "select", "Select", ToolKind.RegionSelect);
+        _col.AddChild(regionModes);
+        _col.AddChild(Dim("Polygon: click vertices, right-click closes, Esc cancels. Select: click an area to flood-assign."));
+
+        Header("TRAIT BRUSH");
+        var traitRow = new HFlowContainer();
+        _col.AddChild(traitRow);
+        AddTraitButton(traitRow, "temperature", "Temperature", 0);
+        AddTraitButton(traitRow, "moisture", "Moisture", 1);
+        AddTraitButton(traitRow, "vegetation", "Vegetation", 2);
+        AddTraitButton(traitRow, "palette", "Palette family", 3);
+        _traitSliderLabel = Dim("Value: 1");
+        _traitSlider = new HSlider { MinValue = 0, MaxValue = 1, Step = 0.01, Value = 1 };
+        _traitSlider.ValueChanged += v => { _traitSliderLabel.Text = $"Value: {v:0.##}"; _tool.TraitValue = (float)v; _tool.Active = ToolKind.Trait; };
+        _col.AddChild(_traitSlider);
+        _traitEnumLabel = Dim("Type");
+        _traitEnum = new OptionButton();
+        _traitEnum.ItemSelected += idx => { _tool.TraitValue = (int)idx; _tool.Active = ToolKind.Trait; };
+        _col.AddChild(_traitEnum);
+
         BuildPaletteEditor();
 
-        Header("PHYSICS");
+        // --- WATER ---
+        Header("WATER");
         Slider("Sea level", -1.0, 1.0, 0.01, 0.0, v => { if (HasWorld) { Eng.Call("set_sea_level", v); _world.RebuildLiquid(); } });
+        Button(_col, "Rain (drag an area)", () => { _tool.Active = ToolKind.Rain; SetStatus("Rain tool — drag over terrain; a cloud rains and water pools."); });
+        Slider("Rain rate", 0.0, 0.01, 0.0005, _tool.RainRate, v => _tool.RainRate = (float)v);
         Slider("Flow rate", 0.0, 0.5, 0.01, _simFlow, v => _simFlow = v);
         Slider("Evaporation", 0.0, 0.02, 0.0005, _simEvap, v => _simEvap = v);
         Slider("Substeps", 1, 40, 1, _simSubsteps, v => _simSubsteps = (int)v);
-        Button(_col, "Rain", () => { if (HasWorld) { Eng.Call("rain", 0.05); _world.RebuildLiquid(); } });
         Button(_col, "Settle (1 step)", () => { if (HasWorld) { Eng.Call("step_fluid", _simFlow, _simEvap, _simSubsteps); _world.RebuildLiquid(); } });
-        Button(_col, "Clear liquid", () => { if (HasWorld) { Eng.Call("clear_liquid"); _world.RebuildLiquid(); } });
+        Button(_col, "Clear liquid", () => { if (HasWorld) { _world.StopRain(); Eng.Call("clear_liquid"); _world.RebuildLiquid(); } });
         _simulate = new CheckButton { Text = "Simulate" };
         _col.AddChild(_simulate);
+
+        // --- SCATTER & CAVES ---
+        BuildScatterSection();
+        BuildCavesSection();
+
+        // --- EXPORT ---
+        Header("EXPORT (slice levels)");
+        _exportPath = new LineEdit { Text = DhceLevelSlicer.DefaultExportDir(), TooltipText = "Export folder; a 'levels' subfolder is created here" };
+        _col.AddChild(_exportPath);
+        Button(_col, "Slice into levels", () => { if (_world != null) SetStatus(DhceLevelSlicer.Slice(_world, _exportPath.Text)); });
+        _col.AddChild(Dim("Bakes each assigned Region → levels/<Name>.tscn + world_master.res + regions.json."));
 
         SelectTrait(0, arm: false); // configure the trait-brush UI but leave the active tool at Raise
     }
@@ -354,33 +325,6 @@ public partial class DhceDock : ScrollContainer
         _size.Value = _world.WorldSizeKm;
         _spacing.Value = _world.SpacingM;
         _chunk.Value = _world.ChunkSizeM;
-    }
-
-    private void SelectView(int mode)
-    {
-        _world?.SetViewMode(mode);
-        _minimap?.Refresh(); // the core recolours its cache to the view; the overview tracks it
-        bool paintable = mode == 1 || mode == 2; // Temperature / Moisture
-        _viewBrushSlider.Visible = paintable;
-        _viewBrushLabel.Visible = paintable;
-        if (paintable)
-        {
-            _tool.TraitId = mode == 1 ? 4 : 5;
-            _tool.TraitValue = (float)_viewBrushSlider.Value;
-            _tool.Active = ToolKind.Trait;
-            _viewEditHint.Text = $"Left-drag the terrain to paint {ViewNames[mode]}.";
-        }
-        else
-        {
-            _viewEditHint.Text = mode switch
-            {
-                3 => "Use the sculpt tools to edit elevation.",
-                4 => "Use the Region swatches to stamp.",
-                5 => "Paint with the Region tool to assign named places.",
-                _ => "",
-            };
-        }
-        SetStatus($"{ViewNames[mode]} view");
     }
 
     private void SelectTrait(int dropdownIdx, bool arm = true)
@@ -488,13 +432,61 @@ public partial class DhceDock : ScrollContainer
         _col.AddChild(l);
     }
 
-    private void AddToolButton(Container parent, string text, ToolKind tool)
+    /// Load an addon SVG icon (cached). Returns null before the editor has imported it — callers fall
+    /// back to a text label so the button still works on the very first build.
+    private static Texture2D Icon(string name)
     {
-        var b = new Button { Text = text, ToggleMode = true, ButtonGroup = _toolGroup, SizeFlagsHorizontal = SizeFlags.ExpandFill };
+        if (_iconCache.TryGetValue(name, out var t)) return t;
+        string path = $"res://addons/dhce/icons/{name}.svg";
+        t = ResourceLoader.Exists(path) ? ResourceLoader.Load<Texture2D>(path) : null;
+        _iconCache[name] = t;
+        return t;
+    }
+
+    /// Style a control as a compact icon button: glyph centred, name in the tooltip; falls back to the
+    /// text label if the icon hasn't imported yet.
+    private static void StyleIcon(Button b, string iconName, string tooltip)
+    {
+        b.TooltipText = tooltip;
+        b.CustomMinimumSize = new Vector2(36, 36);
+        var icon = Icon(iconName);
+        if (icon != null)
+        {
+            b.Icon = icon;
+            b.IconAlignment = HorizontalAlignment.Center;
+            b.AddThemeConstantOverride("icon_max_width", 22);
+        }
+        else b.Text = tooltip;
+    }
+
+    private void AddToolButton(Container parent, string iconName, string tooltip, ToolKind tool)
+    {
+        var b = new Button { ToggleMode = true, ButtonGroup = _toolGroup };
+        StyleIcon(b, iconName, tooltip);
         b.Pressed += () => _tool.Active = tool;
         if (tool == _tool.Active) b.ButtonPressed = true;
         parent.AddChild(b);
         _toolButtons.Add(b);
+    }
+
+    private void AddTraitButton(Container parent, string iconName, string tooltip, int dropdownIdx)
+    {
+        var b = new Button { ToggleMode = true, ButtonGroup = _traitGroup };
+        StyleIcon(b, iconName, tooltip);
+        b.Pressed += () => SelectTrait(dropdownIdx);
+        if (dropdownIdx == 0) b.ButtonPressed = true; // mirrors SelectTrait(0) initial config below
+        parent.AddChild(b);
+    }
+
+    /// One of the 6 progressively-larger brush-size icons; selecting it sets the size level (the actual
+    /// world radius is derived from the editor zoom each stroke — see ToolState.SizeFractions).
+    private void AddSizeButton(Container parent, int level)
+    {
+        var b = new Button { ToggleMode = true, ButtonGroup = _sizeGroup };
+        StyleIcon(b, $"size{level + 1}", $"Brush size {level + 1}");
+        b.Pressed += () => _tool.SetSizeLevel(level);
+        if (level == _tool.SizeLevel) b.ButtonPressed = true;
+        parent.AddChild(b);
     }
 
     // --- scatter (N3d) model-slot editor ---
@@ -642,10 +634,11 @@ public partial class DhceDock : ScrollContainer
         parent.AddChild(b);
     }
 
-    private void AddModeButton(Container parent, string text, ToolKind tool)
+    private void AddModeButton(Container parent, string iconName, string tooltip, ToolKind tool)
     {
-        var b = new Button { Text = text, SizeFlagsHorizontal = SizeFlags.ExpandFill };
-        b.Pressed += () => { _tool.Active = tool; SetStatus($"Region: {text} mode"); };
+        var b = new Button();
+        StyleIcon(b, iconName, tooltip);
+        b.Pressed += () => { _tool.Active = tool; SetStatus($"Region: {tooltip} mode"); };
         parent.AddChild(b);
     }
 

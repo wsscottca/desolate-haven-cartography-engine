@@ -26,6 +26,7 @@ public partial class DhceMinimap : Control
     {
         CustomMinimumSize = new Vector2(232, 232);
         TooltipText = "Wheel: zoom · drag: pan";
+        MouseFilter = MouseFilterEnum.Stop; // capture wheel/clicks so they never reach the editor camera
     }
 
     /// Bind to a generated world's engine + bounds (call once gen is done).
@@ -82,15 +83,19 @@ public partial class DhceMinimap : Control
 
     public override void _GuiInput(InputEvent e)
     {
+        // Consume() marks the event handled at BOTH the GUI layer (AcceptEvent) and the viewport layer
+        // (SetInputAsHandled) so the editor's own camera never also acts on it — the minimap zooms/pans
+        // fully independently of the main 3D viewport.
+        void Consume() { AcceptEvent(); GetViewport().SetInputAsHandled(); }
         if (e is InputEventMouseButton mb)
         {
-            if (mb.ButtonIndex == MouseButton.WheelUp && mb.Pressed) { SetZoom(_zoom * 1.2f); AcceptEvent(); }
-            else if (mb.ButtonIndex == MouseButton.WheelDown && mb.Pressed) { SetZoom(_zoom / 1.2f); AcceptEvent(); }
+            if (mb.ButtonIndex == MouseButton.WheelUp && mb.Pressed) { SetZoom(_zoom * 1.2f); Consume(); }
+            else if (mb.ButtonIndex == MouseButton.WheelDown && mb.Pressed) { SetZoom(_zoom / 1.2f); Consume(); }
             else if (mb.ButtonIndex == MouseButton.Left)
             {
                 _dragging = mb.Pressed;
                 _dragLast = mb.Position;
-                AcceptEvent();
+                Consume();
             }
         }
         else if (e is InputEventMouseMotion mm && _dragging)
@@ -100,7 +105,7 @@ public partial class DhceMinimap : Control
             _viewCenter -= d / Size / _zoom; // drag right → view moves left
             ClampCenter();
             QueueRedraw();
-            AcceptEvent();
+            Consume();
         }
     }
 
