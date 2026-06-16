@@ -7,7 +7,7 @@ Native **Godot 4.6 + C#** terrain-authoring tool ("DHCE") driving a shared **Rus
 
 ## Build & test (Windows / PowerShell)
 
-- Core tests: `cargo test -p dhce-core`. Build dir is off OneDrive via `.cargo/config.toml`
+- Core tests: `cargo test -p dhce-core`. Build dir is kept outside the repo via `.cargo/config.toml`
   (`C:\Users\WSSco\.dhce-build`).
 - DLL: build from inside `crates/dhce-godot` (`cargo build --release` — it's excluded from the
   workspace), then copy the `.dll` to `tool/addons/dhce/`.
@@ -27,7 +27,7 @@ Native **Godot 4.6 + C#** terrain-authoring tool ("DHCE") driving a shared **Rus
   per-biome palette/features) and `..\..\web\desolate-haven-guide\lore\biomes\` (per-region docs).
   Never invent biome lore here — raise it in the guide via the `/story-writing` skill.
 - **Vault (shared AI reference):** distilled notes for the whole project live at
-  `C:\Users\WSSco\OneDrive\Documents\vault\projects\desolate-haven\`. Lore authoring dual-writes
+  `C:\dev\vault\projects\desolate-haven\`. Lore authoring dual-writes
   there from the guide repo; consume it read-only here.
 - Rationale: guide `docs\adr\0001-lore-canonical-home.md` + game
   `..\desolate-haven\docs\adr\0006-lore-canon-moves-to-guide.md`.

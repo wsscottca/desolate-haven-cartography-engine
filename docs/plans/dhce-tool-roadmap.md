@@ -44,15 +44,16 @@ a world actually needs it.
 ## How to build / run / test (Windows / PowerShell)
 - Prepend cargo to PATH: `$env:Path = "$env:USERPROFILE\.cargo\bin;$env:Path"`.
 - Core tests: `cargo test -p dhce-core` (22+ tests; determinism, chunks, streams, fluid).
-- **Build dir is off OneDrive** via `.cargo/config.toml` → `C:\Users\WSSco\.dhce-build`. When running
-  cargo with `--manifest-path` from another CWD, also set `$env:CARGO_TARGET_DIR="C:\Users\WSSco\.dhce-build"`.
-- **LNK1104 on test/exe link** = Windows Defender / OneDrive scanning the fresh `.exe`. Kill stale
+- **Build dir is outside the repo tree** via `.cargo/config.toml` → `C:\Users\WSSco\.dhce-build`
+  (keeps multi-GB build output out of git). When running cargo with `--manifest-path` from another
+  CWD, also set `$env:CARGO_TARGET_DIR="C:\Users\WSSco\.dhce-build"`.
+- **LNK1104 on test/exe link** = Windows Defender scanning the fresh `.exe`. Kill stale
   test procs by name and retry (clears on its own). A Defender exclusion for `.dhce-build` stops it.
 - Build the DLL: dhce-godot is **excluded from the workspace** (`exclude` in root `Cargo.toml` — it
   needs the gdext toolchain), so `cargo build -p dhce-godot` from the repo root **fails**
   (`package ID specification did not match any packages`). Build from inside the crate dir:
   `cd crates/dhce-godot; cargo build --release`. Output → the dir set in `.cargo/config.toml`
-  (currently `C:\Users\WSSco\.dhce-build\release\dhce_godot.dll` — the redirect off OneDrive applies
+  (currently `C:\Users\WSSco\.dhce-build\release\dhce_godot.dll` — the out-of-repo redirect applies
   to the excluded crate too, via upward config discovery; the old `crates/dhce-godot/target/release/`
   path is stale). Copy that DLL to `tool/addons/dhce/dhce_godot.dll`.
 - **The DLL is locked while the Godot editor is open** — to swap it: user closes Godot → copy → reopen.
