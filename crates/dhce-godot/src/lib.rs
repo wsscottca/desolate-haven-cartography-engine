@@ -22,7 +22,11 @@ struct DhceExtension;
 unsafe impl ExtensionLibrary for DhceExtension {}
 
 #[derive(GodotClass)]
-#[class(base = RefCounted)]
+// `tool`: DHCE is an in-editor authoring tool — the @tool C# scripts (DhceWorld/DhcePlugin)
+// instantiate DhceEngine in the editor. Without `tool`, Godot 4.3+ registers it as a runtime-only
+// class and hands the editor a *placeholder* instance, so every call fails with
+// "Cannot call GDExtension method bind '...' on placeholder instance". `tool` makes it run in-editor.
+#[class(base = RefCounted, tool)]
 struct DhceEngine {
     world: World,
     surface: Option<Surface>,
