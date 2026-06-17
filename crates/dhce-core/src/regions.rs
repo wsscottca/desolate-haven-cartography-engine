@@ -270,7 +270,8 @@ pub fn region_presets() -> [RegionDef; REGION_COUNT] {
         RegionDef { label: "Jagged Mountains",     accent: c(MK_GOLD),      traits: t(0.92, 0.68, 0.75, 0.28, 0.28, 0.42, veg::EVERGREEN, fam::STONE),   water: w(1.0, 1.3, 0.4, 0.30, 1.4) },
         // A flat-topped elevated plateau (low jaggedness, very wide skirt → table-land, not peaks).
         RegionDef { label: "Sacred Woods Plateau", accent: c(MK_BLUE),      traits: t(0.18, 0.42, 0.82, 0.35, 0.50, 0.62, veg::FOREST,    fam::VERDANT), water: w(1.1, 0.9, 0.5, 0.25, 1.2) },
-        RegionDef { label: "Great Lake",           accent: c(MK_BLUE),      traits: t(0.10, 0.20, 0.55, 0.20, 0.50, 0.90, veg::GRASS,     fam::VERDANT), water: w(1.2, 0.7, 0.8, 0.4, 1.8) },
+        // Relief 0.40 so the lakebed undulates (with the below-waterline relief gate) — not a flat box.
+        RegionDef { label: "Great Lake",           accent: c(MK_BLUE),      traits: t(0.10, 0.40, 0.55, 0.20, 0.50, 0.90, veg::GRASS,     fam::VERDANT), water: w(1.2, 0.7, 0.8, 0.4, 1.8) },
         // Rolling forested hills.
         RegionDef { label: "Temperate Forest",     accent: c(MK_WHITE),     traits: t(0.35, 0.55, 0.60, 0.30, 0.55, 0.62, veg::FOREST,    fam::VERDANT), water: w(1.1, 0.9, 0.6, 0.3, 1.2) },
         // Big-sky flatland (very low relief, very wide skirt) — the foothill apron mountains taper into.

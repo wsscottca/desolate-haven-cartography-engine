@@ -1431,7 +1431,9 @@ impl World {
                 // region set to 0 erosion stays pristine — incision AND diffusion both off there.
                 let reg = self.region_r.get(r).copied().unwrap_or(0) as usize;
                 let em = self.region_erosion.get(reg).copied().unwrap_or(1.0).clamp(0.0, 1.0);
-                let w = EROSION_DIFFUSE_W * (0.25 + 0.75 * a) * em;
+                // Mostly-uniform hillslope diffusion so low-flow valley WALLS slump into natural slopes
+                // (not steep canyon cliffs); a small flow boost still rounds the channels more.
+                let w = EROSION_DIFFUSE_W * (0.5 + 0.5 * a) * em;
                 next[r] = self.elevation_r[r] + (mean - self.elevation_r[r]) * w;
             }
             self.elevation_r = next;
@@ -2076,7 +2078,10 @@ impl World {
                 // strength at lower elevations (broad foothills); larger keeps it near the peaks.
                 let skirt = lerpf(0.25, 0.70, 1.0 - clamp01f(foot));
                 let alt = clamp01f(e / skirt);
-                let land = clamp01f((e + 0.10) / 0.20); // ~0 below sea, 1 above
+                // Relief reaches a bit below the waterline so lakebeds + shallows get geometry (an
+                // undulating floor + an irregular, non-polygonal shoreline) — full on land, fading out by
+                // the deep ocean floor. (Was `(e+0.10)/0.20`, which left everything ≤ −0.10 dead flat.)
+                let land = clamp01f((e + 0.40) / 0.45);
                 let jag_amp = SHAPE_JAG_AMP * (1.0 - 0.6 * clamp01f(ero)); // erosion damps roughness
                 let nj = crate::noise::fbm2(p[0] / w * SHAPE_JAG_FREQ, p[1] / h * SHAPE_JAG_FREQ, seed ^ SHAPE_JAG_SALT, 4);
                 let nr_ = crate::noise::fbm2(p[0] / w * SHAPE_RELIEF_FREQ, p[1] / h * SHAPE_RELIEF_FREQ, seed ^ SHAPE_RELIEF_SALT, 3);
