@@ -34,8 +34,8 @@ public partial class DhceWorld : Node3D
     [Export] public float OrographicStrength = 0.45f; // climate #2: 0..1 windward-wet / lee-dry pull on moisture
     [Export] public float WindDeg = 0f;               // prevailing wind direction (degrees; 0 = +X, west→east)
     [Export] public float ShapeStrength = 1.0f;       // relief gain: bakes per-region landform (mountains/hills) into terrain at Generate
-    [Export] public float RiverDepthGain = 0.015f;    // auto river channel depth: carve = 0.005 + this·sqrt(flow);
-                                                      // ~0.015 ⇒ ~8 m streams … ~35 m for the biggest trunk (shallow, natural)
+    [Export] public float RiverDepthGain = 0.015f;    // river EROSION strength: hydraulic stream-power incision
+                                                      // carves valleys along the drainage (×3 internally). Higher ⇒ deeper valleys.
     [Export] public float BaseBlendM = 1800f;         // width (m) regions' base-elevation trunk blends — softer steps between places
 
     /// Normalized-elevation span the core clamps to (ELEV_MAX − ELEV_MIN in world.rs).
@@ -628,6 +628,7 @@ public partial class DhceWorld : Node3D
             RegionLandform = _engine.Call("region_landform_export").As<float[]>(),
             RegionLakeDepth = _engine.Call("region_lake_depth_export").As<float[]>(),
             RegionRiverThreshold = _engine.Call("river_threshold_export").As<float[]>(),
+            RegionErosion = _engine.Call("erosion_export").As<float[]>(),
         };
     }
 
@@ -664,6 +665,7 @@ public partial class DhceWorld : Node3D
         SetF("set_region_landform_table", s.RegionLandform);
         SetF("set_region_lake_depth_table", s.RegionLakeDepth); // per-Region lake thresholds (saved liquid already holds the lakes)
         SetF("set_river_threshold_table", s.RegionRiverThreshold); // per-Region river thresholds (saved liquid already holds the rivers)
+        SetF("set_erosion_table", s.RegionErosion); // per-Region erosion strength
         _engine.Call("refresh_colors");
         for (int i = 0; i < _built.Length; i++) if (_built[i]) BuildChunk(i, _chunkLod[i] == 1); // re-tessellate the meshed ring
     }

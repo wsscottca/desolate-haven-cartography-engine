@@ -19,12 +19,18 @@ use std::collections::HashMap;
 
 /// Channel-carve depth per unit tool intensity (Course tool).
 const CHANNEL_DEPTH_GAIN: f64 = 6.0;
-/// Auto-river bank taper (the "rivers dig in" fix): each pass spreads this fraction of a channel cell's
-/// carve depth onto its neighbours (max-combined), and this many passes set the valley half-width — so
-/// a river is a sloped V-valley a few cells wide rather than a one-cell vertical slot. Only the channel
-/// cells take water; the lowered banks stay dry land.
-const RIVER_BANK_SPREAD: f64 = 0.6;
-const RIVER_BANK_PASSES: usize = 3;
+/// Hydraulic (stream-power) erosion that generates the rivers ([`World::generate_rivers`]): per pass it
+/// recomputes the drainage and incises each cell by `strength·√(flow/peak)·slope` (so valleys carve
+/// where water concentrates), then lightly diffuses — weighted by flow — to widen/round the valleys
+/// (no knife-edge canyons) while leaving ridges crisp. `EROSION_ITERS` passes; `EROSION_STRENGTH_SCALE`
+/// maps the front-end's `depth_gain` (RiverDepthGain) to incision strength; `EROSION_DIFFUSE_W` is the
+/// max hillslope-diffusion weight (in valleys). Serial + double-buffered ⇒ deterministic + thread-invariant.
+const EROSION_ITERS: usize = 10;
+const EROSION_STRENGTH_SCALE: f64 = 3.0;
+const EROSION_DIFFUSE_W: f64 = 0.10;
+/// A cell never incises more than this fraction of the drop to its receiver in one pass (stability — keeps
+/// the carved cell above its receiver so the drainage network stays monotone).
+const EROSION_MAX_CUT: f64 = 0.45;
 /// Shoreline grading (the "cliffs at the water edge" fix): after water is placed, dry land within
 /// `SHORE_GRADE_M` of any waterline is capped to a gentle ramp rising `SHORE_RISE_PER_M` (normalized
 /// elevation per metre) from the water surface — so a high region beside filled water eases down to the
@@ -155,6 +161,10 @@ pub struct World {
     /// trunk river), id `1..=REGION_COUNT` — the river-tier mirror of `region_lake_depth`, seeded from
     /// [`regions::default_river_threshold`] and read by [`generate_rivers`](World::generate_rivers).
     region_river_threshold: Vec<f64>,
+    /// Per-Region **erosion strength** multiplier (×1 = neutral), id `1..=REGION_COUNT` — scales the
+    /// hydraulic river erosion's incision per region (on top of the global `depth_gain`/RiverDepthGain).
+    /// Seeded from [`regions::default_erosion`]; read by [`generate_rivers`](World::generate_rivers).
+    region_erosion: Vec<f64>,
     /// True where the user manually set a region's biome — protected from auto-reclassify.
     biome_locked: Vec<bool>,
     /// True where the user painted a Course (main-river) stroke — the stream seed mask.
@@ -249,6 +259,10 @@ impl World {
         for (i, slot) in region_river_threshold.iter_mut().enumerate() {
             *slot = regions::default_river_threshold(i as u8);
         }
+        let mut region_erosion = vec![1.0f64; regions::REGION_COUNT + 1];
+        for (i, slot) in region_erosion.iter_mut().enumerate() {
+            *slot = regions::default_erosion(i as u8);
+        }
         World {
             width: 0.0,
             height: 0.0,
@@ -283,6 +297,7 @@ impl World {
             biome_water,
             region_lake_depth,
             region_river_threshold,
+            region_erosion,
             biome_locked: Vec::new(),
             course_mask: Vec::new(),
             stream_carve: Vec::new(),
@@ -849,6 +864,29 @@ impl World {
         }
     }
 
+    /// Region `id`'s erosion-strength multiplier (×1 = neutral); `1.0` if out of range.
+    pub fn erosion_of(&self, id: usize) -> f64 {
+        self.region_erosion.get(id).copied().unwrap_or(1.0)
+    }
+    /// Set region `id`'s erosion multiplier (clamped ≥ 0). Re-run [`generate_rivers`] to apply.
+    pub fn set_erosion(&mut self, id: usize, value: f64) {
+        if let Some(v) = self.region_erosion.get_mut(id) {
+            *v = value.max(0.0);
+        }
+    }
+    /// Export the per-Region erosion table for save/load.
+    pub fn erosion_export(&self) -> Vec<f32> {
+        self.region_erosion.iter().map(|&v| v as f32).collect()
+    }
+    /// Restore the per-Region erosion table.
+    pub fn set_erosion_table(&mut self, vals: &[f32]) {
+        for (i, v) in self.region_erosion.iter_mut().enumerate() {
+            if i < vals.len() {
+                *v = vals[i] as f64;
+            }
+        }
+    }
+
     // --- brush tools ---
 
     /// Set the active brush's vertical sphere: `hit_y` is the Godot-space Y of the brush centre (the
@@ -1297,103 +1335,145 @@ impl World {
         }
     }
 
-    /// Grow **trunk rivers** automatically from the whole-map drainage — no painted seed needed. Every
-    /// land cell carrying at least its Region's share of the peak flow becomes a river (plus any painted
-    /// Course). Flow is **moisture-weighted**, so valleys in wetter regions run bigger — the climate
-    /// tie. `depth_gain` scales channel depth with `sqrt(flow)`. Idempotent (restore-then-recarve via
-    /// `stream_carve`); shares that buffer with [`generate_streams`], so run one or the other in a pass,
-    /// not both. The per-region cutoff is [`river_threshold_of`](World::river_threshold_of).
+    /// Generate the rivers by **hydraulic (stream-power) erosion** — carve dendritic valleys along the
+    /// whole-map drainage, then seat the water in the carved valley floors (replacing the old fixed-depth
+    /// channel carve, which slit grooves into un-eroded terrain). Each pass recomputes the moisture-weighted
+    /// drainage (the climate tie — wetter catchments carry more flow, so they carve bigger), incises each
+    /// land cell by `strength·√(flow/peak)·slope`, then lightly diffuses (flow-weighted) to widen/round the
+    /// valleys while keeping ridges crisp. Painted Course cells incise regardless of flow. `depth_gain`
+    /// (RiverDepthGain) scales the incision strength. Idempotent: the net erosion is recorded into
+    /// `stream_carve`, so [`reshape_and_reflow`] restores then re-erodes bit-identically; shares that buffer
+    /// with [`generate_streams`] (run one per pass, not both). Serial + double-buffered + the total-order
+    /// drainage ⇒ deterministic and thread-invariant (the cross-target contract).
     pub fn generate_rivers(&mut self, depth_gain: f64) {
-        if self.mesh.is_none() {
+        let n = self.elevation_r.len();
+        if self.mesh.is_none() || self.neighbors.len() != n {
             return;
         }
-        let n = self.elevation_r.len();
         if self.stream_carve.len() != n {
             self.stream_carve = vec![0.0; n];
         }
         if self.course_mask.len() != n {
             self.course_mask = vec![false; n];
         }
-        // Build from clean terrain so a re-run adapts to any reshaping/sculpting in between.
+        // Build from clean terrain so a re-run is idempotent and adapts to reshaping/sculpting in between.
         self.restore_stream_carve();
 
         let num_b = self.mesh.as_ref().unwrap().num_boundary_regions();
-        // Moisture weight: a dry floor (so even arid catchments route) plus a wet boost — rivers grow
-        // where the orographic-moisture climate is wetter.
+        if num_b >= n {
+            return;
+        }
+        let sea = self.sea_level;
+        let pitch = (self.width * self.height / n as f64).sqrt().max(1.0);
+        // Moisture weight: a dry floor (so even arid catchments route) plus a wet boost.
         let weight: Vec<f64> = (0..n)
             .map(|r| 0.25 + self.moisture_r.get(r).copied().unwrap_or(0.5).clamp(0.0, 1.0))
             .collect();
-        let dr = streams::drainage(&self.elevation_r, &self.neighbors, num_b, Some(&weight));
+        // Snapshot the shaped terrain so the net erosion can be recorded into `stream_carve` (restore).
+        let snapshot = self.elevation_r.clone();
+        let base_strength = depth_gain.max(0.0) * EROSION_STRENGTH_SCALE; // global master (RiverDepthGain)
 
-        // Peak flow over land sets the scale the per-region thresholds are relative to.
+        // --- Stream-power incision + flow-weighted hillslope diffusion, drainage re-solved each pass ---
+        for _ in 0..EROSION_ITERS {
+            let dr = streams::drainage(&self.elevation_r, &self.neighbors, num_b, Some(&weight));
+            let mut max_flow = 1.0f64;
+            for r in num_b..n {
+                if self.elevation_r[r] > sea && dr.flow[r] > max_flow {
+                    max_flow = dr.flow[r];
+                }
+            }
+            // Incision delta (computed from the pre-pass state, then applied — order-independent).
+            let mut delta = vec![0.0f64; n];
+            for r in num_b..n {
+                if self.elevation_r[r] <= sea {
+                    continue; // land only
+                }
+                let rcv = dr.receiver[r];
+                if rcv == r {
+                    continue;
+                }
+                let drop = self.elevation_r[r] - self.elevation_r[rcv];
+                if drop <= 0.0 {
+                    continue;
+                }
+                // Per-region erosion strength (×1 = neutral) on top of the global master.
+                let reg = self.region_r.get(r).copied().unwrap_or(0) as usize;
+                let strength = base_strength * self.region_erosion.get(reg).copied().unwrap_or(1.0);
+                let a = (dr.flow[r] / max_flow).clamp(0.0, 1.0);
+                let mut e = strength * a.sqrt() * (drop / pitch);
+                if self.course_mask[r] {
+                    e = e.max(strength * 0.5 * (drop / pitch)); // painted Course carves regardless of flow
+                }
+                delta[r] = -e.min(drop * EROSION_MAX_CUT); // stays above the receiver (monotone network)
+            }
+            for r in num_b..n {
+                if delta[r] != 0.0 {
+                    self.elevation_r[r] = (self.elevation_r[r] + delta[r]).clamp(ELEV_MIN, ELEV_MAX);
+                }
+            }
+            // Hillslope diffusion (valley widening), weighted by flow so valleys round but ridges stay crisp.
+            let mut next = self.elevation_r.clone();
+            for r in num_b..n {
+                if self.elevation_r[r] <= sea {
+                    continue;
+                }
+                let nb = &self.neighbors[r];
+                if nb.is_empty() {
+                    continue;
+                }
+                let mut sum = 0.0;
+                for &j in nb {
+                    sum += self.elevation_r[j as usize];
+                }
+                let mean = sum / nb.len() as f64;
+                let a = (dr.flow[r] / max_flow).clamp(0.0, 1.0);
+                // Scale valley-widening by the per-region erosion too (clamped ≤1 for stability), so a
+                // region set to 0 erosion stays pristine — incision AND diffusion both off there.
+                let reg = self.region_r.get(r).copied().unwrap_or(0) as usize;
+                let em = self.region_erosion.get(reg).copied().unwrap_or(1.0).clamp(0.0, 1.0);
+                let w = EROSION_DIFFUSE_W * (0.25 + 0.75 * a) * em;
+                next[r] = self.elevation_r[r] + (mean - self.elevation_r[r]) * w;
+            }
+            self.elevation_r = next;
+        }
+
+        // Record the net erosion (idempotent restore) — snapshot minus the eroded terrain.
+        for r in 0..n {
+            self.stream_carve[r] = snapshot[r] - self.elevation_r[r];
+        }
+
+        // --- Seat the river water in the carved valleys (per-region flow threshold, + painted Course) ---
+        let dr = streams::drainage(&self.elevation_r, &self.neighbors, num_b, Some(&weight));
         let mut max_flow = 1.0f64;
         for r in num_b..n {
-            if self.elevation_r[r] > self.sea_level && dr.flow[r] > max_flow {
+            if self.elevation_r[r] > sea && dr.flow[r] > max_flow {
                 max_flow = dr.flow[r];
             }
         }
-
-        // Raw per-cell channel depth for every river cell (painted Course, or flow past its region cutoff).
-        let mut carve = vec![0.0f64; n];
-        let mut is_river = vec![false; n];
         for r in num_b..n {
             let painted = self.course_mask.get(r).copied().unwrap_or(false);
-            let land = self.elevation_r[r] > self.sea_level;
+            let land = self.elevation_r[r] > sea;
             let region = self.region_r.get(r).copied().unwrap_or(0) as usize;
             let thr = self.river_threshold_of(region) * max_flow;
             if !(painted || (land && dr.flow[r] >= thr)) {
                 continue;
             }
+            // Shallow water on the valley floor — the carved valley itself gives the visual depth.
             let nf = (dr.flow[r] / max_flow).clamp(0.0, 1.0).sqrt();
-            carve[r] = streams::MIN_STREAM_DEPTH + depth_gain * nf;
-            is_river[r] = true;
-        }
-        // Taper the banks: max-spread a decaying fraction of each channel's depth onto its neighbours so
-        // the cross-section is a sloped V-valley a few cells wide, not a one-cell vertical slot. Serial +
-        // double-buffered ⇒ deterministic and thread-invariant (the cross-target contract).
-        if self.neighbors.len() == n {
-            for _ in 0..RIVER_BANK_PASSES {
-                let mut next = carve.clone();
-                for r in num_b..n {
-                    let mut m = carve[r];
-                    for &nb in &self.neighbors[r] {
-                        let v = carve[nb as usize] * RIVER_BANK_SPREAD;
-                        if v > m {
-                            m = v;
-                        }
-                    }
-                    next[r] = m;
-                }
-                carve = next;
+            let wt = (streams::MIN_STREAM_DEPTH + 0.03 * nf).min(0.05);
+            if self.field.depth[r] < wt {
+                self.field.depth[r] = wt;
             }
-        }
-        // Apply: lower terrain by the (tapered) carve, record the actual drop so a re-run restores then
-        // re-carves (idempotent), and lay shallow water in the channel cells only — the banks stay dry.
-        let mut touched: Vec<u32> = Vec::new();
-        for r in num_b..n {
-            let cd = carve[r];
-            if cd <= 0.0 {
-                continue;
-            }
-            let before = self.elevation_r[r];
-            let after = (before - cd).clamp(ELEV_MIN, ELEV_MAX);
-            self.stream_carve[r] = before - after; // record the actual lowering
-            self.elevation_r[r] = after;
-            if is_river[r] {
-                // Fill most of the (now-shallow) channel so the river reads as visible water rather than a
-                // dry trench — surface sits just below the banks. Capped so a big trunk can't pool absurdly.
-                let wt = ((before - after) * 0.8).min(0.05);
-                if self.field.depth[r] < wt {
-                    self.field.depth[r] = wt;
-                }
-                self.field.kind[r] = 0; // water
-            }
-            touched.push(r as u32);
+            self.field.kind[r] = 0; // water
         }
 
-        self.reclassify(&touched);
-        self.after_edit(&touched);
-        self.mark_all_liquid_changed(); // rivers carve channels + lay water across the map
+        // Erosion changed elevation broadly → recolour (the ramp reads elevation) + re-tessellate all.
+        // (Canon cells are biome-locked, so an auto-reclassify would no-op; skipped for speed.)
+        self.color_cache = self.region_color();
+        for d in self.chunk_dirty.iter_mut() {
+            *d = true;
+        }
+        self.mark_all_liquid_changed(); // erosion carved valleys + seated river water across the map
     }
 
     /// Make every lake drain visibly: find each lake's spill (pour-point) cell and force its outlet —

@@ -384,6 +384,15 @@ pub fn region_pond_cap(region_id: u8) -> f64 {
 /// (low threshold ⇒ a denser network), an arid one only along the major valleys (high threshold).
 /// The editor stores these per region (id `1..=14`) and exposes a slider per region;
 /// [`crate::world::World::generate_rivers`] reads the per-region value to gate each cell. Id `0` is unused.
+/// Per-Region **erosion strength** multiplier for the hydraulic river erosion
+/// ([`crate::world::World::generate_rivers`]) — relative (×1 = neutral), scaling how deeply that region
+/// incises valleys along the drainage on top of the global `RiverDepthGain`. Default 1.0 everywhere;
+/// tune per region in the editor (raise for dramatic mountain canyons, lower for flat plains/marsh).
+/// Id `0` (ocean) is unused.
+pub fn default_erosion(_region_id: u8) -> f64 {
+    1.0
+}
+
 pub fn default_river_threshold(region_id: u8) -> f64 {
     // Scattered Isles is a port laced with waterways — drop its threshold so a dense channel network
     // (not just the trunk) carves through the lowland.

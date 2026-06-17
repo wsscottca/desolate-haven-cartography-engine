@@ -348,6 +348,26 @@ impl DhceEngine {
     fn set_river_threshold_table(&mut self, vals: PackedFloat32Array) {
         self.world.set_river_threshold_table(&vals.to_vec());
     }
+    /// Region `id`'s erosion-strength multiplier (×1 = neutral) for the hydraulic river erosion.
+    #[func]
+    fn erosion_of(&self, id: i64) -> f64 {
+        self.world.erosion_of(id.max(0) as usize)
+    }
+    /// Set region `id`'s erosion multiplier; re-run `generate_rivers`/`reshape_and_reflow` to apply.
+    #[func]
+    fn set_erosion(&mut self, id: i64, value: f64) {
+        self.world.set_erosion(id.max(0) as usize, value);
+    }
+    /// Export the per-Region erosion table for save/load.
+    #[func]
+    fn erosion_export(&self) -> PackedFloat32Array {
+        PackedFloat32Array::from(self.world.erosion_export().as_slice())
+    }
+    /// Restore the per-Region erosion table.
+    #[func]
+    fn set_erosion_table(&mut self, vals: PackedFloat32Array) {
+        self.world.set_erosion_table(&vals.to_vec());
+    }
     /// Grow trunk rivers automatically from the whole-map (moisture-weighted) drainage, gated by the
     /// per-region thresholds. `depth_gain` scales channel depth with flow. Nulls the liquid caches.
     #[func]

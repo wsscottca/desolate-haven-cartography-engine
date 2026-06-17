@@ -36,6 +36,7 @@ public partial class DhceDock : ScrollContainer
     private SpinBox[] _landSpins;
     private SpinBox _lakeDepthSpin;   // per-Region lake-fill threshold (tied to the same region picker)
     private SpinBox _riverThreshSpin; // per-Region river threshold (tied to the same region picker)
+    private SpinBox _erosionSpin;     // per-Region river-erosion strength (tied to the same region picker)
     private CheckButton _simulate;
     private DhceMinimap _minimap;
     private LineEdit _exportPath;
@@ -371,6 +372,10 @@ public partial class DhceDock : ScrollContainer
         _lakeDepthSpin.ValueChanged += v => OnRegionLakeDepth(v);
         _riverThreshSpin = SpinRow("River threshold", 0, 0.2, 0.005, 0);
         _riverThreshSpin.ValueChanged += v => OnRegionRiverThreshold(v);
+        // River erosion: how deeply this region's rivers carve their valleys (hydraulic erosion strength,
+        // ×1 = neutral). Higher ⇒ deeper canyons; 0 ⇒ no incision here.
+        _erosionSpin = SpinRow("River erosion", 0, 3, 0.1, 1);
+        _erosionSpin.ValueChanged += v => OnRegionErosion(v);
         Button(_target, "Apply water", () =>
         {
             if (!HasWorld) return;
@@ -563,6 +568,8 @@ public partial class DhceDock : ScrollContainer
             _lakeDepthSpin.Value = Eng.Call("region_lake_depth_of", SelectedLandRegion()).As<double>();
         if (_riverThreshSpin != null)
             _riverThreshSpin.Value = Eng.Call("river_threshold_of", SelectedLandRegion()).As<double>();
+        if (_erosionSpin != null)
+            _erosionSpin.Value = Eng.Call("erosion_of", SelectedLandRegion()).As<double>();
         _loadingLandform = false;
     }
 
@@ -588,6 +595,14 @@ public partial class DhceDock : ScrollContainer
         int id = SelectedLandRegion();
         Eng.Call("set_river_threshold", id, v);
         SetStatus($"{BiomeNames[id - 1]}: river threshold {v:0.###} (lower ⇒ more rivers) — Apply water to update");
+    }
+
+    private void OnRegionErosion(double v)
+    {
+        if (_loadingLandform || !HasWorld) return;
+        int id = SelectedLandRegion();
+        Eng.Call("set_erosion", id, v);
+        SetStatus($"{BiomeNames[id - 1]}: river erosion ×{v:0.##} (deeper valleys) — Apply shaping or water to re-erode");
     }
 
     // Physical climate sliders: temperature follows elevation (lapse), moisture follows the wind

@@ -261,16 +261,14 @@ fn shorelines_are_not_cliffs() {
 }
 
 #[test]
-fn auto_rivers_carve_tapered_banks_not_slots() {
-    // The "rivers dig in" fix: auto-rivers must carve a sloped V-valley (channel + tapered dry banks),
-    // not a one-cell vertical slot. The defining signature is that the carve reaches *dry* bank cells
-    // beyond the watered channel — so the set of carved cells is strictly larger than the watered
-    // (river) cells. (The old slot carve lowered only the channel, which always took water.)
+fn auto_rivers_carve_valleys_not_slots() {
+    // Hydraulic erosion (the river generator) carves dendritic VALLEYS along the drainage, not a
+    // one-cell water slot — so the eroded (lowered) area is far larger than the watered channel itself.
     let mut w = built_canon();
     let sea = -0.4;
     w.set_sea_level(sea);
     let elev0 = w.elevation_export();
-    w.generate_rivers(0.05); // no painted Course — auto trunk rivers from flow
+    w.generate_rivers(0.05); // hydraulic erosion from flow alone (no painted Course)
     let elev1 = w.elevation_export();
     let depth1 = w.liquid_depth_export();
     let eps = 1e-6;
@@ -320,6 +318,35 @@ fn sculpt_brushes_move_terrain() {
     }
     let var_smooth = subset_variance(&w.elevation_export(), &rough);
     assert!(var_smooth < var_rough, "smooth reduces footprint variance ({var_smooth} < {var_rough})");
+}
+
+#[test]
+fn per_region_erosion_table_roundtrips() {
+    let mut w = built();
+    assert!((w.erosion_of(1) - 1.0).abs() < 1e-9, "erosion defaults to neutral 1.0");
+    w.set_erosion(1, 2.5);
+    w.set_erosion(5, 0.0);
+    let exp = w.erosion_export();
+    let mut b = built();
+    b.set_erosion_table(&exp);
+    assert!((b.erosion_of(1) - 2.5).abs() < 1e-6, "high erosion round-trips");
+    assert!((b.erosion_of(5) - 0.0).abs() < 1e-6, "zero erosion round-trips");
+}
+
+#[test]
+fn zero_region_erosion_disables_carving() {
+    // The per-region erosion knob fully gates the hydraulic erosion: set every region to 0 and
+    // generate_rivers must not move the terrain (incision AND valley diffusion both off).
+    let mut w = built_canon();
+    w.set_sea_level(-0.4);
+    let before = w.elevation_export();
+    for id in 0..=14 {
+        w.set_erosion(id, 0.0);
+    }
+    w.generate_rivers(0.05);
+    let after = w.elevation_export();
+    let changed = (0..before.len()).filter(|&i| (before[i] - after[i]).abs() > 1e-6).count();
+    assert_eq!(changed, 0, "zero erosion everywhere leaves the terrain untouched ({changed} cells moved)");
 }
 
 #[test]

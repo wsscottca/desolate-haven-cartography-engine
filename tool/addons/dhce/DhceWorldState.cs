@@ -53,4 +53,5 @@ public partial class DhceWorldState : Resource
     [Export] public float[] RegionLandform = System.Array.Empty<float>();
     [Export] public float[] RegionLakeDepth = System.Array.Empty<float>();
     [Export] public float[] RegionRiverThreshold = System.Array.Empty<float>();
+    [Export] public float[] RegionErosion = System.Array.Empty<float>();
 }
