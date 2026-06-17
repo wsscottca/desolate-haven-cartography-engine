@@ -59,6 +59,8 @@ public partial class DhceDock : ScrollContainer
     private bool _loadingPalette, _loadingLandform;
 
     private double _shapeStrength = 1.0, _transitionWidthM = 200, _simFlow = 0.45, _simEvap = 0.001;
+    private double _erodeTalus = 0.01, _erodeAmount = 0.5; // whole-map thermal erosion (normalized talus, shed fraction)
+    private int _erodeIters = 15;
     private int _simSubsteps = 10, _simTick;
     private const int SimEveryNFrames = 6;
 
@@ -221,10 +223,14 @@ public partial class DhceDock : ScrollContainer
 
         var toolRow = new HFlowContainer();
         sec.AddChild(toolRow);
-        AddToolButton(toolRow, "raise", "Raise", ToolKind.Raise);
-        AddToolButton(toolRow, "carve", "Carve", ToolKind.Carve);
+        AddToolButton(toolRow, "raise", "Raise (Ctrl: lower)", ToolKind.Raise);
+        AddToolButton(toolRow, "carve", "Carve (Ctrl: raise)", ToolKind.Carve);
+        AddToolButton(toolRow, "smooth", "Smooth (Ctrl: roughen)", ToolKind.Smooth);
         AddToolButton(toolRow, "level", "Level", ToolKind.Level);
+        AddToolButton(toolRow, "flatten", "Flatten to plane", ToolKind.Flatten);
         AddToolButton(toolRow, "crest", "Crest", ToolKind.Crest);
+        AddToolButton(toolRow, "grab", "Grab (drag up/down)", ToolKind.Grab);
+        AddToolButton(toolRow, "erode", "Erode (thermal)", ToolKind.Erode);
         AddToolButton(toolRow, "river", "River", ToolKind.River);
         AddToolButton(toolRow, "flood", "Flood", ToolKind.Flood);
         AddToolButton(toolRow, "biome", "Biome", ToolKind.Biome);
@@ -320,7 +326,8 @@ public partial class DhceDock : ScrollContainer
     private void RefreshBrushOptions()
     {
         var a = _tool.Active;
-        bool sculpt = a == ToolKind.Raise || a == ToolKind.Carve || a == ToolKind.Level || a == ToolKind.Crest;
+        bool sculpt = a == ToolKind.Raise || a == ToolKind.Carve || a == ToolKind.Level || a == ToolKind.Crest
+            || a == ToolKind.Smooth || a == ToolKind.Flatten || a == ToolKind.Grab || a == ToolKind.Erode;
         bool liquid = a == ToolKind.River || a == ToolKind.Flood;
         bool region = a == ToolKind.Region || a == ToolKind.Territory || a == ToolKind.RegionSelect;
         if (_optStrength != null) _optStrength.Visible = sculpt;
@@ -383,6 +390,20 @@ public partial class DhceDock : ScrollContainer
             _world.RepaintDirtyTerrain(); _world.RebuildLiquid();
             _minimap?.Refresh();
             SetStatus($"shaped @ strength {_shapeStrength:0.##} — rivers + lakes re-flowed");
+        });
+
+        Header("EROSION", open: false);
+        _target.AddChild(Dim("Thermal (talus) erosion — collapse steep faces into stable slopes across the whole map. Talus = max stable steepness (lower ⇒ gentler); the Erode brush does this locally."));
+        Slider("Talus", 0.002, 0.05, 0.001, _erodeTalus, v => _erodeTalus = v);
+        Slider("Amount", 0.1, 1.0, 0.05, _erodeAmount, v => _erodeAmount = v);
+        Slider("Iterations", 1, 60, 1, _erodeIters, v => _erodeIters = (int)v);
+        Button(_target, "Apply erosion", () =>
+        {
+            if (!HasWorld) return;
+            Eng.Call("erode", (long)_erodeIters, _erodeTalus, _erodeAmount);
+            _world.RepaintDirtyTerrain(); _world.RebuildLiquid();
+            _minimap?.Refresh();
+            SetStatus($"eroded {_erodeIters}× @ talus {_erodeTalus:0.###}");
         });
 
         Header("TRANSITIONS", open: false);

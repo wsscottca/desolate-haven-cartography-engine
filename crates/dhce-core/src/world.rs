@@ -930,6 +930,217 @@ impl World {
         touched
     }
 
+    /// The 3D-sphere brush footprint as `(cell, falloff_weight)` pairs — the same gate `paint_terrain`
+    /// uses (XZ + the vertical `elev·exag − hit_y` term, smoothstep falloff). Shared by the sculpt
+    /// brushes below so they bite the surface under the cursor from any angle.
+    fn brush_footprint(&self, cx: f64, cy: f64, radius: f64) -> Vec<(usize, f64)> {
+        let mesh = match &self.mesh {
+            Some(m) => m,
+            None => return Vec::new(),
+        };
+        let r2 = radius * radius;
+        let candidates = self.brush_candidates(cx, cy, radius);
+        let (bexag, bhy) = (self.brush_exag, self.brush_hit_y);
+        let mut out = Vec::new();
+        for &rid in &candidates {
+            let ri = rid as usize;
+            let p = mesh.pos_of_r(ri);
+            let dv = self.elevation_r[ri] * bexag - bhy; // 3D sphere: vertical term
+            let d2 = (p[0] - cx).powi(2) + (p[1] - cy).powi(2) + dv * dv;
+            if d2 >= r2 {
+                continue;
+            }
+            let t = 1.0 - (d2 / r2).sqrt();
+            out.push((ri, t * t * (3.0 - 2.0 * t))); // smoothstep falloff (1 centre → 0 rim)
+        }
+        out
+    }
+
+    /// Shared tail for the sculpt brushes: reclassify auto-biome cells + recolour/re-tessellate the
+    /// footprint, and mark its liquid chunks (callers shed displaced water inline). `touched` = edited cells.
+    fn finish_sculpt(&mut self, touched: &[u32]) {
+        self.reclassify(touched);
+        self.after_edit(touched);
+        self.mark_liquid_changed(touched);
+    }
+
+    /// **Smooth** brush: relax the footprint toward each cell's neighbour-mean elevation by
+    /// `weight·falloff` (one Jacobi pass; the inverse of the Roughen brush). Interactive edit — not
+    /// part of the deterministic gen contract.
+    pub fn smooth_terrain(&mut self, cx: f64, cy: f64, radius: f64, weight: f64) -> Vec<u32> {
+        let n = self.elevation_r.len();
+        if self.mesh.is_none() || self.neighbors.len() != n {
+            return Vec::new();
+        }
+        let fp = self.brush_footprint(cx, cy, radius);
+        let mut touched = Vec::with_capacity(fp.len());
+        for &(ri, w) in &fp {
+            let nb = &self.neighbors[ri];
+            if nb.is_empty() {
+                continue;
+            }
+            let mut sum = 0.0;
+            for &j in nb {
+                sum += self.elevation_r[j as usize];
+            }
+            let mean = sum / nb.len() as f64;
+            let cur = self.elevation_r[ri];
+            let after = (cur + (mean - cur) * (weight * w)).clamp(ELEV_MIN, ELEV_MAX);
+            self.elevation_r[ri] = after;
+            if after > cur && self.field.depth[ri] > 0.0 {
+                self.field.depth[ri] = (self.field.depth[ri] - (after - cur)).max(0.0);
+            }
+            touched.push(ri as u32);
+        }
+        self.finish_sculpt(&touched);
+        touched
+    }
+
+    /// **Roughen** brush (Ctrl-Smooth): add deterministic per-cell jitter scaled by `amount·falloff` —
+    /// breaks up flat ground / re-adds detail. Jitter is a hash of the cell index (stable per cell).
+    pub fn roughen_terrain(&mut self, cx: f64, cy: f64, radius: f64, amount: f64) -> Vec<u32> {
+        if self.mesh.is_none() {
+            return Vec::new();
+        }
+        let fp = self.brush_footprint(cx, cy, radius);
+        let mut touched = Vec::with_capacity(fp.len());
+        for &(ri, w) in &fp {
+            let h = hash_u32(ri as u32);
+            let jit = (h & 0xffff) as f64 / 65535.0 - 0.5; // [-0.5, 0.5]
+            let cur = self.elevation_r[ri];
+            let after = (cur + jit * 2.0 * amount * w).clamp(ELEV_MIN, ELEV_MAX);
+            self.elevation_r[ri] = after;
+            if after > cur && self.field.depth[ri] > 0.0 {
+                self.field.depth[ri] = (self.field.depth[ri] - (after - cur)).max(0.0);
+            }
+            touched.push(ri as u32);
+        }
+        self.finish_sculpt(&touched);
+        touched
+    }
+
+    /// **Flatten** brush: ease the footprint toward a fixed `target` height (normalized) by
+    /// `weight·falloff` — builds tablelands / buildable areas. The front-end captures `target` at the
+    /// start of a stroke (the surface height under the first click).
+    pub fn flatten_terrain(&mut self, cx: f64, cy: f64, radius: f64, weight: f64, target: f64) -> Vec<u32> {
+        if self.mesh.is_none() {
+            return Vec::new();
+        }
+        let fp = self.brush_footprint(cx, cy, radius);
+        let mut touched = Vec::with_capacity(fp.len());
+        for &(ri, w) in &fp {
+            let cur = self.elevation_r[ri];
+            let after = (cur + (target - cur) * (weight * w)).clamp(ELEV_MIN, ELEV_MAX);
+            self.elevation_r[ri] = after;
+            if after > cur && self.field.depth[ri] > 0.0 {
+                self.field.depth[ri] = (self.field.depth[ri] - (after - cur)).max(0.0);
+            }
+            touched.push(ri as u32);
+        }
+        self.finish_sculpt(&touched);
+        touched
+    }
+
+    /// **Grab** brush: shift the footprint by `delta·falloff` (normalized) — drag a whole hill up/down
+    /// as a unit (the front-end feeds the vertical cursor travel each dab), unlike Raise which adds.
+    pub fn grab_terrain(&mut self, cx: f64, cy: f64, radius: f64, delta: f64) -> Vec<u32> {
+        if self.mesh.is_none() || delta == 0.0 {
+            return Vec::new();
+        }
+        let fp = self.brush_footprint(cx, cy, radius);
+        let mut touched = Vec::with_capacity(fp.len());
+        for &(ri, w) in &fp {
+            let cur = self.elevation_r[ri];
+            let after = (cur + delta * w).clamp(ELEV_MIN, ELEV_MAX);
+            self.elevation_r[ri] = after;
+            if after > cur && self.field.depth[ri] > 0.0 {
+                self.field.depth[ri] = (self.field.depth[ri] - (after - cur)).max(0.0);
+            }
+            touched.push(ri as u32);
+        }
+        self.finish_sculpt(&touched);
+        touched
+    }
+
+    /// Thermal (talus) erosion over `cells`: each iteration moves material from any cell that sits more
+    /// than `talus` (normalized neighbour drop) above its lowest neighbour, shedding `amount·excess`
+    /// downslope — so steep faces collapse into stable talus slopes (rounds cliffs; the on-brand
+    /// complement to the cliff-grade work). Land only. Per-iteration reads are taken before that
+    /// iteration's deltas apply (sparse accumulate → per-cell apply is commutative), so the result is
+    /// order-independent. Returns the cells changed.
+    fn thermal_erode(&mut self, cells: &[usize], iterations: usize, talus: f64, amount: f64) -> Vec<u32> {
+        let n = self.elevation_r.len();
+        if self.neighbors.len() != n {
+            return Vec::new();
+        }
+        let sea = self.sea_level;
+        let mut touched: std::collections::HashSet<usize> = std::collections::HashSet::new();
+        for _ in 0..iterations.max(1) {
+            let mut delta: std::collections::HashMap<usize, f64> = std::collections::HashMap::new();
+            for &r in cells {
+                if self.elevation_r[r] <= sea {
+                    continue; // land only
+                }
+                let er = self.elevation_r[r];
+                let (mut low, mut lowe) = (r, er);
+                for &nbu in &self.neighbors[r] {
+                    let nb = nbu as usize;
+                    if self.elevation_r[nb] < lowe {
+                        lowe = self.elevation_r[nb];
+                        low = nb;
+                    }
+                }
+                if low == r {
+                    continue;
+                }
+                let diff = er - lowe;
+                if diff > talus {
+                    let m = amount * (diff - talus) * 0.5; // move half the excess downslope
+                    *delta.entry(r).or_insert(0.0) -= m;
+                    *delta.entry(low).or_insert(0.0) += m;
+                }
+            }
+            if delta.is_empty() {
+                break; // settled
+            }
+            for (idx, d) in delta {
+                self.elevation_r[idx] = (self.elevation_r[idx] + d).clamp(ELEV_MIN, ELEV_MAX);
+                touched.insert(idx);
+            }
+        }
+        let touched: Vec<u32> = touched.into_iter().map(|i| i as u32).collect();
+        self.reclassify(&touched);
+        self.after_edit(&touched);
+        touched
+    }
+
+    /// **Erode** brush: a few thermal-erosion iterations over the footprint (talus/amount fixed for an
+    /// interactive feel — tune the whole-map version via [`erode`]).
+    pub fn erode_brush(&mut self, cx: f64, cy: f64, radius: f64) -> Vec<u32> {
+        if self.mesh.is_none() {
+            return Vec::new();
+        }
+        let cells: Vec<usize> = self.brush_footprint(cx, cy, radius).into_iter().map(|(ri, _)| ri).collect();
+        self.thermal_erode(&cells, 3, 0.006, 0.5)
+    }
+
+    /// Whole-map thermal erosion (the dock "Apply erosion" action): `iterations` passes, `talus` =
+    /// the max stable normalized neighbour drop (lower ⇒ gentler result), `amount` = fraction of the
+    /// excess shed per pass. Land only; leaves the ocean/lakes alone.
+    pub fn erode(&mut self, iterations: u32, talus: f64, amount: f64) {
+        let n = self.elevation_r.len();
+        let num_b = match &self.mesh {
+            Some(m) => m.num_boundary_regions(),
+            None => return,
+        };
+        if num_b >= n {
+            return;
+        }
+        let cells: Vec<usize> = (num_b..n).collect();
+        self.thermal_erode(&cells, iterations as usize, talus, amount);
+        self.mark_all_liquid_changed();
+    }
+
     /// Place `amount` of liquid `kind` (0 water, 1 lava) under `(cx, cy)` within
     /// `radius`. Used by the Flood (pour) tool.
     pub fn paint_liquid(&mut self, cx: f64, cy: f64, radius: f64, amount: f64, kind: u8) {

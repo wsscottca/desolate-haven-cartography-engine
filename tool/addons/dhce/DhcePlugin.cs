@@ -20,7 +20,8 @@ public partial class DhcePlugin : EditorPlugin
     private DhceWorld _edited;                   // the selected/edited DhceWorld (drives picking)
     private bool _painting;                      // a left-drag stroke is in progress
     private bool _needRepaint, _needLiquid;      // coalesce brush-stroke re-tessellation to once/frame
-    private MeshInstance3D _gizmo;               // brush-footprint ring under the cursor (ephemeral)
+    private float _flattenTargetNorm;            // Flatten brush: plane height (normalized) captured at stroke start
+    private Vector3 _grabPrevHit;                // Grab brush: previous dab's hit (core space) for the drag delta
     private readonly List<Vector3> _polyVerts = new(); // in-progress Territory polygon (ground points)
     private MeshInstance3D _polyLine;            // polygon outline overlay (ephemeral)
     private Node3D _caveOverlay;                 // translucent carve-sphere gizmos (ephemeral)
@@ -174,7 +175,7 @@ public partial class DhcePlugin : EditorPlugin
 
     public override void _MakeVisible(bool visible)
     {
-        if (!visible) { _edited = null; _painting = false; FreeGizmo(); ClearPolygon(); FreeCaveOverlay(); }
+        if (!visible) { FreeGizmo(); _edited = null; _painting = false; ClearPolygon(); FreeCaveOverlay(); }
     }
 
     /// Route 3D viewport input to the active tool: brush stroke (sculpt/trait/region brush), polygon
@@ -284,6 +285,10 @@ public partial class DhcePlugin : EditorPlugin
             }
 
             _painting = true;
+            // Stroke-start state: Flatten captures its target plane (the surface height under the
+            // first click); Grab seeds the drag-delta reference. Both in normalized elevation.
+            _grabPrevHit = hit;
+            _flattenTargetNorm = (float)(hit.Y / Mathf.Max(world.Exaggeration, 1f));
         }
         else // motion
         {
@@ -292,7 +297,15 @@ public partial class DhcePlugin : EditorPlugin
             if (!_painting || !mm.ButtonMask.HasFlag(MouseButtonMask.Left) || !onTerrain) return pass;
         }
 
-        EditResult res = _tool.Apply(world.Engine, hit, world.Exaggeration);
+        // Grab moves the footprint by the vertical cursor travel since the last dab; capture it here.
+        if (_tool.Active == ToolKind.Grab)
+        {
+            _tool.GrabDeltaNorm = (float)((hit.Y - _grabPrevHit.Y) / Mathf.Max(world.Exaggeration, 1f));
+            _grabPrevHit = hit;
+        }
+        _tool.FlattenTargetNorm = _flattenTargetNorm;
+        bool invert = @event is InputEventWithModifiers mod && mod.CtrlPressed; // Ctrl inverts raise/carve/smooth
+        EditResult res = _tool.Apply(world.Engine, hit, world.Exaggeration, invert);
         // Coalesce: a fast drag dabs several times per frame; flush the re-tessellation once in
         // _Process so a chunk is rebuilt at most once a frame (the core accumulates dirty chunks).
         if ((res & EditResult.Terrain) != 0) _needRepaint = true;
@@ -426,47 +439,20 @@ public partial class DhcePlugin : EditorPlugin
         _caveOverlayCount = -1;
     }
 
-    // --- brush footprint gizmo (a flat ring laid on the surface under the cursor) ---
+    // --- brush footprint cursor (a surface-conforming sphere highlight baked into the terrain shader) ---
 
-    private void UpdateGizmo(DhceWorld world, Vector3 pos, bool show)
+    /// Show/move the brush highlight. `corePos` is core space (the raycast hit) → converted to global
+    /// for the shader, which evaluates a 3D-sphere highlight per-pixel on the real surface, so it wraps
+    /// peaks/slopes and matches the painted footprint exactly. Replaces the old flat XZ ring.
+    private void UpdateGizmo(DhceWorld world, Vector3 corePos, bool show)
     {
-        if (_gizmo == null || !GodotObject.IsInstanceValid(_gizmo) || _gizmo.GetParent() != world.RenderRoot)
-        {
-            FreeGizmo();
-            _gizmo = BuildGizmo();
-            world.RenderRoot.AddChild(_gizmo); // owner left null → ephemeral, never serialized
-        }
-        _gizmo.Visible = show;
-        if (!show) return;
-        float r = Mathf.Max(_tool.RadiusM, 1f);
-        _gizmo.Scale = new Vector3(r, 1f, r);
-        _gizmo.Position = pos; // pos is core space; the render-root applies the centring offset
+        world.SetBrushHighlight(show ? world.ToEditor(corePos) : Vector3.Zero, Mathf.Max(_tool.RadiusM, 1f), show);
     }
 
+    /// Hide the brush highlight (no geometry to free now — it lives in the shared terrain shader).
     private void FreeGizmo()
     {
-        if (_gizmo != null && GodotObject.IsInstanceValid(_gizmo)) _gizmo.QueueFree();
-        _gizmo = null;
-    }
-
-    private static MeshInstance3D BuildGizmo()
-    {
-        var mat = new StandardMaterial3D
-        {
-            ShadingMode = BaseMaterial3D.ShadingModeEnum.Unshaded,
-            AlbedoColor = new Color(0.95f, 0.85f, 0.25f),
-            NoDepthTest = true, // always visible as a cursor, even behind a ridge
-        };
-        var im = new ImmediateMesh();
-        im.SurfaceBegin(Mesh.PrimitiveType.LineStrip, mat);
-        const int seg = 48;
-        for (int i = 0; i <= seg; i++)
-        {
-            float a = Mathf.Tau * i / seg;
-            im.SurfaceAddVertex(new Vector3(Mathf.Cos(a), 0f, Mathf.Sin(a))); // unit ring in XZ
-        }
-        im.SurfaceEnd();
-        return new MeshInstance3D { Mesh = im, CastShadow = GeometryInstance3D.ShadowCastingSetting.Off };
+        if (_edited != null && GodotObject.IsInstanceValid(_edited)) _edited.SetBrushHighlight(Vector3.Zero, 0f, false);
     }
 
     // --- helpers ---

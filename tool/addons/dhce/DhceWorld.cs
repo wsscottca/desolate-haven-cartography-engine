@@ -131,13 +131,28 @@ public partial class DhceWorld : Node3D
         // this setup — the colours upload fine (matched arrays, real values) yet read white — so a
         // trivial spatial shader that samples COLOR directly is used; it works on every backend.
         // cull_disabled throughout because the Y-up remap flips triangle winding.
+        // Surface-conforming brush cursor: a 3D-sphere highlight evaluated per-pixel on the real
+        // surface (so it wraps peaks/slopes), driven by `SetBrushHighlight`. `brush_pos` is GLOBAL
+        // space (matches `v_world` = MODEL_MATRIX·VERTEX); the same sphere the core paints into.
+        const string brushUniforms =
+            "uniform vec3 brush_pos;\nuniform float brush_radius;\nuniform float brush_active;\n" +
+            "varying vec3 v_world;\n" +
+            "void vertex() { v_world = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz; }\n";
+        const string brushOverlay =
+            "  if (brush_active > 0.5 && brush_radius > 0.0) {\n" +
+            "    float nd = distance(v_world, brush_pos) / brush_radius;\n" + // 0 centre → 1 rim
+            "    if (nd < 1.0) {\n" +
+            "      float fill = (1.0 - nd) * 0.18;\n" +                       // soft disc fill
+            "      float rim = smoothstep(0.88, 0.97, nd) * (1.0 - smoothstep(0.97, 1.0, nd));\n" + // bright edge
+            "      ALBEDO = mix(ALBEDO, vec3(1.0, 0.92, 0.30), clamp(fill + rim * 0.85, 0.0, 1.0));\n" +
+            "    }\n  }\n";
         _mat = VertexColorShaderMat( // Natural view: lit terrain (relief shows through the lighting)
-            "shader_type spatial;\nrender_mode cull_disabled;\n" +
-            "void fragment() { ALBEDO = COLOR.rgb; ROUGHNESS = 1.0; METALLIC = 0.0; }");
+            "shader_type spatial;\nrender_mode cull_disabled;\n" + brushUniforms +
+            "void fragment() { ALBEDO = COLOR.rgb; ROUGHNESS = 1.0; METALLIC = 0.0;\n" + brushOverlay + "}");
         _dataMat = VertexColorShaderMat( // data views: UNSHADED so the raw field reads true, lighting-independent
-            "shader_type spatial;\nrender_mode cull_disabled, unshaded;\n" +
-            "void fragment() { ALBEDO = COLOR.rgb; }");
-        _liquidMat = VertexColorShaderMat( // translucent water/lava; COLOR.a carries the surface alpha
+            "shader_type spatial;\nrender_mode cull_disabled, unshaded;\n" + brushUniforms +
+            "void fragment() { ALBEDO = COLOR.rgb;\n" + brushOverlay + "}");
+        _liquidMat = VertexColorShaderMat( // translucent water/lava; COLOR.a carries the surface alpha (no brush highlight)
             "shader_type spatial;\nrender_mode cull_disabled;\n" +
             "void fragment() { ALBEDO = COLOR.rgb; ALPHA = COLOR.a; ROUGHNESS = 0.2; METALLIC = 0.0; }");
     }
@@ -489,6 +504,23 @@ public partial class DhceWorld : Node3D
         _engine.Call("apply_rainfall");
         _engine.Call("step_fluid", 0.45, 0.0015, 8);
         RebuildLiquid();
+    }
+
+    /// Drive the surface-conforming brush cursor baked into the terrain shaders (`_mat` + `_dataMat`,
+    /// so it survives a Natural↔data view switch). `globalPos` is editor/global space — pass
+    /// `ToEditor(hit)` (the raycast hit is core space). `radius` in metres. Off when `on` is false or
+    /// before the materials exist. The liquid material is intentionally left out (no tint on water/lava).
+    public void SetBrushHighlight(Vector3 globalPos, float radius, bool on)
+    {
+        if (_mat == null) return;
+        float a = on ? 1f : 0f;
+        _mat.SetShaderParameter("brush_active", a);
+        _dataMat.SetShaderParameter("brush_active", a);
+        if (!on) return;
+        _mat.SetShaderParameter("brush_pos", globalPos);
+        _mat.SetShaderParameter("brush_radius", radius);
+        _dataMat.SetShaderParameter("brush_pos", globalPos);
+        _dataMat.SetShaderParameter("brush_radius", radius);
     }
 
     /// Switch the colour view (0 Natural … 4 Biome); data views use the unshaded material.

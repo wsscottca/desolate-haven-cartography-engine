@@ -513,6 +513,38 @@ impl DhceEngine {
     fn paint_liquid(&mut self, cx: f64, cy: f64, radius: f64, amount: f64, kind: i64) {
         self.world.paint_liquid(cx, cy, radius, amount, kind.max(0) as u8);
     }
+    /// Smooth (relax) the footprint toward its neighbour-mean elevation; `weight` 0..1 per dab.
+    #[func]
+    fn smooth_terrain(&mut self, cx: f64, cy: f64, radius: f64, weight: f64) -> PackedInt32Array {
+        u32_to_packed(&self.world.smooth_terrain(cx, cy, radius, weight))
+    }
+    /// Roughen (Ctrl-Smooth): add per-cell jitter of amplitude `amount` (normalized) over the footprint.
+    #[func]
+    fn roughen_terrain(&mut self, cx: f64, cy: f64, radius: f64, amount: f64) -> PackedInt32Array {
+        u32_to_packed(&self.world.roughen_terrain(cx, cy, radius, amount))
+    }
+    /// Flatten the footprint toward a fixed `target` height (normalized); `weight` 0..1 per dab.
+    #[func]
+    fn flatten_terrain(&mut self, cx: f64, cy: f64, radius: f64, weight: f64, target: f64) -> PackedInt32Array {
+        u32_to_packed(&self.world.flatten_terrain(cx, cy, radius, weight, target))
+    }
+    /// Grab: shift the footprint by `delta` (normalized) — drag a hill up/down as a unit.
+    #[func]
+    fn grab_terrain(&mut self, cx: f64, cy: f64, radius: f64, delta: f64) -> PackedInt32Array {
+        u32_to_packed(&self.world.grab_terrain(cx, cy, radius, delta))
+    }
+    /// Thermal-erosion brush over the footprint (fixed talus/amount for an interactive feel).
+    #[func]
+    fn erode_brush(&mut self, cx: f64, cy: f64, radius: f64) -> PackedInt32Array {
+        u32_to_packed(&self.world.erode_brush(cx, cy, radius))
+    }
+    /// Whole-map thermal erosion (the dock "Apply erosion" action). Nulls the liquid caches.
+    #[func]
+    fn erode(&mut self, iterations: i64, talus: f64, amount: f64) {
+        self.world.erode(iterations.max(0) as u32, talus, amount);
+        self.liquid = None;
+        self.liquid_chunk_cache = None;
+    }
     #[func]
     fn paint_course(&mut self, cx: f64, cy: f64, radius: f64, intensity: f64, kind: i64) -> PackedInt32Array {
         u32_to_packed(&self.world.paint_course(cx, cy, radius, intensity, kind.max(0) as u8))

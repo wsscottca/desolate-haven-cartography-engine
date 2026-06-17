@@ -286,6 +286,55 @@ fn auto_rivers_carve_tapered_banks_not_slots() {
     );
 }
 
+fn subset_variance(elev: &[f32], ids: &[u32]) -> f64 {
+    let v: Vec<f64> = ids.iter().map(|&i| elev[i as usize] as f64).collect();
+    if v.len() < 2 {
+        return 0.0;
+    }
+    let m = v.iter().sum::<f64>() / v.len() as f64;
+    v.iter().map(|x| (x - m) * (x - m)).sum::<f64>() / v.len() as f64
+}
+
+#[test]
+fn sculpt_brushes_move_terrain() {
+    // Grab lifts the footprint; Flatten eases it toward a plane; Roughen adds variance and Smooth
+    // removes it. (Interactive edits — not part of the deterministic gen contract.)
+    let mut w = built();
+    w.set_brush_sphere(0.0, 0.0); // flat 2D footprint (no vertical sphere term)
+    let (cx, cy, r) = (500.0, 500.0, 200.0);
+
+    let before = w.height_at(cx, cy).unwrap();
+    let grabbed = w.grab_terrain(cx, cy, r, 0.1);
+    assert!(!grabbed.is_empty(), "grab touches the footprint");
+    assert!(w.height_at(cx, cy).unwrap() > before, "grab lifts the footprint");
+
+    w.flatten_terrain(cx, cy, r, 1.0, 0.2); // ease toward 0.2
+    let h = w.height_at(cx, cy).unwrap() as f64;
+    assert!((h - 0.2).abs() < 0.05, "flatten eases the centre toward the target plane, got {h}");
+
+    let rough = w.roughen_terrain(cx, cy, r, 0.06);
+    assert!(!rough.is_empty(), "roughen touches the footprint");
+    let var_rough = subset_variance(&w.elevation_export(), &rough);
+    for _ in 0..4 {
+        w.smooth_terrain(cx, cy, r, 1.0);
+    }
+    let var_smooth = subset_variance(&w.elevation_export(), &rough);
+    assert!(var_smooth < var_rough, "smooth reduces footprint variance ({var_smooth} < {var_rough})");
+}
+
+#[test]
+fn thermal_erosion_sheds_a_sharp_peak() {
+    // Thermal erosion moves material from a steep crest downslope, lowering the peak.
+    let mut w = built();
+    w.set_brush_sphere(0.0, 0.0);
+    w.paint_terrain(500.0, 500.0, 150.0, 0.8, 3); // mode 3 = sharp crest
+    let peak0 = w.height_at(500.0, 500.0).unwrap();
+    let touched = w.erode_brush(500.0, 500.0, 300.0);
+    assert!(!touched.is_empty(), "erosion touches cells");
+    let peak1 = w.height_at(500.0, 500.0).unwrap();
+    assert!(peak1 < peak0, "thermal erosion sheds the sharp peak ({peak1} < {peak0})");
+}
+
 #[test]
 fn auto_shaping_gives_mountains_more_relief_than_plains() {
     // Relief fix: the per-region landform dials must reach the geometry at Generate. Jagged Mountains

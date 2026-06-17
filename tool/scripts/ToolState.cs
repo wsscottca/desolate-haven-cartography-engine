@@ -5,7 +5,7 @@ namespace DesolateHaven.Cartography;
 /// The authoring tools, in toolbar order. Shortcuts 1–7 map to these (see ToolUi).
 /// (Named ToolKind so the `Tool` name is free for CartographerSpike's ToolState property.)
 /// `Biome` stamps a Region preset's whole trait bundle; `Trait` paints a single trait.
-public enum ToolKind { Raise, Carve, Level, Crest, River, Flood, Biome, Trait, Region, Territory, RegionSelect, Cave, Transition }
+public enum ToolKind { Raise, Carve, Level, Crest, River, Flood, Biome, Trait, Region, Territory, RegionSelect, Cave, Transition, Smooth, Flatten, Grab, Erode }
 
 /// What a stroke changed, so the caller knows which render surface(s) to refresh.
 [System.Flags]
@@ -42,24 +42,32 @@ public sealed class ToolState
     public float CourseIntensity = 0.05f; // small: course water/carve gains are large in the core
     public float FloodAmount = 0.04f;     // small per dab; the stroke settles on release
     public float BlendWidthM = 200f;      // transition-brush band width (m) → blend_brush
+    public float GrabDeltaNorm = 0f;      // Grab: vertical drag delta this dab (normalized elev; plugin-set)
+    public float FlattenTargetNorm = 0f;  // Flatten: target plane height (normalized elev; plugin-set at stroke start)
 
     /// Apply the active tool at world-ground point `hit` (Godot XZ plane → core x,y). Returns
     /// which surfaces changed. `exaggeration` converts the metre sculpt step to the core's
     /// normalized-elevation step (on-screen height = normalized × exaggeration). `engine` is the
     /// DhceEngine; all calls go through Variant marshalling.
-    public EditResult Apply(GodotObject engine, Vector3 hit, float exaggeration)
+    public EditResult Apply(GodotObject engine, Vector3 hit, float exaggeration, bool invert = false)
     {
         double x = hit.X, z = hit.Z, r = RadiusM;
         double s = StrengthM / Mathf.Max(exaggeration, 1f); // metres → normalized elevation
+        double sw = Mathf.Clamp(StrengthM / 100f, 0.02f, 1f); // smooth/flatten blend weight (0..1) per dab
         // 3D-sphere brush (directional fix): bite a sphere centred on the hit, not a vertical column.
         // hit.Y is the surface height under the cursor (= normalized elev × exaggeration).
         engine.Call("set_brush_sphere", (double)hit.Y, (double)exaggeration);
         switch (Active)
         {
-            case ToolKind.Raise: engine.Call("paint_terrain", x, z, r, s, 0); return EditResult.Terrain;
-            case ToolKind.Carve: engine.Call("paint_terrain", x, z, r, s, 1); return EditResult.Terrain;
+            // Ctrl-invert swaps Raise↔Carve and Smooth↔Roughen.
+            case ToolKind.Raise: engine.Call("paint_terrain", x, z, r, s, invert ? 1 : 0); return EditResult.Terrain;
+            case ToolKind.Carve: engine.Call("paint_terrain", x, z, r, s, invert ? 0 : 1); return EditResult.Terrain;
             case ToolKind.Level: engine.Call("paint_terrain", x, z, r, s, 2); return EditResult.Terrain;
             case ToolKind.Crest: engine.Call("paint_terrain", x, z, r, s, 3); return EditResult.Terrain;
+            case ToolKind.Smooth: engine.Call(invert ? "roughen_terrain" : "smooth_terrain", x, z, r, invert ? s : sw); return EditResult.Terrain;
+            case ToolKind.Flatten: engine.Call("flatten_terrain", x, z, r, sw, (double)FlattenTargetNorm); return EditResult.Terrain;
+            case ToolKind.Grab: engine.Call("grab_terrain", x, z, r, (double)GrabDeltaNorm); return EditResult.Terrain;
+            case ToolKind.Erode: engine.Call("erode_brush", x, z, r); return EditResult.Terrain;
             case ToolKind.River: engine.Call("paint_course", x, z, r, (double)CourseIntensity, LiquidKind);
                              return EditResult.Terrain | EditResult.Liquid;
             case ToolKind.Flood: engine.Call("paint_liquid", x, z, r, (double)FloodAmount, LiquidKind);
