@@ -39,8 +39,8 @@ pub struct ScatterRule {
     pub elev_max: f32,
 }
 
-/// Number of named Region presets (ids `1..=BIOME_COUNT`; `0` = auto/unclassified).
-pub const BIOME_COUNT: usize = 14;
+/// Number of named Region presets (ids `1..=REGION_COUNT`; `0` = auto/unclassified).
+pub const REGION_COUNT: usize = 14;
 
 // --- traits -------------------------------------------------------------------------------------
 
@@ -225,14 +225,14 @@ pub fn elevation_ramp(e: f32) -> [f32; 3] {
 
 /// A named canon place: its accent, default trait bundle (stamped by the Region preset), and
 /// water profile. The trait bundle is a *starting point* the author paints/edits over.
-pub struct BiomeDef {
+pub struct RegionDef {
     pub label: &'static str,
     pub accent: [f32; 3],
     pub traits: CellTraits,
     pub water: WaterProfile,
 }
 
-impl BiomeDef {
+impl RegionDef {
     /// A representative swatch colour for this region (its `--mk-*` accent).
     pub fn representative(&self) -> [f32; 3] {
         self.accent
@@ -241,7 +241,7 @@ impl BiomeDef {
 
 /// The 14 canon Region presets. Accents mirror `lore/biome-features.md`; trait bundles are
 /// modest starting points (tuned live in the editor). Order: index `i` is id `i + 1`.
-pub fn roster() -> [BiomeDef; BIOME_COUNT] {
+pub fn region_presets() -> [RegionDef; REGION_COUNT] {
     let t = |jaggedness, relief, foothill_falloff, erosion, temperature, moisture, vegetation, palette_family| CellTraits {
         jaggedness, relief, foothill_falloff, erosion, temperature, moisture, vegetation, palette_family,
     };
@@ -261,30 +261,98 @@ pub fn roster() -> [BiomeDef; BIOME_COUNT] {
     const MK_TEAL: u32 = 0x2E8C8C;
     const MK_GREEN: u32 = 0x5A9A4A;
     [
-        BiomeDef { label: "Jagged Mountains",     accent: c(MK_GOLD),      traits: t(0.90, 0.70, 0.50, 0.40, 0.30, 0.40, veg::EVERGREEN, fam::STONE),   water: w(1.0, 1.3, 0.4, 0.30, 1.4) },
-        BiomeDef { label: "Sacred Woods Plateau", accent: c(MK_BLUE),      traits: t(0.30, 0.50, 0.60, 0.30, 0.50, 0.60, veg::FOREST,    fam::VERDANT), water: w(1.1, 0.9, 0.5, 0.25, 1.2) },
-        BiomeDef { label: "Great Lake",           accent: c(MK_BLUE),      traits: t(0.10, 0.20, 0.50, 0.20, 0.50, 0.90, veg::GRASS,     fam::VERDANT), water: w(1.2, 0.7, 0.8, 0.4, 1.8) },
-        BiomeDef { label: "Temperate Forest",     accent: c(MK_WHITE),     traits: t(0.30, 0.50, 0.50, 0.30, 0.55, 0.60, veg::FOREST,    fam::VERDANT), water: w(1.1, 0.9, 0.6, 0.3, 1.2) },
-        BiomeDef { label: "Open Plains",          accent: c(MK_WHITE),     traits: t(0.10, 0.30, 0.70, 0.30, 0.60, 0.40, veg::GRASS,     fam::ARID),    water: w(0.9, 1.0, 0.7, 0.2, 1.0) },
-        BiomeDef { label: "Underdeep",            accent: c(MK_SILVER),    traits: t(0.40, 0.50, 0.50, 0.50, 0.45, 0.40, veg::SCRUB,     fam::STONE),   water: w(0.6, 1.2, 0.3, 0.2, 1.6) },
-        BiomeDef { label: "Deep Wood",            accent: c(MK_PURPLE),    traits: t(0.30, 0.50, 0.50, 0.30, 0.50, 0.70, veg::EVERGREEN, fam::EXOTIC),  water: w(1.2, 0.8, 0.5, 0.3, 1.2) },
-        BiomeDef { label: "Frozen Reaches",       accent: c(MK_LIGHTBLUE), traits: t(0.50, 0.40, 0.50, 0.40, 0.05, 0.50, veg::BARREN,    fam::FROST),   water: w(0.8, 1.1, 0.2, 0.2, 1.4) },
-        BiomeDef { label: "Lost Isles",           accent: c(MK_TEAL),      traits: t(0.70, 0.30, 0.40, 0.60, 0.40, 0.50, veg::SCRUB,     fam::STONE),   water: w(1.2, 0.7, 0.8, 0.3, 1.6) },
-        BiomeDef { label: "Blisterwood",          accent: c(MK_RED),       traits: t(0.50, 0.50, 0.50, 0.50, 0.70, 0.30, veg::THORN,     fam::ASHEN),   water: w(0.9, 1.0, 0.5, 0.25, 1.2) },
-        BiomeDef { label: "Volcanic Scape",       accent: c(MK_ORANGE),    traits: t(0.80, 0.50, 0.40, 0.60, 0.95, 0.20, veg::BARREN,    fam::ASHEN),   water: w(0.5, 1.4, 0.3, 0.2, 1.4) },
-        BiomeDef { label: "Blight Ruins",         accent: c(MK_BLACK),     traits: t(0.40, 0.40, 0.50, 0.60, 0.50, 0.40, veg::BARREN,    fam::ASHEN),   water: w(0.7, 1.1, 0.4, 0.2, 1.2) },
-        BiomeDef { label: "Scattered Isles",      accent: c(MK_SILVER),    traits: t(0.30, 0.30, 0.50, 0.40, 0.55, 0.60, veg::GRASS,     fam::ARID),    water: w(1.2, 0.7, 0.9, 0.35, 1.7) },
-        BiomeDef { label: "Marsh Bog",            accent: c(MK_GREEN),     traits: t(0.10, 0.30, 0.60, 0.30, 0.55, 0.95, veg::MARSH,     fam::WETLAND), water: w(1.3, 0.6, 0.7, 0.3, 1.3) },
+        RegionDef { label: "Jagged Mountains",     accent: c(MK_GOLD),      traits: t(0.90, 0.70, 0.50, 0.40, 0.30, 0.40, veg::EVERGREEN, fam::STONE),   water: w(1.0, 1.3, 0.4, 0.30, 1.4) },
+        RegionDef { label: "Sacred Woods Plateau", accent: c(MK_BLUE),      traits: t(0.30, 0.50, 0.60, 0.30, 0.50, 0.60, veg::FOREST,    fam::VERDANT), water: w(1.1, 0.9, 0.5, 0.25, 1.2) },
+        RegionDef { label: "Great Lake",           accent: c(MK_BLUE),      traits: t(0.10, 0.20, 0.50, 0.20, 0.50, 0.90, veg::GRASS,     fam::VERDANT), water: w(1.2, 0.7, 0.8, 0.4, 1.8) },
+        RegionDef { label: "Temperate Forest",     accent: c(MK_WHITE),     traits: t(0.30, 0.50, 0.50, 0.30, 0.55, 0.60, veg::FOREST,    fam::VERDANT), water: w(1.1, 0.9, 0.6, 0.3, 1.2) },
+        RegionDef { label: "Open Plains",          accent: c(MK_WHITE),     traits: t(0.10, 0.30, 0.70, 0.30, 0.60, 0.40, veg::GRASS,     fam::ARID),    water: w(0.9, 1.0, 0.7, 0.2, 1.0) },
+        RegionDef { label: "Underdeep",            accent: c(MK_SILVER),    traits: t(0.40, 0.50, 0.50, 0.50, 0.45, 0.40, veg::SCRUB,     fam::STONE),   water: w(0.6, 1.2, 0.3, 0.2, 1.6) },
+        RegionDef { label: "Deep Wood",            accent: c(MK_PURPLE),    traits: t(0.30, 0.50, 0.50, 0.30, 0.50, 0.70, veg::EVERGREEN, fam::EXOTIC),  water: w(1.2, 0.8, 0.5, 0.3, 1.2) },
+        RegionDef { label: "Frozen Reaches",       accent: c(MK_LIGHTBLUE), traits: t(0.50, 0.40, 0.50, 0.40, 0.05, 0.50, veg::BARREN,    fam::FROST),   water: w(0.8, 1.1, 0.2, 0.2, 1.4) },
+        RegionDef { label: "Lost Isles",           accent: c(MK_TEAL),      traits: t(0.70, 0.30, 0.40, 0.60, 0.40, 0.50, veg::SCRUB,     fam::STONE),   water: w(1.2, 0.7, 0.8, 0.3, 1.6) },
+        RegionDef { label: "Blisterwood",          accent: c(MK_RED),       traits: t(0.50, 0.50, 0.50, 0.50, 0.70, 0.30, veg::THORN,     fam::ASHEN),   water: w(0.9, 1.0, 0.5, 0.25, 1.2) },
+        RegionDef { label: "Volcanic Scape",       accent: c(MK_ORANGE),    traits: t(0.80, 0.50, 0.40, 0.60, 0.95, 0.20, veg::BARREN,    fam::ASHEN),   water: w(0.5, 1.4, 0.3, 0.2, 1.4) },
+        RegionDef { label: "Blight Ruins",         accent: c(MK_BLACK),     traits: t(0.40, 0.40, 0.50, 0.60, 0.50, 0.40, veg::BARREN,    fam::ASHEN),   water: w(0.7, 1.1, 0.4, 0.2, 1.2) },
+        RegionDef { label: "Scattered Isles",      accent: c(MK_SILVER),    traits: t(0.30, 0.30, 0.50, 0.40, 0.55, 0.60, veg::GRASS,     fam::ARID),    water: w(1.2, 0.7, 0.9, 0.35, 1.7) },
+        RegionDef { label: "Marsh Bog",            accent: c(MK_GREEN),     traits: t(0.10, 0.30, 0.60, 0.30, 0.55, 0.95, veg::MARSH,     fam::WETLAND), water: w(1.3, 0.6, 0.7, 0.3, 1.3) },
     ]
 }
 
 /// Default trait bundle a Region preset stamps (id 1..=14); id 0/unknown → a neutral pass-through.
-pub fn default_traits_for(biome_id: u8) -> CellTraits {
-    let id = biome_id as usize;
-    if id >= 1 && id <= BIOME_COUNT {
-        roster()[id - 1].traits
+/// This is the **Region → Traits** tie: each canon Region seeds the per-cell trait primitives the
+/// author then paints/blends, and those traits in turn compose the emergent [`biome_label`].
+pub fn default_traits_for(region_id: u8) -> CellTraits {
+    let id = region_id as usize;
+    if id >= 1 && id <= REGION_COUNT {
+        region_presets()[id - 1].traits
     } else {
         CellTraits { jaggedness: 0.3, relief: 0.4, foothill_falloff: 0.5, erosion: 0.3, temperature: 0.5, moisture: 0.5, vegetation: veg::GRASS, palette_family: fam::VERDANT }
+    }
+}
+
+/// Per-Region **base elevation target** (normalized, the macro relief trunk the canon generator
+/// diffuses + rides low-frequency noise on). Mountains sit high, the Great Lake + ocean sit below
+/// sea level so [`crate::fluid::sea_fill`] floods them, coastal isles sit just under. Id `0` = ocean.
+/// Starting values — tuned live in the editor. Order matches [`region_presets`] (id = index + 1).
+pub fn base_elevation_for(region_id: u8) -> f64 {
+    match region_id {
+        1 => 0.80,  // Jagged Mountains — jagged peaks ringed by rolling hills
+        2 => 0.46,  // Sacred Woods & Plateau — an elevated plateau
+        3 => -0.10, // Great Lake (perched basin — floor above the ocean, filled to its pour point)
+        4 => 0.38,  // Temperate Forest — mountainous forest band
+        5 => 0.08,  // Open Plains
+        6 => 0.24,  // Underdeep — rolling-hill surface
+        7 => 0.28,  // Deep Wood — old-growth lowland forest
+        8 => 0.44,  // Frozen Reaches — frozen buttes
+        9 => 0.05,  // Lost Isles (low island land — rim drowns the coast into spires)
+        10 => 0.30, // Blisterwood
+        11 => 0.62, // Volcanic Scape — active volcanic mountains
+        12 => 0.20, // Blight Ruins
+        13 => 0.02, // Scattered Isles (archipelago — noise + rim break it into isles)
+        14 => 0.02, // Marsh & Bog (wet lowland)
+        _ => -1.00, // 0 / unknown → open ocean
+    }
+}
+
+/// Per-Region **default lake-fill threshold** (normalized basin depth) — the biome/trait tie for the
+/// lake tier. Derived from the region's moisture trait: a wet place (Great Lake, Marsh Bog) ponds with
+/// a shallow basin, while an arid one (Volcanic Scape, Blight Ruins) resists ponding. The editor stores
+/// these per region (id `1..=14`) and exposes a slider to fine-tune each; [`crate::world::World::fill_lakes`]
+/// reads the per-region value (further modulated by each cell's local moisture). Id `0` (ocean) is unused.
+pub fn default_lake_min_depth(region_id: u8) -> f64 {
+    let moisture = default_traits_for(region_id).moisture as f64; // 0 dry … 1 wet
+    // moisture 1 → 0.004 (ponds readily); moisture 0 → 0.18 (only deep basins hold water).
+    const LO: f64 = 0.004;
+    const HI: f64 = 0.18;
+    HI + (LO - HI) * moisture.clamp(0.0, 1.0)
+}
+
+/// A representative colour for the **emergent biome** of a cell, derived purely from its trait
+/// primitives (the *Traits → Biome* tie, the numeric companion to [`biome_label`]). Used by the
+/// `VIEW_BIOME` data view so it reads the *ecological* biome (distinct from `VIEW_REGION`, which
+/// shows the authored canon place). Threshold/lerp only — deterministic.
+pub fn emergent_biome_color(e: f32, temperature: f32, moisture: f32, vegetation: u8) -> [f32; 3] {
+    if e < -0.05 {
+        return c(0x2E5C9E); // open water
+    }
+    if temperature < 0.30 {
+        return c(0xBFE3EA); // frozen / tundra
+    }
+    if vegetation == veg::MARSH || moisture > 0.82 {
+        return c(0x4F5B38); // marsh / wetland
+    }
+    if temperature > 0.72 && moisture < 0.35 {
+        return c(0xC9A86A); // arid / desert
+    }
+    match vegetation {
+        veg::EVERGREEN => c(0x35623A), // taiga / boreal
+        veg::FOREST => {
+            if temperature > 0.6 && moisture > 0.6 { c(0x2F6B3A) } else { c(0x3B6E41) } // jungle / temperate forest
+        }
+        veg::THORN => c(0x8A3A30),  // thornland
+        veg::SCRUB => c(0x7A7A4A),  // shrubland
+        veg::GRASS => c(0x7E9A50),  // grassland
+        _ => c(0x9A8E72),           // barrens / bare ground
     }
 }
 
@@ -296,7 +364,7 @@ pub fn moisture_at(x: f64, y: f64, width: f64, height: f64, seed: u64) -> f64 {
     (m * 0.5 + 0.5).clamp(0.0, 1.0)
 }
 
-/// Auto-classify a region into a Region-preset id (`1..=BIOME_COUNT`) from elevation, moisture,
+/// Auto-classify a region into a Region-preset id (`1..=REGION_COUNT`) from elevation, moisture,
 /// and normalized distance from the map center — the seed layer the author paints over.
 pub fn classify(elevation: f64, moisture: f64, dist_center: f64) -> u8 {
     if elevation < -0.12 {

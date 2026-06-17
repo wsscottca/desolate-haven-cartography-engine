@@ -34,6 +34,7 @@ public partial class DhceDock : ScrollContainer
     private Label _traitSliderLabel, _traitEnumLabel;
     private ColorPickerButton[] _palPickers;
     private SpinBox[] _landSpins;
+    private SpinBox _lakeDepthSpin;   // per-Region lake-fill threshold (tied to the same region picker)
     private CheckButton _simulate;
     private DhceMinimap _minimap;
     private LineEdit _exportPath;
@@ -89,24 +90,36 @@ public partial class DhceDock : ScrollContainer
 
     /// Point the dock at the scene's current DhceWorld; reload engine-backed values when it changes
     /// or finishes generating. Cheap when nothing changed.
+    private bool _bindErrLogged; // gate so a failing gen-done reload logs once, not every frame
+
     public void Bind(DhceWorld world)
     {
         bool changed = world != _world;
         _world = world;
         bool gen = world != null && world.GenDone;
-        if (world != null && (changed || (gen && !_wasGenDone)))
+        bool reload = world != null && (changed || (gen && !_wasGenDone));
+        // Latch BEFORE the reload: if anything below throws, the edge condition won't re-fire next
+        // frame, so a reload bug can't turn into a per-frame Output flood (it surfaces once instead).
+        _wasGenDone = gen;
+        if (reload)
         {
-            PullWorldParams();
-            if (changed) { RefreshSlots(); LoadSlot(); } // reflect the new world's scatter library
-            if (gen)
+            try
             {
-                LoadPaletteColors();
-                LoadRegionLandform();
-                _minimap?.Bind(Eng, _world.WorldWidthM, _world.WorldHeightM);
-                _minimap?.Refresh();
+                PullWorldParams();
+                if (changed) { RefreshSlots(); LoadSlot(); } // reflect the new world's scatter library
+                if (gen)
+                {
+                    LoadPaletteColors();
+                    LoadRegionLandform();
+                    _minimap?.Bind(Eng, _world.WorldWidthM, _world.WorldHeightM);
+                    _minimap?.Refresh();
+                }
+            }
+            catch (System.Exception ex)
+            {
+                if (!_bindErrLogged) { _bindErrLogged = true; GD.PrintErr("[DHCE] Bind reload failed (logged once): ", ex); }
             }
         }
-        _wasGenDone = gen;
         RefreshBrushOptions(); // keep the contextual brush options in sync with the active tool
     }
 
@@ -166,8 +179,10 @@ public partial class DhceDock : ScrollContainer
         _chunk = SpinRow("Chunk size (m)", 32, 2048, 32, 256);
         Slider("Height (km)", 0.1, 10, 0.1, 5.0, v => _world?.SetTerrainHeight((float)v));
 
+        BuildRegionMapSection(); // optional region-coloured PNG → overrides the built-in canon layout
         BuildBrushes();        // all paint tools + their contextual options
         BuildShapingSection(); // region landform + shaping + transitions (not brushes)
+        BuildClimateSection(); // physical climate: lapse (temp) + orographic (moisture) + wind
         BuildPaletteEditor();  // render: per-family palette colours
         BuildPhysicsSection(); // sea level / flow / evaporation / substeps / settle / clear / simulate
         BuildScatterSection(); // model scatter (per-slot; per-biome rework is a separate phase)
@@ -340,6 +355,17 @@ public partial class DhceDock : ScrollContainer
             sb.ValueChanged += v => OnRegionLandform(idx, v);
             _landSpins[i] = sb;
         }
+        // Per-region lake-fill threshold (the water tier): how deep a closed basin must be before it
+        // holds a lake/pond in this region. Defaults track the region's moisture; lower ⇒ more water.
+        _lakeDepthSpin = SpinRow("Lake fill depth", 0, 0.5, 0.005, 0);
+        _lakeDepthSpin.ValueChanged += v => OnRegionLakeDepth(v);
+        Button(_target, "Apply lakes", () =>
+        {
+            if (!HasWorld) return;
+            _world.SetSeaLevel(_world.SeaLevelNorm); // re-establish ocean + perched lakes with the current thresholds
+            SetStatus("Lakes refilled from the per-region thresholds.");
+        });
+        _target.AddChild(Dim("Per-region: how deep a basin must be to hold water (lower ⇒ more lakes/ponds). Default tracks the region's moisture. Apply lakes to update."));
 
         Header("SHAPING", open: false);
         _target.AddChild(Dim("Bake the landform dials into the terrain height."));
@@ -413,6 +439,54 @@ public partial class DhceDock : ScrollContainer
         SetStatus($"Generated ~{_world.WorldWidthM / 1000f:0.0} km. Select the node and left-drag to paint.");
     }
 
+    // --- region map (canon layout source) ---
+
+    private FileDialog _regionMapDialog;
+
+    /// REGION MAP section: import a region-coloured PNG to override the built-in canon layout, or
+    /// reset to the built-in anchors. The PNG drives the generator's first pass (territories).
+    private void BuildRegionMapSection()
+    {
+        Header("REGION MAP", open: false);
+        _target.AddChild(Dim("Optional. Paint each region in its accent colour (see VIEW → Region for the accents); anything else or transparent reads as ocean. North = top. Blank = built-in canon layout."));
+        Button(_target, "Import region PNG…", OpenRegionMapDialog);
+        Button(_target, "Use built-in canon layout", () =>
+        {
+            if (_world == null) { SetStatus("No DhceWorld in the scene."); return; }
+            _world.RegionMap = null;
+            OnGenerate();
+            SetStatus("Region map cleared → built-in canon layout.");
+        });
+    }
+
+    private void OpenRegionMapDialog()
+    {
+        if (_world == null) { SetStatus("No DhceWorld in the scene. Add one first."); return; }
+        if (_regionMapDialog == null)
+        {
+            _regionMapDialog = new FileDialog
+            {
+                FileMode = FileDialog.FileModeEnum.OpenFile,
+                Access = FileDialog.AccessEnum.Filesystem,
+                Title = "Select a region-coloured PNG",
+            };
+            _regionMapDialog.AddFilter("*.png", "PNG image");
+            _regionMapDialog.FileSelected += OnRegionMapSelected;
+            AddChild(_regionMapDialog);
+        }
+        _regionMapDialog.PopupCentered(new Vector2I(720, 520));
+    }
+
+    private void OnRegionMapSelected(string path)
+    {
+        if (_world == null) return;
+        var img = Image.LoadFromFile(path);
+        if (img == null) { SetStatus($"Could not load image: {path}"); return; }
+        _world.RegionMap = ImageTexture.CreateFromImage(img);
+        OnGenerate();
+        SetStatus($"Region map: {System.IO.Path.GetFileName(path)} → regenerated.");
+    }
+
     private void PullWorldParams()
     {
         _seed.Value = _world.Seed;
@@ -456,6 +530,8 @@ public partial class DhceDock : ScrollContainer
         _loadingLandform = true;
         var a = Eng.Call("biome_landform_of", SelectedLandRegion()).As<float[]>();
         for (int i = 0; i < _landSpins.Length && i < a.Length; i++) _landSpins[i].Value = a[i];
+        if (_lakeDepthSpin != null)
+            _lakeDepthSpin.Value = Eng.Call("region_lake_depth_of", SelectedLandRegion()).As<double>();
         _loadingLandform = false;
     }
 
@@ -465,6 +541,43 @@ public partial class DhceDock : ScrollContainer
         int id = SelectedLandRegion();
         Eng.Call("set_region_landform", id, idx, v);
         SetStatus($"{BiomeNames[id - 1]}: {LandNames[idx].ToLower()} {v:0.##} — Apply shaping to bake");
+    }
+
+    private void OnRegionLakeDepth(double v)
+    {
+        if (_loadingLandform || !HasWorld) return;
+        int id = SelectedLandRegion();
+        Eng.Call("set_region_lake_depth", id, v);
+        SetStatus($"{BiomeNames[id - 1]}: lake fill depth {v:0.###} — Apply lakes to update");
+    }
+
+    // Physical climate sliders: temperature follows elevation (lapse), moisture follows the wind
+    // (orographic). Each edits the param + recomputes live (no regen).
+    private void BuildClimateSection()
+    {
+        Header("CLIMATE", open: false);
+        _target.AddChild(Dim("Physical climate (recolors live): high ground gets colder (lapse); slopes facing the wind get wetter while their lee dries out (orographic)."));
+        Slider("Lapse rate", 0, 1.5, 0.05, 0.6, v =>
+        {
+            if (_world == null) return;
+            _world.LapseRate = (float)v;
+            _world.RecomputeClimate();
+            _minimap?.Refresh();
+        });
+        Slider("Orographic strength", 0, 1, 0.05, 0.45, v =>
+        {
+            if (_world == null) return;
+            _world.OrographicStrength = (float)v;
+            _world.RecomputeClimate();
+            _minimap?.Refresh();
+        });
+        Slider("Wind direction (°)", 0, 360, 5, 0, v =>
+        {
+            if (_world == null) return;
+            _world.WindDeg = (float)v;
+            _world.RecomputeClimate();
+            _minimap?.Refresh();
+        });
     }
 
     private void BuildPaletteEditor()

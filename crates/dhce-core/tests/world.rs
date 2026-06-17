@@ -25,6 +25,91 @@ fn build_is_deterministic() {
 }
 
 #[test]
+fn canon_build_has_ocean_edges_a_ne_lake_and_all_regions() {
+    // The canon two-tier water model: every region appears, the edges are OCEAN, and the Great Lake
+    // is a PERCHED lake NE of center — its floor sits above the ocean, filled to its pour point (not
+    // a flooded sea-level basin). Built at a realistic scale (8 km) so territories are large relative
+    // to the border-grading width (a 1 km map would wash the lake basin out).
+    let mut w = World::new();
+    w.build(8000.0, 8000.0, 40.0, 7, 5);
+    let sea = -0.4; // global ocean level: above the ocean floor (~-1), below the lake floor (~-0.1)
+    w.set_sea_level(sea);
+    w.fill_lakes();
+
+    // All 14 canon regions are present in the territory map.
+    let region_ids = w.region_export();
+    for id in 1..=14u8 {
+        assert!(region_ids.iter().any(|&r| r == id), "canon region {id} is present");
+    }
+
+    // Edges are ocean: terrain below the sea level.
+    for &(x, y) in &[(4000.0, 160.0), (4000.0, 7840.0), (160.0, 4000.0), (7840.0, 4000.0)] {
+        let h = w.height_at(x, y).expect("edge sample resolves a region");
+        assert!(h < sea, "edge ({x}, {y}) is ocean, got h={h}");
+    }
+
+    // The Great Lake (NE of center) is a *perched* lake: its floor is ABOVE the ocean and it holds
+    // standing water — not flooded down to sea level.
+    assert_eq!(w.region_id_at(4400.0, 3600.0), 3, "the NE-of-center point is the Great Lake");
+    let lake_floor = w.height_at(4400.0, 3600.0).expect("lake resolves");
+    assert!(lake_floor > sea, "the Great Lake floor is perched above the ocean, got {lake_floor}");
+    let depths = w.liquid_depth_export();
+    let elev = w.elevation_export();
+    let lake_has_perched_water = (0..region_ids.len())
+        .any(|r| region_ids[r] == 3 && depths[r] as f64 > 1e-3 && elev[r] as f64 > sea);
+    assert!(lake_has_perched_water, "the Great Lake holds perched water above the ocean");
+
+    // Jagged Mountains (north) is dry highland standing above the ocean.
+    assert_eq!(w.region_id_at(4000.0, 1600.0), 1, "the north is Jagged Mountains");
+    assert!(w.height_at(4000.0, 1600.0).unwrap() > sea, "Jagged Mountains stand above the ocean");
+}
+
+#[test]
+fn climate_lapse_cools_high_ground() {
+    // #1 Elevation→Temperature: a stronger lapse rate cools elevated ground. Sample the Volcanic
+    // Scape (a warm region with a high base elevation) so its temperature stays in range — a cold
+    // peak (e.g. Jagged) would already be clamped to 0 at the default lapse.
+    let mut w = World::new();
+    w.build(4000.0, 4000.0, 30.0, 7, 5);
+    let (vx, vy) = (1600.0, 3040.0); // Volcanic Scape anchor (0.40, 0.76)
+    assert_eq!(w.region_id_at(vx, vy), 11, "the sample sits in the Volcanic Scape");
+    assert!(w.height_at(vx, vy).unwrap() > 0.1, "the sample is elevated land");
+    let t0 = w.trait_at(vx, vy, 4).expect("temperature at the sample"); // trait 4 = temperature
+    w.set_lapse_rate(1.4); // stronger than the 0.6 default
+    w.recompute_climate();
+    let t1 = w.trait_at(vx, vy, 4).expect("temperature at the sample");
+    assert!(t1 < t0, "a stronger lapse rate cools elevated ground ({t1} < {t0})");
+}
+
+#[test]
+fn climate_moisture_is_deterministic_and_orographic_has_effect() {
+    // #2 Orographic→Moisture: the derivation is deterministic, and the orographic weight changes the
+    // moisture field (windward-wet / lee-dry pull).
+    let mk = || {
+        let mut w = World::new();
+        w.build(4000.0, 4000.0, 30.0, 7, 5);
+        w
+    };
+    let bits = |v: Vec<f32>| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+    let a = mk();
+    let b = mk();
+    assert_eq!(bits(a.trait_field_export(4)), bits(b.trait_field_export(4)), "temperature deterministic");
+    assert_eq!(bits(a.trait_field_export(5)), bits(b.trait_field_export(5)), "moisture deterministic");
+
+    let mut w = mk();
+    w.set_orographic_strength(0.0);
+    w.recompute_climate();
+    let m0 = w.trait_field_export(5);
+    w.set_orographic_strength(1.0);
+    w.recompute_climate();
+    let m1 = w.trait_field_export(5);
+    assert!(
+        m0.iter().zip(&m1).any(|(x, y)| (x - y).abs() > 1e-3),
+        "orographic strength changes the moisture field"
+    );
+}
+
+#[test]
 fn surface_has_expected_shape() {
     let w = built();
     let s = w.surface(100.0).expect("surface after build");
@@ -551,7 +636,10 @@ fn region_slicing_extracts_submesh_and_adjacency() {
     let left = w.regions_in_polygon(&[10.0, 500.0, 500.0, 10.0], &[10.0, 10.0, 990.0, 990.0]);
     assert!(!left.is_empty());
     w.assign_region(&left, 1);
-    assert_eq!(w.region_cell_count(1), left.len(), "cell count matches the assignment");
+    // The canon build pre-populates regions, so Region 1 also holds its canon cells elsewhere; what
+    // must hold is that every assigned cell now reports Region 1 (count ≥ the assignment).
+    assert!(left.iter().all(|&c| w.region_of(c as usize) == 1), "every assigned cell reports Region 1");
+    assert!(w.region_cell_count(1) >= left.len(), "Region 1 contains at least the assigned cells");
 
     let surf = w.region_terrain_surface(1, 100.0).expect("built world");
     assert!(!surf.positions.is_empty() && !surf.indices.is_empty(), "Region 1 has interior geometry");

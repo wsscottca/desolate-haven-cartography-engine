@@ -96,7 +96,20 @@ public partial class DhcePlugin : EditorPlugin
         p.OffsetTop = margin + size + gap;               // below the minimap
     }
 
+    private bool _processErrLogged; // gate so a per-frame tick bug logs once, not thousands of times
+
     public override void _Process(double delta)
+    {
+        // A throw anywhere in the tick would otherwise spam the Output panel once per frame. Catch it,
+        // log the first occurrence with its full stack, then stay quiet so the editor remains usable.
+        try { ProcessTick(); }
+        catch (System.Exception ex)
+        {
+            if (!_processErrLogged) { _processErrLogged = true; GD.PrintErr("[DHCE] _Process exception (logged once): ", ex); }
+        }
+    }
+
+    private void ProcessTick()
     {
         // The 3D viewport may not exist yet at _EnterTree; attach the overlays the first frame it does.
         if (_minimap != null && GodotObject.IsInstanceValid(_minimap) && _minimap.GetParent() == null)

@@ -38,6 +38,40 @@ pub struct StreamResult {
     pub carve_delta: Vec<f64>,
 }
 
+/// Priority-flood pit fill (Barnes/Planchon + ε): the elevation water rises to at each cell before it
+/// drains to the boundary frame (the global outlets, regions `0..num_boundary`). `filled[r] - terrain[r]`
+/// is the standing-water depth that fills `r`'s closed basin to its **pour point** — the basis for both
+/// stream routing (no basin stalls accumulation) and perched **lakes** ([`World::fill_lakes`]). Cells
+/// unreachable from the boundary keep `f64::INFINITY`. Deterministic: total-order `(elevation, index)` heap.
+pub(crate) fn fill_depressions(terrain: &[f64], neighbors: &[Vec<u32>], num_boundary: usize) -> Vec<f64> {
+    let n = terrain.len();
+    let mut filled = vec![f64::INFINITY; n];
+    if n == 0 || neighbors.len() != n {
+        return filled;
+    }
+    let num_boundary = num_boundary.min(n);
+    let mut closed = vec![false; n];
+    let mut heap: BinaryHeap<Reverse<Key>> = BinaryHeap::new();
+    for r in 0..num_boundary {
+        filled[r] = terrain[r];
+        closed[r] = true;
+        heap.push(Reverse(Key { e: filled[r], i: r }));
+    }
+    while let Some(Reverse(Key { e, i })) = heap.pop() {
+        for &nb in &neighbors[i] {
+            let nb = nb as usize;
+            if closed[nb] {
+                continue;
+            }
+            let f = terrain[nb].max(e + EPS);
+            filled[nb] = f;
+            closed[nb] = true;
+            heap.push(Reverse(Key { e: f, i: nb }));
+        }
+    }
+    filled
+}
+
 /// Total-order key over `(elevation, index)` for the priority queue. `f64` is not
 /// `Ord`, so we wrap it and use `total_cmp` (deterministic across targets).
 #[derive(Copy, Clone)]
@@ -90,26 +124,7 @@ pub fn accumulate(
     let num_boundary = num_boundary.min(n);
 
     // 1. Priority-flood pit fill. Boundary regions are the global outlets.
-    let mut filled = vec![f64::INFINITY; n];
-    let mut closed = vec![false; n];
-    let mut heap: BinaryHeap<Reverse<Key>> = BinaryHeap::new();
-    for r in 0..num_boundary {
-        filled[r] = terrain[r];
-        closed[r] = true;
-        heap.push(Reverse(Key { e: filled[r], i: r }));
-    }
-    while let Some(Reverse(Key { e, i })) = heap.pop() {
-        for &nb in &neighbors[i] {
-            let nb = nb as usize;
-            if closed[nb] {
-                continue;
-            }
-            let f = terrain[nb].max(e + EPS);
-            filled[nb] = f;
-            closed[nb] = true;
-            heap.push(Reverse(Key { e: f, i: nb }));
-        }
-    }
+    let filled = fill_depressions(terrain, neighbors, num_boundary);
 
     // 2. Steepest-descent receiver (lowest filled neighbour; else self = sink).
     let mut receiver: Vec<usize> = (0..n).collect();
@@ -182,5 +197,24 @@ pub fn accumulate(
         flow,
         is_stream,
         carve_delta,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fill_depressions_ponds_a_basin_to_its_pour_point() {
+        // 0 = boundary outlet (the map edge / ocean), 1 = a high rim, 2 = the basin floor behind it.
+        // Water in the basin can only escape over the rim, so it fills to the rim height.
+        let terrain = [0.0, 0.5, 0.1];
+        let neighbors: Vec<Vec<u32>> = vec![vec![1], vec![0, 2], vec![1]];
+        let filled = fill_depressions(&terrain, &neighbors, 1);
+        // Basin (cell 2) fills up to the rim (~0.5): a perched lake of depth ≈ 0.4.
+        let lake = filled[2] - terrain[2];
+        assert!((lake - 0.4).abs() < 1.0e-3, "basin fills to the pour point (depth {lake})");
+        // The rim itself (cell 1) drains freely → no standing water.
+        assert!((filled[1] - terrain[1]).abs() < 1.0e-3, "the rim holds no water");
     }
 }

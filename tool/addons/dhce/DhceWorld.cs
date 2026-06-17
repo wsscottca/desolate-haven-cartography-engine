@@ -29,6 +29,10 @@ public partial class DhceWorld : Node3D
     [Export] public DhceWorldState State;      // persisted snapshot; regenerated from on open (R5)
     [Export] public DhceScatterLibrary Scatter; // authored scatter model slots + rules (N3d)
     [Export] public Godot.Collections.Array<Vector4> Caves = new(); // volumetric carve spheres: xyz centre + w radius (N5)
+    [Export] public Texture2D RegionMap; // optional region-coloured PNG → overrides the built-in canon layout (paint each region in its accent colour; other/transparent reads as ocean; image row 0 = north)
+    [Export] public float LapseRate = 0.6f;           // climate #1: temperature drop per unit elevation (cold peaks)
+    [Export] public float OrographicStrength = 0.45f; // climate #2: 0..1 windward-wet / lee-dry pull on moisture
+    [Export] public float WindDeg = 0f;               // prevailing wind direction (degrees; 0 = +X, west→east)
 
     /// Normalized-elevation span the core clamps to (ELEV_MAX − ELEV_MIN in world.rs).
     private const float ElevSpan = 3.0f;
@@ -40,7 +44,7 @@ public partial class DhceWorld : Node3D
     private ArrayMesh[] _liquidChunkMeshes;
     private bool[] _built;
     private int[] _chunkLod; // per built chunk: 0 = full TIN, 1 = coarse LOD
-    private StandardMaterial3D _mat, _dataMat, _liquidMat;
+    private ShaderMaterial _mat, _dataMat, _liquidMat;
     private int _viewMode;
     private int _cols, _rows;
     private float _sx, _sy;             // chunk tile size in metres
@@ -93,15 +97,26 @@ public partial class DhceWorld : Node3D
     private void EnsureMaterials()
     {
         if (_mat != null) return;
-        _mat = new StandardMaterial3D { VertexColorUseAsAlbedo = true, Roughness = 1.0f, Metallic = 0.0f };
-        _mat.Set("cull_mode", 2); // CULL_DISABLED (Y-up remap flips winding)
-        _dataMat = new StandardMaterial3D { VertexColorUseAsAlbedo = true };
-        _dataMat.Set("shading_mode", 0); // UNSHADED — data views show the raw field
-        _dataMat.Set("cull_mode", 2);
-        _liquidMat = new StandardMaterial3D { VertexColorUseAsAlbedo = true, Roughness = 0.1f, Metallic = 0.0f };
-        _liquidMat.Set("transparency", 1); // ALPHA
-        _liquidMat.Set("cull_mode", 2);
+        // Per-vertex biome colour → albedo via an explicit shader. StandardMaterial3D's
+        // VertexColorUseAsAlbedo does NOT drive albedo under the Compatibility (OpenGL) renderer in
+        // this setup — the colours upload fine (matched arrays, real values) yet read white — so a
+        // trivial spatial shader that samples COLOR directly is used; it works on every backend.
+        // cull_disabled throughout because the Y-up remap flips triangle winding.
+        _mat = VertexColorShaderMat( // Natural view: lit terrain (relief shows through the lighting)
+            "shader_type spatial;\nrender_mode cull_disabled;\n" +
+            "void fragment() { ALBEDO = COLOR.rgb; ROUGHNESS = 1.0; METALLIC = 0.0; }");
+        _dataMat = VertexColorShaderMat( // data views: UNSHADED so the raw field reads true, lighting-independent
+            "shader_type spatial;\nrender_mode cull_disabled, unshaded;\n" +
+            "void fragment() { ALBEDO = COLOR.rgb; }");
+        _liquidMat = VertexColorShaderMat( // translucent water/lava; COLOR.a carries the surface alpha
+            "shader_type spatial;\nrender_mode cull_disabled;\n" +
+            "void fragment() { ALBEDO = COLOR.rgb; ALPHA = COLOR.a; ROUGHNESS = 0.2; METALLIC = 0.0; }");
     }
+
+    /// A ShaderMaterial whose fragment shader reads the mesh's per-vertex COLOR as albedo — the
+    /// renderer-independent replacement for StandardMaterial3D.VertexColorUseAsAlbedo.
+    private static ShaderMaterial VertexColorShaderMat(string code) =>
+        new ShaderMaterial { Shader = new Shader { Code = code } };
 
     /// Build the world from the current params (blocks ~seconds at full density) and create empty
     /// chunk nodes; streaming fills them in around the focus. Discards any previous world.
@@ -125,10 +140,86 @@ public partial class DhceWorld : Node3D
         EnsureRenderRoot();
         _renderRoot.Position = new Vector3(-_widthM * 0.5f, 0f, -_heightM * 0.5f);
 
+        // Region layout: inject the imported region-coloured PNG (if any) so the canon pipeline
+        // samples it; otherwise the built-in canon anchors are used.
+        ApplyRegionMap();
+        // Climate params drive temperature/moisture inside build — push them before generating.
+        PushClimateParams();
+
         var sw = Stopwatch.StartNew();
         _engine.Call("build", _widthM, _heightM, SpacingM, (float)Seed, Octaves);
         sw.Stop();
         OnGenDone(sw.Elapsed.TotalMilliseconds);
+    }
+
+    /// Resolve the assigned region-map PNG (if any) into a region-id grid and inject it before build;
+    /// clears the override (→ built-in canon anchors) when none is set. Each pixel is matched to the
+    /// nearest of the 14 region accents (`biome_color_of`) or ocean — paint each region in its accent
+    /// colour; anything else (or transparent) reads as ocean. Image row 0 is north (north-up).
+    private void ApplyRegionMap()
+    {
+        if (_engine == null) return;
+        if (RegionMap == null) { _engine.Call("clear_region_layout"); return; }
+        Image img = RegionMap.GetImage();
+        if (img == null) { _engine.Call("clear_region_layout"); return; }
+        if (img.IsCompressed()) img.Decompress();
+        if (img.GetFormat() != Image.Format.Rgba8) img.Convert(Image.Format.Rgba8);
+
+        const int RegionCount = 14;
+        var refs = new Color[RegionCount + 1];
+        refs[0] = new Color(0.05f, 0.11f, 0.21f); // ocean reference (canon water-deep)
+        for (int id = 1; id <= RegionCount; id++)
+        {
+            float[] c = _engine.Call("biome_color_of", id).As<float[]>();
+            refs[id] = (c is { Length: >= 3 }) ? new Color(c[0], c[1], c[2]) : new Color(0.5f, 0.5f, 0.5f);
+        }
+
+        int imgW = img.GetWidth(), imgH = img.GetHeight();
+        int cols = Mathf.Min(imgW, 256), rows = Mathf.Min(imgH, 256);
+        if (cols < 1 || rows < 1) { _engine.Call("clear_region_layout"); return; }
+        var ids = new byte[cols * rows];
+        for (int gy = 0; gy < rows; gy++)
+        {
+            int py = Mathf.Clamp((int)((gy + 0.5f) * imgH / rows), 0, imgH - 1);
+            for (int gx = 0; gx < cols; gx++)
+            {
+                int px = Mathf.Clamp((int)((gx + 0.5f) * imgW / cols), 0, imgW - 1);
+                Color p = img.GetPixel(px, py);
+                byte best = 0;
+                float bestD = float.MaxValue;
+                for (int id = 0; id <= RegionCount; id++)
+                {
+                    float dr = p.R - refs[id].R, dg = p.G - refs[id].G, db = p.B - refs[id].B;
+                    float d = dr * dr + dg * dg + db * db;
+                    if (d < bestD) { bestD = d; best = (byte)id; }
+                }
+                if (p.A < 0.5f) best = 0; // transparent → ocean
+                ids[gy * cols + gx] = best;
+            }
+        }
+        _engine.Call("set_region_layout", ids, cols, rows);
+        GD.Print($"[DHCE] region map applied: {cols}x{rows} from {imgW}x{imgH} PNG");
+    }
+
+    /// Push the climate params (lapse rate, orographic strength, wind) into the engine. Wind is sent
+    /// as a vector (cos/sin of the angle) so the core stays transcendental-free.
+    private void PushClimateParams()
+    {
+        if (_engine == null) return;
+        _engine.Call("set_lapse_rate", (double)LapseRate);
+        _engine.Call("set_orographic_strength", (double)OrographicStrength);
+        float rad = Mathf.DegToRad(WindDeg);
+        _engine.Call("set_wind", (double)Mathf.Cos(rad), (double)Mathf.Sin(rad));
+    }
+
+    /// Re-derive temperature + moisture from the current climate params (the live slider path) and
+    /// re-tessellate the meshed chunks so the recolour shows without a full regen.
+    public void RecomputeClimate()
+    {
+        if (_engine == null || !_genDone) return;
+        PushClimateParams();
+        _engine.Call("recompute_climate");
+        RepaintDirtyTerrain();
     }
 
     private void OnGenDone(double genMs)
@@ -152,12 +243,14 @@ public partial class DhceWorld : Node3D
         _genDone = true;
         if (!_loadingState)
         {
-            // Default sea level: ~1 km above the terrain's lowest basin. _exaggeration is metres per
-            // normalized unit (= TerrainHeightKm·1000 / ElevSpan), so 1000 / _exaggeration is 1 km in
-            // normalized elevation. (A Load() restores the saved level instead — see Load.)
+            // Two-tier water. The OCEAN is a single global sea level ~1 km above the lowest basin
+            // (floods the rim/edges). _exaggeration is metres per normalized unit, so 1000/_exaggeration
+            // is 1 km in normalized elevation. Perched LAKES/ponds are filled separately (fill_lakes) —
+            // held in highland basins above the ocean, like Lake Tahoe. (Load() restores both instead.)
             float minElev = (float)_engine.Call("min_elevation").As<double>();
             SeaLevelNorm = minElev + 1000f / _exaggeration;
             _engine.Call("set_sea_level", (double)SeaLevelNorm);
+            _engine.Call("fill_lakes"); // perched lakes/ponds, per-Region thresholds
         }
         UpdateStreaming(WorldCenter); // seed the centre so something shows immediately
     }
@@ -331,6 +424,7 @@ public partial class DhceWorld : Node3D
         SeaLevelNorm = (float)level;
         if (_engine == null) return;
         _engine.Call("set_sea_level", level);
+        _engine.Call("fill_lakes"); // re-pond perched lakes (per-Region thresholds) at the new ocean level
         RebuildLiquid();
     }
 
@@ -368,7 +462,7 @@ public partial class DhceWorld : Node3D
         for (int i = 0; i < _built.Length; i++) if (_built[i]) BuildChunk(i, _chunkLod[i] == 1);
     }
 
-    private StandardMaterial3D CurrentViewMat() => _viewMode == 0 ? _mat : _dataMat;
+    private ShaderMaterial CurrentViewMat() => _viewMode == 0 ? _mat : _dataMat;
 
     /// Add a volumetric carve sphere (N5): `centre` in world space, `radius` in metres. Carved into
     /// real geometry at export (Layer B); shown as a gizmo while the Cave tool is active.
@@ -439,6 +533,7 @@ public partial class DhceWorld : Node3D
         {
             Seed = Seed, WorldSizeKm = WorldSizeKm, SpacingM = SpacingM, Octaves = Octaves,
             TerrainHeightKm = TerrainHeightKm, ChunkSizeM = ChunkSizeM, SeaLevel = SeaLevelNorm,
+            LapseRate = LapseRate, OrographicStrength = OrographicStrength, WindDeg = WindDeg,
             Elevation = _engine.Call("elevation_export").As<float[]>(),
             Biome = _engine.Call("biome_export").As<byte[]>(),
             BiomeLocked = _engine.Call("biome_locked_export").As<byte[]>(),
@@ -450,6 +545,7 @@ public partial class DhceWorld : Node3D
             Temperature = T(4), Moisture = T(5), Vegetation = T(6), PaletteFamily = T(7),
             BasePalettes = _engine.Call("base_palettes_export").As<float[]>(),
             RegionLandform = _engine.Call("region_landform_export").As<float[]>(),
+            RegionLakeDepth = _engine.Call("region_lake_depth_export").As<float[]>(),
         };
     }
 
@@ -459,6 +555,7 @@ public partial class DhceWorld : Node3D
         if (s == null) return;
         Seed = s.Seed; WorldSizeKm = s.WorldSizeKm; SpacingM = s.SpacingM; Octaves = s.Octaves;
         TerrainHeightKm = s.TerrainHeightKm; ChunkSizeM = s.ChunkSizeM;
+        LapseRate = s.LapseRate; OrographicStrength = s.OrographicStrength; WindDeg = s.WindDeg;
         _loadingState = true;
         Generate(); // deterministic mesh + chunk slots from the params (skips the default sea level)
         _loadingState = false;
@@ -483,6 +580,7 @@ public partial class DhceWorld : Node3D
         SetT(4, s.Temperature); SetT(5, s.Moisture); SetT(6, s.Vegetation); SetT(7, s.PaletteFamily);
         SetF("set_base_palettes", s.BasePalettes);
         SetF("set_region_landform_table", s.RegionLandform);
+        SetF("set_region_lake_depth_table", s.RegionLakeDepth); // per-Region lake thresholds (saved liquid already holds the lakes)
         _engine.Call("refresh_colors");
         for (int i = 0; i < _built.Length; i++) if (_built[i]) BuildChunk(i, _chunkLod[i] == 1); // re-tessellate the meshed ring
     }

@@ -23,6 +23,9 @@ public partial class DhceWorldState : Resource
     [Export] public float TerrainHeightKm = 2.4f;
     [Export] public float ChunkSizeM = 256f;
     [Export] public float SeaLevel = 0f; // water level (normalized elevation); default set at generate
+    [Export] public float LapseRate = 0.6f;           // climate: temperature drop per unit elevation
+    [Export] public float OrographicStrength = 0.45f; // climate: windward-wet / lee-dry moisture pull
+    [Export] public float WindDeg = 0f;               // prevailing wind direction (degrees)
 
     // Authored per-cell fields (restored after a deterministic build).
     [Export] public float[] Elevation = System.Array.Empty<float>();
@@ -43,7 +46,9 @@ public partial class DhceWorldState : Resource
     [Export] public float[] Vegetation = System.Array.Empty<float>();
     [Export] public float[] PaletteFamily = System.Array.Empty<float>();
 
-    // Shared tables: 7 base palettes (7×6×3) + per-Region landform dials (15×4).
+    // Shared tables: 7 base palettes (7×6×3) + per-Region landform dials (15×4) + per-Region lake
+    // thresholds (15).
     [Export] public float[] BasePalettes = System.Array.Empty<float>();
     [Export] public float[] RegionLandform = System.Array.Empty<float>();
+    [Export] public float[] RegionLakeDepth = System.Array.Empty<float>();
 }
