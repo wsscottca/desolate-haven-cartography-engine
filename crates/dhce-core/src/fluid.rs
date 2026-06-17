@@ -88,6 +88,20 @@ pub fn add_rain(field: &mut LiquidField, terrain: &[f64], level: f64, amount: f6
     }
 }
 
+/// Add a per-cell `rain[r]` layer of water to land at or above `level` (climate-driven rainfall).
+/// `rain` is parallel to `terrain`; cells with `rain[r] <= 0` are left untouched.
+pub fn add_rain_field(field: &mut LiquidField, terrain: &[f64], level: f64, rain: &[f64]) {
+    for r in 0..terrain.len() {
+        let amount = rain.get(r).copied().unwrap_or(0.0);
+        if amount > 0.0 && terrain[r] >= level {
+            field.depth[r] += amount;
+            if field.kind[r] == 0 {
+                field.kind[r] = LiquidType::Water as u8;
+            }
+        }
+    }
+}
+
 /// One relaxation step: each wet region sends a fraction of its column toward
 /// lower-surface neighbors, capped so it never overshoots a level surface (which
 /// keeps the solver stable). `flow_rate` ∈ (0, 0.5]; `evaporation` ∈ [0, 1).

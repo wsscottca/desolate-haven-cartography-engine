@@ -128,6 +128,17 @@ impl DhceEngine {
     fn chunk_size_m(&self) -> f64 {
         self.world.chunk_size_m()
     }
+    /// Set the per-region base-elevation blend width (world metres). Call **before** `build`. Wider ⇒
+    /// gentler relief steps between regions.
+    #[func]
+    fn set_base_blend_m(&mut self, m: f64) {
+        self.world.set_base_blend_m(m);
+    }
+    /// Current per-region base-elevation blend width, in world metres.
+    #[func]
+    fn base_blend_m(&self) -> f64 {
+        self.world.base_blend_m()
+    }
     #[func]
     fn chunk_count(&self) -> i64 {
         self.world.chunk_count() as i64
@@ -287,9 +298,139 @@ impl DhceEngine {
     fn set_sea_level(&mut self, level: f64) {
         self.world.set_sea_level(level);
     }
+    /// Deposit perched lakes/ponds (closed basins above sea level, filled to their pour point). The
+    /// per-cell ponding threshold comes from each cell's Region (`region_lake_depth_of`, moisture-tied
+    /// + slider) modulated by local moisture. The ocean is `set_sea_level`; this is the lake tier.
+    /// Call after `set_sea_level`; re-run if the sea level or a region threshold changes.
+    #[func]
+    fn fill_lakes(&mut self) {
+        self.world.fill_lakes();
+        self.liquid = None;
+        self.liquid_chunk_cache = None;
+    }
+    /// Region `id`'s lake-fill threshold (normalized basin depth).
+    #[func]
+    fn region_lake_depth_of(&self, id: i64) -> f64 {
+        self.world.region_lake_depth_of(id.max(0) as usize)
+    }
+    /// Set region `id`'s lake-fill threshold; re-run `fill_lakes` to apply.
+    #[func]
+    fn set_region_lake_depth(&mut self, id: i64, value: f64) {
+        self.world.set_region_lake_depth(id.max(0) as usize, value);
+    }
+    /// Export the per-Region lake-depth table for save/load.
+    #[func]
+    fn region_lake_depth_export(&self) -> PackedFloat32Array {
+        PackedFloat32Array::from(self.world.region_lake_depth_export().as_slice())
+    }
+    /// Restore the per-Region lake-depth table.
+    #[func]
+    fn set_region_lake_depth_table(&mut self, vals: PackedFloat32Array) {
+        self.world.set_region_lake_depth_table(&vals.to_vec());
+    }
+    /// Region `id`'s river threshold (fraction of basin peak flow before a cell becomes a trunk river).
+    #[func]
+    fn river_threshold_of(&self, id: i64) -> f64 {
+        self.world.river_threshold_of(id.max(0) as usize)
+    }
+    /// Set region `id`'s river threshold; re-run `generate_rivers` (or `reshape_and_reflow`) to apply.
+    #[func]
+    fn set_river_threshold(&mut self, id: i64, value: f64) {
+        self.world.set_river_threshold(id.max(0) as usize, value);
+    }
+    /// Export the per-Region river-threshold table for save/load.
+    #[func]
+    fn river_threshold_export(&self) -> PackedFloat32Array {
+        PackedFloat32Array::from(self.world.river_threshold_export().as_slice())
+    }
+    /// Restore the per-Region river-threshold table.
+    #[func]
+    fn set_river_threshold_table(&mut self, vals: PackedFloat32Array) {
+        self.world.set_river_threshold_table(&vals.to_vec());
+    }
+    /// Grow trunk rivers automatically from the whole-map (moisture-weighted) drainage, gated by the
+    /// per-region thresholds. `depth_gain` scales channel depth with flow. Nulls the liquid caches.
+    #[func]
+    fn generate_rivers(&mut self, depth_gain: f64) {
+        self.world.generate_rivers(depth_gain);
+        self.liquid = None;
+        self.liquid_chunk_cache = None;
+    }
+    /// Force every perched lake a visible outlet (run after `fill_lakes`). Nulls the liquid caches.
+    #[func]
+    fn connect_lake_outlets(&mut self) {
+        self.world.connect_lake_outlets();
+        self.liquid = None;
+        self.liquid_chunk_cache = None;
+    }
+    /// Ease dry land down to the ocean/lake waterlines (no sheer shore walls). Run after the water is
+    /// placed; the live sea-level path calls it after re-flowing so a slider move re-eases the shores.
+    #[func]
+    fn grade_shorelines(&mut self) {
+        self.world.grade_shorelines();
+    }
+    /// The unified relief + hydrology pass — shape relief, carve rivers, fill lakes, connect outlets in
+    /// the one correct, idempotent order. Call after `set_sea_level`. Nulls the liquid caches.
+    #[func]
+    fn reshape_and_reflow(&mut self, shape_strength: f64, depth_gain: f64) {
+        self.world.reshape_and_reflow(shape_strength, depth_gain);
+        self.liquid = None;
+        self.liquid_chunk_cache = None;
+    }
+    /// Lowest authored elevation (normalized); lets the tool seat a default sea level a fixed height
+    /// above the deepest basin at generate.
+    #[func]
+    fn min_elevation(&self) -> f64 {
+        self.world.min_elevation()
+    }
     #[func]
     fn rain(&mut self, amount: f64) {
         self.world.rain(amount);
+    }
+    /// Deposit climate-driven rainfall (per-biome raininess / rain-shadow / evaporation + per-cell
+    /// moisture / temperature + orographic lift). Step the fluid solver afterwards to settle it.
+    #[func]
+    fn apply_rainfall(&mut self) {
+        self.world.apply_rainfall();
+    }
+
+    // --- climate (elevation→temperature, orographic→moisture) ---
+
+    /// Re-derive the temperature + moisture traits from the climate params + current elevation, then
+    /// re-taper + recolour (the live slider path). Re-tessellate dirty chunks afterwards to show it.
+    #[func]
+    fn recompute_climate(&mut self) {
+        self.world.recompute_climate();
+    }
+    /// Temperature lapse strength (drop per unit elevation). Re-run `recompute_climate` to apply.
+    #[func]
+    fn set_lapse_rate(&mut self, v: f64) {
+        self.world.set_lapse_rate(v);
+    }
+    #[func]
+    fn lapse_rate(&self) -> f64 {
+        self.world.lapse_rate()
+    }
+    /// Orographic weight (0..1): windward-wet / lee-dry pull on moisture. Re-run `recompute_climate`.
+    #[func]
+    fn set_orographic_strength(&mut self, v: f64) {
+        self.world.set_orographic_strength(v);
+    }
+    #[func]
+    fn orographic_strength(&self) -> f64 {
+        self.world.orographic_strength()
+    }
+    /// Set the prevailing wind vector (the front-end supplies `[cosθ, sinθ]`, keeping the core
+    /// transcendental-free). Re-run `recompute_climate` to apply.
+    #[func]
+    fn set_wind(&mut self, wx: f64, wy: f64) {
+        self.world.set_wind(wx, wy);
+    }
+    /// Prevailing wind as `[x, y]`.
+    #[func]
+    fn wind(&self) -> PackedFloat32Array {
+        let w = self.world.wind();
+        PackedFloat32Array::from(vec![w[0] as f32, w[1] as f32].as_slice())
     }
     #[func]
     fn step_fluid(&mut self, flow_rate: f64, evaporation: f64, substeps: i64) {
@@ -448,6 +589,12 @@ impl DhceEngine {
     #[func]
     fn paint_region_traits(&mut self, cx: f64, cy: f64, radius: f64, biome_id: i64) -> PackedInt32Array {
         u32_to_packed(&self.world.paint_region_traits(cx, cy, radius, biome_id.max(0) as u8))
+    }
+    /// Transition brush: locally blend the scalar traits within the footprint (soften one seam),
+    /// `width_m` controlling the band — unlike the global `blend_traits` bake. Returns cells touched.
+    #[func]
+    fn blend_brush(&mut self, cx: f64, cy: f64, radius: f64, width_m: f64) -> PackedInt32Array {
+        u32_to_packed(&self.world.blend_brush(cx, cy, radius, width_m))
     }
     /// Per-cell trait at world `(x, y)`; `trait_id` as in `paint_trait` (enums → index). NaN off-map.
     #[func]
@@ -611,6 +758,19 @@ impl DhceEngine {
     fn set_region(&mut self, r: PackedByteArray) {
         self.world.set_region(&r.to_vec());
     }
+    /// Inject a region-map override: a row-major id grid (`cols × rows`, row 0 = north) where each
+    /// byte is `0` (ocean / unmatched) or `1..=14` (a canon region), resolved by the front-end from
+    /// a region-coloured PNG matched to the 14 region accents. The next `build` samples this instead
+    /// of the built-in canon anchors. An empty/ill-sized grid clears the override.
+    #[func]
+    fn set_region_layout(&mut self, ids: PackedByteArray, cols: i64, rows: i64) {
+        self.world.set_region_layout(&ids.to_vec(), cols.max(0) as usize, rows.max(0) as usize);
+    }
+    /// Drop any imported region-map override → the next `build` reverts to the built-in canon anchors.
+    #[func]
+    fn clear_region_layout(&mut self) {
+        self.world.clear_region_layout();
+    }
     /// Export per-cell trait field `trait_id` (as in `paint_trait`) as f32, for save/load.
     #[func]
     fn trait_field_export(&self, trait_id: i64) -> PackedFloat32Array {
@@ -652,8 +812,9 @@ impl DhceEngine {
         self.pack_scatter(inst);
     }
     /// Rule-based scatter (the N3d library) over the whole world; read via `scatter_data`/`count`.
-    /// `rules_flat` is 8 floats per slot: `[slot, density, scale_min, scale_max, elev_min, elev_max,
-    /// veg_mask, region_mask]`. `Instance::species` (the 5th packed float) carries the slot index.
+    /// `rules_flat` is 9 floats per slot: `[slot, density, scale_min, scale_max, elev_min, elev_max,
+    /// veg_mask, region_mask, biome_mask]`. `Instance::species` (the 5th packed float) carries the
+    /// slot index.
     #[func]
     fn tessellate_scatter_rules(&mut self, rules_flat: PackedFloat32Array, exaggeration: f64, seed: f64) {
         let rules = parse_rules(&rules_flat);
@@ -689,11 +850,11 @@ impl DhceEngine {
     }
 }
 
-/// Parse a flat scatter-rule array (8 floats per slot) into core [`ScatterRule`]s.
+/// Parse a flat scatter-rule array (9 floats per slot) into core [`ScatterRule`]s.
 fn parse_rules(flat: &PackedFloat32Array) -> Vec<ScatterRule> {
     let v = flat.to_vec();
-    let mut out = Vec::with_capacity(v.len() / 8);
-    for c in v.chunks_exact(8) {
+    let mut out = Vec::with_capacity(v.len() / 9);
+    for c in v.chunks_exact(9) {
         out.push(ScatterRule {
             slot: c[0] as u32,
             density: c[1] as f64,
@@ -703,6 +864,7 @@ fn parse_rules(flat: &PackedFloat32Array) -> Vec<ScatterRule> {
             elev_max: c[5] as f64,
             veg_mask: c[6] as u32,
             region_mask: c[7] as u32,
+            biome_mask: c[8] as u32,
         });
     }
     out

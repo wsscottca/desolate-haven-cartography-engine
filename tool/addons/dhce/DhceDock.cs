@@ -28,18 +28,22 @@ public partial class DhceDock : ScrollContainer
     private readonly List<Button> _toolButtons = new();
     private static readonly Dictionary<string, Texture2D> _iconCache = new();
 
-    private SpinBox _seed, _oct, _size, _spacing, _chunk;
+    private SpinBox _seed, _oct, _size, _spacing, _chunk, _baseBlend;
     private OptionButton _liquidKind, _traitEnum, _palFamily, _landRegion;
     private HSlider _traitSlider;
     private Label _traitSliderLabel, _traitEnumLabel;
     private ColorPickerButton[] _palPickers;
     private SpinBox[] _landSpins;
+    private SpinBox _lakeDepthSpin;   // per-Region lake-fill threshold (tied to the same region picker)
+    private SpinBox _riverThreshSpin; // per-Region river threshold (tied to the same region picker)
     private CheckButton _simulate;
     private DhceMinimap _minimap;
     private LineEdit _exportPath;
 
     // Contextual brush-option groups — only the active tool's group is shown (see RefreshBrushOptions).
-    private VBoxContainer _optSize, _optStrength, _optLiquid, _optRain, _optCave, _optBiome, _optRegion, _optTrait;
+    private VBoxContainer _optSize, _optStrength, _optLiquid, _optTransition, _optCave, _optBiome, _optRegion, _optTrait;
+    private HSlider _seaLevelSlider;
+    private Label _seaLevelLabel;
 
     // Scatter (N3d) model-slot editor.
     private OptionButton _slotPick;
@@ -47,6 +51,7 @@ public partial class DhceDock : ScrollContainer
     private HSlider _slotDensity;
     private SpinBox _slotScaleMin, _slotScaleMax, _slotElevMin, _slotElevMax, _slotVisEnd;
     private CheckBox[] _slotVeg;
+    private CheckBox[] _slotBiome;
     private CheckButton _scatterPreview;
     private CheckBox _slotInstances;
     private bool _loadingSlot;
@@ -86,24 +91,36 @@ public partial class DhceDock : ScrollContainer
 
     /// Point the dock at the scene's current DhceWorld; reload engine-backed values when it changes
     /// or finishes generating. Cheap when nothing changed.
+    private bool _bindErrLogged; // gate so a failing gen-done reload logs once, not every frame
+
     public void Bind(DhceWorld world)
     {
         bool changed = world != _world;
         _world = world;
         bool gen = world != null && world.GenDone;
-        if (world != null && (changed || (gen && !_wasGenDone)))
+        bool reload = world != null && (changed || (gen && !_wasGenDone));
+        // Latch BEFORE the reload: if anything below throws, the edge condition won't re-fire next
+        // frame, so a reload bug can't turn into a per-frame Output flood (it surfaces once instead).
+        _wasGenDone = gen;
+        if (reload)
         {
-            PullWorldParams();
-            if (changed) { RefreshSlots(); LoadSlot(); } // reflect the new world's scatter library
-            if (gen)
+            try
             {
-                LoadPaletteColors();
-                LoadRegionLandform();
-                _minimap?.Bind(Eng, _world.WorldWidthM, _world.WorldHeightM);
-                _minimap?.Refresh();
+                PullWorldParams();
+                if (changed) { RefreshSlots(); LoadSlot(); } // reflect the new world's scatter library
+                if (gen)
+                {
+                    LoadPaletteColors();
+                    LoadRegionLandform();
+                    _minimap?.Bind(Eng, _world.WorldWidthM, _world.WorldHeightM);
+                    _minimap?.Refresh();
+                }
+            }
+            catch (System.Exception ex)
+            {
+                if (!_bindErrLogged) { _bindErrLogged = true; GD.PrintErr("[DHCE] Bind reload failed (logged once): ", ex); }
             }
         }
-        _wasGenDone = gen;
         RefreshBrushOptions(); // keep the contextual brush options in sync with the active tool
     }
 
@@ -161,10 +178,13 @@ public partial class DhceDock : ScrollContainer
         _size = SpinRow("Size (km)", 1, 60, 1, 30);
         _spacing = SpinRow("Spacing (m)", 4, 60, 1, 10);
         _chunk = SpinRow("Chunk size (m)", 32, 2048, 32, 256);
+        _baseBlend = SpinRow("Base blend (m)", 0, 6000, 50, 1800); // softer per-region base-elevation steps; regen to apply
         Slider("Height (km)", 0.1, 10, 0.1, 5.0, v => _world?.SetTerrainHeight((float)v));
 
+        BuildRegionMapSection(); // optional region-coloured PNG → overrides the built-in canon layout
         BuildBrushes();        // all paint tools + their contextual options
         BuildShapingSection(); // region landform + shaping + transitions (not brushes)
+        BuildClimateSection(); // physical climate: lapse (temp) + orographic (moisture) + wind
         BuildPaletteEditor();  // render: per-family palette colours
         BuildPhysicsSection(); // sea level / flow / evaporation / substeps / settle / clear / simulate
         BuildScatterSection(); // model scatter (per-slot; per-biome rework is a separate phase)
@@ -215,7 +235,7 @@ public partial class DhceDock : ScrollContainer
         AddTraitBrushButton(toolRow, "vegetation", "Vegetation", 2);
         AddTraitBrushButton(toolRow, "palette", "Palette family", 3);
         AddToolButton(toolRow, "cave", "Cave", ToolKind.Cave);
-        AddToolButton(toolRow, null, "Rain", ToolKind.Rain);
+        AddToolButton(toolRow, "transition", "Transition", ToolKind.Transition);
 
         // SIZE — applies to every tool, always shown.
         _optSize = NewGroup(sec);
@@ -237,11 +257,11 @@ public partial class DhceDock : ScrollContainer
         Button(_optLiquid, "Generate streams", () => { if (HasWorld) { Eng.Call("generate_streams", 0.5, 1.0); _world.RepaintDirtyTerrain(); _world.RebuildLiquid(); } });
         _target = sec;
 
-        // RAIN.
-        _optRain = NewGroup(sec);
-        _target = _optRain;
-        Slider("Rain rate", 0.0, 0.01, 0.0005, _tool.RainRate, v => _tool.RainRate = (float)v);
-        _optRain.AddChild(Dim("Drag over terrain; a cloud drifts and rains, water pools and flows."));
+        // TRANSITION brush — local blend across a biome seam (the global "Blend borders" bake stays).
+        _optTransition = NewGroup(sec);
+        _target = _optTransition;
+        Slider("Width (m)", 0, 1200, 25, _tool.BlendWidthM, v => _tool.BlendWidthM = (float)v);
+        _optTransition.AddChild(Dim("Drag across a biome seam to soften just that border. Global 'Blend borders' (TRANSITIONS) still blends the whole map."));
         _target = sec;
 
         // CAVE.
@@ -305,7 +325,7 @@ public partial class DhceDock : ScrollContainer
         bool region = a == ToolKind.Region || a == ToolKind.Territory || a == ToolKind.RegionSelect;
         if (_optStrength != null) _optStrength.Visible = sculpt;
         if (_optLiquid != null) _optLiquid.Visible = liquid;
-        if (_optRain != null) _optRain.Visible = a == ToolKind.Rain;
+        if (_optTransition != null) _optTransition.Visible = a == ToolKind.Transition;
         if (_optCave != null) _optCave.Visible = a == ToolKind.Cave;
         if (_optBiome != null) _optBiome.Visible = a == ToolKind.Biome;
         if (_optRegion != null) _optRegion.Visible = region;
@@ -337,17 +357,32 @@ public partial class DhceDock : ScrollContainer
             sb.ValueChanged += v => OnRegionLandform(idx, v);
             _landSpins[i] = sb;
         }
+        // Per-region water tiers. Lake fill depth: how deep a closed basin must be before it holds a
+        // lake/pond here. River threshold: what share of the basin's peak flow a cell must carry before
+        // it becomes a trunk river here. Both default from the region's moisture; lower ⇒ more water.
+        _lakeDepthSpin = SpinRow("Lake fill depth", 0, 0.5, 0.005, 0);
+        _lakeDepthSpin.ValueChanged += v => OnRegionLakeDepth(v);
+        _riverThreshSpin = SpinRow("River threshold", 0, 0.2, 0.005, 0);
+        _riverThreshSpin.ValueChanged += v => OnRegionRiverThreshold(v);
+        Button(_target, "Apply water", () =>
+        {
+            if (!HasWorld) return;
+            _world.SetSeaLevel(_world.SeaLevelNorm); // re-flow rivers + lakes + outlets at the current thresholds
+            SetStatus("Rivers + lakes re-flowed from the per-region thresholds.");
+        });
+        _target.AddChild(Dim("Per-region water: lake fill depth (lower ⇒ more lakes) and river threshold (lower ⇒ more rivers). Defaults track moisture. Apply water to update."));
 
         Header("SHAPING", open: false);
-        _target.AddChild(Dim("Bake the landform dials into the terrain height."));
+        _target.AddChild(Dim("Bake the landform dials into the terrain height, then re-flow the watershed."));
         Slider("Strength", 0, 2, 0.05, _shapeStrength, v => _shapeStrength = v);
         Button(_target, "Apply shaping", () =>
         {
             if (!HasWorld) return;
-            Eng.Call("shape_terrain", _shapeStrength);
+            // Reshape relief then re-flow rivers/lakes on it, in the one idempotent order.
+            Eng.Call("reshape_and_reflow", _shapeStrength, (double)_world.RiverDepthGain);
             _world.RepaintDirtyTerrain(); _world.RebuildLiquid();
             _minimap?.Refresh();
-            SetStatus($"shaped @ strength {_shapeStrength:0.##}");
+            SetStatus($"shaped @ strength {_shapeStrength:0.##} — rivers + lakes re-flowed");
         });
 
         Header("TRANSITIONS", open: false);
@@ -365,12 +400,19 @@ public partial class DhceDock : ScrollContainer
     private void BuildPhysicsSection()
     {
         Header("PHYSICS", open: false);
-        Slider("Sea level", -1.0, 1.0, 0.01, 0.0, v => { if (HasWorld) { Eng.Call("set_sea_level", v); _world.RebuildLiquid(); } });
+        // Sea level — captured so it syncs to the generated default (1 km above the lowest basin).
+        _seaLevelLabel = Dim("Sea level: 0.00");
+        _target.AddChild(_seaLevelLabel);
+        _seaLevelSlider = new HSlider { MinValue = -1.5, MaxValue = 1.5, Step = 0.01, Value = 0.0, SizeFlagsHorizontal = SizeFlags.ExpandFill };
+        _seaLevelSlider.ValueChanged += v => { _seaLevelLabel.Text = $"Sea level: {v:0.00}"; if (HasWorld) _world.SetSeaLevel(v); };
+        _target.AddChild(_seaLevelSlider);
+
         Slider("Flow rate", 0.0, 0.5, 0.01, _simFlow, v => _simFlow = v);
         Slider("Evaporation", 0.0, 0.02, 0.0005, _simEvap, v => _simEvap = v);
         Slider("Substeps", 1, 40, 1, _simSubsteps, v => _simSubsteps = (int)v);
+        Button(_target, "Apply rainfall", () => { if (HasWorld) { _world.ApplyRainfall(); _minimap?.Refresh(); SetStatus("applied climate rainfall — Settle further if needed"); } });
         Button(_target, "Settle (1 step)", () => { if (HasWorld) { Eng.Call("step_fluid", _simFlow, _simEvap, _simSubsteps); _world.RebuildLiquid(); } });
-        Button(_target, "Clear liquid", () => { if (HasWorld) { _world.StopRain(); Eng.Call("clear_liquid"); _world.RebuildLiquid(); } });
+        Button(_target, "Clear liquid", () => { if (HasWorld) { Eng.Call("clear_liquid"); _world.RebuildLiquid(); } });
         _simulate = new CheckButton { Text = "Simulate" };
         _target.AddChild(_simulate);
     }
@@ -397,10 +439,59 @@ public partial class DhceDock : ScrollContainer
         _world.WorldSizeKm = (float)_size.Value;
         _world.SpacingM = (float)_spacing.Value;
         _world.ChunkSizeM = (float)_chunk.Value;
+        _world.BaseBlendM = (float)_baseBlend.Value;
         SetStatus("Generating… (the editor pauses a few seconds)");
         _world.Generate();
         _wasGenDone = false; // force a value reload on the next Bind
         SetStatus($"Generated ~{_world.WorldWidthM / 1000f:0.0} km. Select the node and left-drag to paint.");
+    }
+
+    // --- region map (canon layout source) ---
+
+    private FileDialog _regionMapDialog;
+
+    /// REGION MAP section: import a region-coloured PNG to override the built-in canon layout, or
+    /// reset to the built-in anchors. The PNG drives the generator's first pass (territories).
+    private void BuildRegionMapSection()
+    {
+        Header("REGION MAP", open: false);
+        _target.AddChild(Dim("Optional. Paint each region in its accent colour (see VIEW → Region for the accents); anything else or transparent reads as ocean. North = top. Blank = built-in canon layout."));
+        Button(_target, "Import region PNG…", OpenRegionMapDialog);
+        Button(_target, "Use built-in canon layout", () =>
+        {
+            if (_world == null) { SetStatus("No DhceWorld in the scene."); return; }
+            _world.RegionMap = null;
+            OnGenerate();
+            SetStatus("Region map cleared → built-in canon layout.");
+        });
+    }
+
+    private void OpenRegionMapDialog()
+    {
+        if (_world == null) { SetStatus("No DhceWorld in the scene. Add one first."); return; }
+        if (_regionMapDialog == null)
+        {
+            _regionMapDialog = new FileDialog
+            {
+                FileMode = FileDialog.FileModeEnum.OpenFile,
+                Access = FileDialog.AccessEnum.Filesystem,
+                Title = "Select a region-coloured PNG",
+            };
+            _regionMapDialog.AddFilter("*.png", "PNG image");
+            _regionMapDialog.FileSelected += OnRegionMapSelected;
+            AddChild(_regionMapDialog);
+        }
+        _regionMapDialog.PopupCentered(new Vector2I(720, 520));
+    }
+
+    private void OnRegionMapSelected(string path)
+    {
+        if (_world == null) return;
+        var img = Image.LoadFromFile(path);
+        if (img == null) { SetStatus($"Could not load image: {path}"); return; }
+        _world.RegionMap = ImageTexture.CreateFromImage(img);
+        OnGenerate();
+        SetStatus($"Region map: {System.IO.Path.GetFileName(path)} → regenerated.");
     }
 
     private void PullWorldParams()
@@ -410,6 +501,12 @@ public partial class DhceDock : ScrollContainer
         _size.Value = _world.WorldSizeKm;
         _spacing.Value = _world.SpacingM;
         _chunk.Value = _world.ChunkSizeM;
+        _baseBlend.Value = _world.BaseBlendM;
+        if (_seaLevelSlider != null)
+        {
+            _seaLevelSlider.SetValueNoSignal(_world.SeaLevelNorm);
+            if (_seaLevelLabel != null) _seaLevelLabel.Text = $"Sea level: {_world.SeaLevelNorm:0.00}";
+        }
     }
 
     private void SelectTrait(int dropdownIdx, bool arm = true)
@@ -441,6 +538,10 @@ public partial class DhceDock : ScrollContainer
         _loadingLandform = true;
         var a = Eng.Call("biome_landform_of", SelectedLandRegion()).As<float[]>();
         for (int i = 0; i < _landSpins.Length && i < a.Length; i++) _landSpins[i].Value = a[i];
+        if (_lakeDepthSpin != null)
+            _lakeDepthSpin.Value = Eng.Call("region_lake_depth_of", SelectedLandRegion()).As<double>();
+        if (_riverThreshSpin != null)
+            _riverThreshSpin.Value = Eng.Call("river_threshold_of", SelectedLandRegion()).As<double>();
         _loadingLandform = false;
     }
 
@@ -450,6 +551,51 @@ public partial class DhceDock : ScrollContainer
         int id = SelectedLandRegion();
         Eng.Call("set_region_landform", id, idx, v);
         SetStatus($"{BiomeNames[id - 1]}: {LandNames[idx].ToLower()} {v:0.##} — Apply shaping to bake");
+    }
+
+    private void OnRegionLakeDepth(double v)
+    {
+        if (_loadingLandform || !HasWorld) return;
+        int id = SelectedLandRegion();
+        Eng.Call("set_region_lake_depth", id, v);
+        SetStatus($"{BiomeNames[id - 1]}: lake fill depth {v:0.###} — Apply water to update");
+    }
+
+    private void OnRegionRiverThreshold(double v)
+    {
+        if (_loadingLandform || !HasWorld) return;
+        int id = SelectedLandRegion();
+        Eng.Call("set_river_threshold", id, v);
+        SetStatus($"{BiomeNames[id - 1]}: river threshold {v:0.###} (lower ⇒ more rivers) — Apply water to update");
+    }
+
+    // Physical climate sliders: temperature follows elevation (lapse), moisture follows the wind
+    // (orographic). Each edits the param + recomputes live (no regen).
+    private void BuildClimateSection()
+    {
+        Header("CLIMATE", open: false);
+        _target.AddChild(Dim("Physical climate (recolors live): high ground gets colder (lapse); slopes facing the wind get wetter while their lee dries out (orographic)."));
+        Slider("Lapse rate", 0, 1.5, 0.05, 0.6, v =>
+        {
+            if (_world == null) return;
+            _world.LapseRate = (float)v;
+            _world.RecomputeClimate();
+            _minimap?.Refresh();
+        });
+        Slider("Orographic strength", 0, 1, 0.05, 0.45, v =>
+        {
+            if (_world == null) return;
+            _world.OrographicStrength = (float)v;
+            _world.RecomputeClimate();
+            _minimap?.Refresh();
+        });
+        Slider("Wind direction (°)", 0, 360, 5, 0, v =>
+        {
+            if (_world == null) return;
+            _world.WindDeg = (float)v;
+            _world.RecomputeClimate();
+            _minimap?.Refresh();
+        });
     }
 
     private void BuildPaletteEditor()
@@ -616,6 +762,18 @@ public partial class DhceDock : ScrollContainer
         }
         _target.AddChild(vegGrid);
 
+        _target.AddChild(Dim("Appears in biomes (none ticked = any):"));
+        var biomeGrid = new GridContainer { Columns = 2 };
+        _slotBiome = new CheckBox[BiomeNames.Length];
+        for (int i = 0; i < BiomeNames.Length; i++)
+        {
+            var cb = new CheckBox { Text = BiomeNames[i] };
+            cb.Toggled += _ => { var s = SelectedSlot(); if (s != null && !_loadingSlot) s.BiomeMask = BiomeMaskFromChecks(); };
+            _slotBiome[i] = cb;
+            biomeGrid.AddChild(cb);
+        }
+        _target.AddChild(biomeGrid);
+
         _slotInstances = new CheckBox { Text = "Bake as individual instances (hand-editable)" };
         _slotInstances.Toggled += on => { var s = SelectedSlot(); if (s != null && !_loadingSlot) s.BakeAsInstances = on; };
         _target.AddChild(_slotInstances);
@@ -636,6 +794,13 @@ public partial class DhceDock : ScrollContainer
     {
         int m = 0;
         for (int i = 0; i < _slotVeg.Length; i++) if (_slotVeg[i].ButtonPressed) m |= 1 << i;
+        return m;
+    }
+
+    private int BiomeMaskFromChecks()
+    {
+        int m = 0;
+        for (int i = 0; i < _slotBiome.Length; i++) if (_slotBiome[i].ButtonPressed) m |= 1 << i;
         return m;
     }
 
@@ -687,6 +852,7 @@ public partial class DhceDock : ScrollContainer
         _slotElevMin.Value = s.ElevMin;
         _slotElevMax.Value = s.ElevMax;
         for (int i = 0; i < _slotVeg.Length; i++) _slotVeg[i].ButtonPressed = (s.VegetationMask & (1 << i)) != 0;
+        for (int i = 0; i < _slotBiome.Length; i++) _slotBiome[i].ButtonPressed = (s.BiomeMask & (1 << i)) != 0;
         _slotInstances.ButtonPressed = s.BakeAsInstances;
         _slotVisEnd.Value = s.VisibilityEndM;
         _loadingSlot = false;

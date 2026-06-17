@@ -14,11 +14,25 @@
 use crate::fluid::{self, LiquidField, LiquidSurface};
 use crate::mesh::Mesh;
 use crate::scatter::Instance;
-use crate::{biomes, elevation, geometry, scatter, streams, volumetric};
+use crate::{elevation, geometry, rainfall, regionmap, regions, scatter, streams, volumetric};
 use std::collections::HashMap;
 
 /// Channel-carve depth per unit tool intensity (Course tool).
 const CHANNEL_DEPTH_GAIN: f64 = 6.0;
+/// Auto-river bank taper (the "rivers dig in" fix): each pass spreads this fraction of a channel cell's
+/// carve depth onto its neighbours (max-combined), and this many passes set the valley half-width — so
+/// a river is a sloped V-valley a few cells wide rather than a one-cell vertical slot. Only the channel
+/// cells take water; the lowered banks stay dry land.
+const RIVER_BANK_SPREAD: f64 = 0.6;
+const RIVER_BANK_PASSES: usize = 3;
+/// Shoreline grading (the "cliffs at the water edge" fix): after water is placed, dry land within
+/// `SHORE_GRADE_M` of any waterline is capped to a gentle ramp rising `SHORE_RISE_PER_M` (normalized
+/// elevation per metre) from the water surface — so a high region beside filled water eases down to the
+/// shore instead of standing as a sheer wall. ~0.0004/m ≈ 34° at the editor's 1667 m/unit; the ~1 km
+/// reach fully grades even a ~600 m cliff. Only protrusions *above* the ramp are shaved (valleys/low
+/// land untouched), and the cap never drops below the water, so no new flooding.
+const SHORE_RISE_PER_M: f64 = 0.0004;
+const SHORE_GRADE_M: f64 = 1000.0;
 /// Thin water laid down per unit tool intensity as a Course stroke is painted.
 const COURSE_WATER_GAIN: f64 = 3.0;
 /// Per-region color smoothing: passes + blend toward the neighbour mean (softens hard
@@ -47,7 +61,8 @@ pub const VIEW_REGION: u8 = 5;
 const SHAPE_JAG_FREQ: f64 = 22.0;
 const SHAPE_JAG_AMP: f64 = 0.30;
 const SHAPE_RELIEF_FREQ: f64 = 7.0;
-const SHAPE_RELIEF_AMP: f64 = 0.18;
+const SHAPE_RELIEF_AMP: f64 = 0.26; // mid-freq rolling hills — raised so relief reads over the
+                                    // (now-compressed) per-region base steps; rides `ShapeStrength`
 const SHAPE_EROSION_PASSES: usize = 3;
 const SHAPE_EROSION_W: f64 = 0.5;
 const SHAPE_JAG_SALT: u64 = 0x9E37_79B9_7F4A_7C15;
@@ -63,6 +78,18 @@ const ELEV_MAX: f64 = 1.5;
 const DEFAULT_CHUNK_SIZE_M: f64 = 256.0;
 /// Lower bound on a settable chunk size — keeps the chunk grid from exploding on a bad input.
 const MIN_CHUNK_SIZE_M: f64 = 32.0;
+/// Canon build defaults: how wide (world metres) the region **base-elevation trunk** grades across
+/// territory borders (Pass 2), and how wide the seeded **traits** taper across them (Pass 3b). The
+/// trunk grades broadly so macro relief has no cliffs; traits taper more tightly for crisp identity.
+const DEFAULT_BASE_BLEND_M: f64 = 900.0;
+const DEFAULT_TRANSITION_WIDTH_M: f64 = 300.0;
+/// Climate-derivation defaults (ADR — the climate links). `LAPSE_RATE`: temperature drop per unit
+/// normalized elevation above sea (mountains cold). `OROGRAPHIC_STRENGTH`: how strongly the
+/// windward-wet / lee-dry rainfall field pulls moisture off its regional baseline. `MOISTURE_NOISE_AMP`:
+/// spread of the moisture baseline around the region preset (varied, but region-centred).
+const DEFAULT_LAPSE_RATE: f64 = 0.6;
+const DEFAULT_OROGRAPHIC_STRENGTH: f64 = 0.45;
+const MOISTURE_NOISE_AMP: f64 = 0.5;
 
 /// The authored world: generation output plus every interactive edit applied on top.
 pub struct World {
@@ -77,16 +104,25 @@ pub struct World {
     neighbors: Vec<Vec<u32>>,
     field: LiquidField,
     sea_level: f64,
-    biome_r: Vec<u8>,
-    /// Per-cell **named-Region** membership (the canon places; `0` = unassigned, `1..=BIOME_COUNT`).
-    /// A distinct tier from `biome_r` (a Region may span biomes); painted via [`paint_region`] and
-    /// shown by `VIEW_REGION` in the Region's accent. Persisted; the seam future per-region level
-    /// slicing cuts on.
+    /// Climate-derivation params (the physical drivers behind the temperature/moisture traits).
+    /// `lapse_rate` cools high ground (elevation→temperature); `orographic_strength` weights the
+    /// windward-wet / lee-dry rainfall into moisture; `wind` is the prevailing-wind vector (the
+    /// front-end supplies `[cosθ, sinθ]`, so the core stays transcendental-free). See [`derive_climate`].
+    lapse_rate: f64,
+    orographic_strength: f64,
+    wind: [f64; 2],
+    /// Per-cell **canon region** id (`0` = ocean, `1..=REGION_COUNT`). The authoritative tier: it is
+    /// both the territory partition AND the biome (1:1 with the canon places). Set by the canon
+    /// layout at [`build`], edited via [`paint_region`]/[`assign_region`], shown by `VIEW_REGION` in
+    /// the region's accent. Persisted; the seam future per-region level slicing cuts on.
     region_r: Vec<u8>,
+    /// Optional imported region-map override `(ids, cols, rows)` — a PNG the front-end resolved to a
+    /// region-id grid. When `Some`, [`build`] samples it instead of the built-in canon anchors.
+    region_layout_override: Option<(Vec<u8>, usize, usize)>,
     /// Representative swatch colour per Region preset (its `--mk-*` accent); for `biome_color_of`.
     biome_color: Vec<[f32; 3]>,
-    /// The 7 shared base palettes (editable in the colour editor), indexed by `biomes::fam::*`.
-    base_palettes: Vec<biomes::BasePalette>,
+    /// The 7 shared base palettes (editable in the colour editor), indexed by `regions::fam::*`.
+    base_palettes: Vec<regions::BasePalette>,
     // Per-cell trait fields (the trait-composition model; ADR 0004). Ground colour resolves from
     // these via `cell_color`; the landform traits feed the (later) shaping pass.
     jaggedness_r: Vec<f64>,
@@ -111,6 +147,14 @@ pub struct World {
     biome_landform: Vec<[f32; 4]>,
     /// Per-biome water profile: raininess, rain_shadow, evaporation, flow, ocean_depth.
     biome_water: Vec<[f32; 5]>,
+    /// Per-Region lake-fill threshold (normalized basin depth), id `1..=REGION_COUNT`. The slider-
+    /// tunable knob [`fill_lakes`](World::fill_lakes) reads; seeded from the moisture-tied
+    /// [`regions::default_lake_min_depth`].
+    region_lake_depth: Vec<f64>,
+    /// Per-Region river threshold (fraction of the basin's peak flow a cell must carry to become a
+    /// trunk river), id `1..=REGION_COUNT` — the river-tier mirror of `region_lake_depth`, seeded from
+    /// [`regions::default_river_threshold`] and read by [`generate_rivers`](World::generate_rivers).
+    region_river_threshold: Vec<f64>,
     /// True where the user manually set a region's biome — protected from auto-reclassify.
     biome_locked: Vec<bool>,
     /// True where the user painted a Course (main-river) stroke — the stream seed mask.
@@ -118,6 +162,11 @@ pub struct World {
     /// Per-region elevation lowering currently applied by the last stream pass, so a
     /// re-run restores then re-carves (idempotent + adapts to edits in between).
     stream_carve: Vec<f64>,
+    /// True where [`fill_lakes`] ponded a **perched lake** this pass (a closed basin above the sea) —
+    /// the lake-tier cell mask read by [`connect_lake_outlets`] to find each lake's spill. Recomputed
+    /// from the terrain each `fill_lakes`, so (unlike the transient `field` water, which also holds
+    /// rivers and the ocean) it is stable across re-runs and excludes flowing channels.
+    lake_mask: Vec<bool>,
     /// Per-cell elevation delta (signed) applied by the last [`shape_terrain`] pass. Restored then
     /// recomputed each run, so re-shaping is idempotent and adapts to edits made in between.
     shape_delta: Vec<f64>,
@@ -134,6 +183,10 @@ pub struct World {
     /// Edge length of a rendering chunk in world metres (see [`set_chunk_size_m`]); the chunk grid
     /// is `ceil(dim / chunk_size_m)` tiles each side. Set before [`build`]; defaults sensibly.
     chunk_size_m: f64,
+    /// Width (world metres) the per-region **base-elevation trunk** grades across territory borders at
+    /// [`build`] — i.e. how soft the macro relief steps between regions are. Set before [`build`] (see
+    /// [`set_base_blend_m`]); defaults to [`DEFAULT_BASE_BLEND_M`]. Wider ⇒ gentler transitions.
+    base_blend_m: f64,
     /// Dimensions of the (square) chunk grid; `chunk id = gy * chunk_cols + gx`. Both 0
     /// until [`build`] partitions the mesh. Stored so the front-end can map the camera to
     /// visible tiles (render-distance streaming) without re-deriving the layout.
@@ -177,16 +230,24 @@ impl World {
     /// An empty world with per-biome profiles seeded from the roster. Call [`build`]
     /// before any other operation.
     pub fn new() -> World {
-        let roster = biomes::roster();
-        let mut biome_color = vec![[0.5f32, 0.5, 0.5]; biomes::BIOME_COUNT + 1];
-        let mut biome_landform = vec![[0.0f32; 4]; biomes::BIOME_COUNT + 1];
-        let mut biome_water = vec![[0.0f32; 5]; biomes::BIOME_COUNT + 1];
+        let roster = regions::region_presets();
+        let mut biome_color = vec![[0.5f32, 0.5, 0.5]; regions::REGION_COUNT + 1];
+        let mut biome_landform = vec![[0.0f32; 4]; regions::REGION_COUNT + 1];
+        let mut biome_water = vec![[0.0f32; 5]; regions::REGION_COUNT + 1];
         for (i, b) in roster.iter().enumerate() {
             biome_color[i + 1] = b.representative();
             let t = &b.traits;
             biome_landform[i + 1] = [t.jaggedness, t.relief, t.foothill_falloff, t.erosion];
             let w = &b.water;
             biome_water[i + 1] = [w.raininess, w.rain_shadow, w.evaporation, w.flow, w.ocean_depth];
+        }
+        let mut region_lake_depth = vec![0.0f64; regions::REGION_COUNT + 1];
+        for (i, slot) in region_lake_depth.iter_mut().enumerate() {
+            *slot = regions::default_lake_min_depth(i as u8);
+        }
+        let mut region_river_threshold = vec![0.0f64; regions::REGION_COUNT + 1];
+        for (i, slot) in region_river_threshold.iter_mut().enumerate() {
+            *slot = regions::default_river_threshold(i as u8);
         }
         World {
             width: 0.0,
@@ -198,10 +259,13 @@ impl World {
             neighbors: Vec::new(),
             field: LiquidField::new(0),
             sea_level: 0.0,
-            biome_r: Vec::new(),
+            lapse_rate: DEFAULT_LAPSE_RATE,
+            orographic_strength: DEFAULT_OROGRAPHIC_STRENGTH,
+            wind: rainfall::WIND,
             region_r: Vec::new(),
+            region_layout_override: None,
             biome_color,
-            base_palettes: biomes::base_palettes().to_vec(),
+            base_palettes: regions::base_palettes().to_vec(),
             jaggedness_r: Vec::new(),
             relief_r: Vec::new(),
             foothill_falloff_r: Vec::new(),
@@ -217,9 +281,12 @@ impl World {
             moisture_base: Vec::new(),
             biome_landform,
             biome_water,
+            region_lake_depth,
+            region_river_threshold,
             biome_locked: Vec::new(),
             course_mask: Vec::new(),
             stream_carve: Vec::new(),
+            lake_mask: Vec::new(),
             shape_delta: Vec::new(),
             grid_cell: 0.0,
             grid_cols: 0,
@@ -229,6 +296,7 @@ impl World {
             region_chunks: Vec::new(),
             chunk_dirty: Vec::new(),
             chunk_size_m: DEFAULT_CHUNK_SIZE_M,
+            base_blend_m: DEFAULT_BASE_BLEND_M,
             chunk_cols: 0,
             chunk_rows: 0,
             color_cache: Vec::new(),
@@ -246,58 +314,63 @@ impl World {
         }
     }
 
-    /// Build mesh + per-region elevation over `[0,width] × [0,height]` at `spacing`,
-    /// seeded by `seed` with `octaves` of noise. Auto-classifies biomes and re-applies
-    /// the stored sea level so water tracks the new terrain.
+    /// Build the **canon map** over `[0,width] × [0,height]` at `spacing`, seeded by `seed`/`octaves`:
+    /// region layout (anchors or an imported PNG) → territories → region-guided elevation → trait
+    /// seeding (Region → Traits) → border blend, then re-applies the stored sea level so the ocean +
+    /// Great Lake track the new terrain.
     pub fn build(&mut self, width: f64, height: f64, spacing: f64, seed: u64, octaves: u32) {
         let mesh = Mesh::new(width, height, spacing, seed);
         let nr = mesh.num_regions();
         self.seed = seed;
-        self.elevation_r = elevation::assign_region_elevation(&mesh, width, height, seed, octaves);
+        self.width = width;
+        self.height = height;
         self.neighbors = mesh.region_neighbors();
         self.field = LiquidField::new(nr);
-        self.biome_locked = vec![false; nr];
         self.course_mask = vec![false; nr];
         self.stream_carve = vec![0.0; nr];
+        self.lake_mask = vec![false; nr];
         self.shape_delta = vec![0.0; nr];
+
+        // --- Canon-map pipeline (ADR 0004 / the canon-map generator) ---------------------------
+        // Pass 1 — region layout (territories): a built-in canonical anchor map, or an injected
+        // PNG-derived id grid override. 0 = ocean, 1..=REGION_COUNT = a canon region. This single
+        // field IS the territory partition and the authoritative region/biome tier.
+        let region_ids = self.canon_region_ids(&mesh, width, height);
+        self.region_r = region_ids.clone();
+        // Regions are *authored*, not auto-classified → lock every cell so terrain edits never
+        // reclassify them away (`reclassify` then no-ops across the canon map).
+        self.biome_locked = vec![true; nr];
+
+        // Pass 2 — region-guided elevation: a diffused per-region base trunk + low-freq noise +
+        // a banded ocean rim. Then flood the ocean + the Great Lake basin to the stored sea level.
+        self.elevation_r = elevation::assign_region_elevation_canon(
+            &mesh, width, height, seed, octaves, &region_ids, &self.neighbors, self.base_blend_m,
+        );
         fluid::sea_fill(&mut self.field, &self.elevation_r, self.sea_level);
 
-        // Auto-classify biomes from elevation + moisture + distance-from-center.
-        let cx = width * 0.5;
-        let cy = height * 0.5;
-        let max_d = 0.5 * (width * width + height * height).sqrt();
-        // Pure per-region map → parallel (bit-identical to serial; `mb[r]` depends only on `r`).
-        let elev = &self.elevation_r;
-        let mb: Vec<(f64, u8)> = crate::util::par_map(nr, |r| {
-            let p = mesh.pos_of_r(r);
-            let dist = ((p[0] - cx).powi(2) + (p[1] - cy).powi(2)).sqrt() / max_d;
-            let moist = biomes::moisture_at(p[0], p[1], width, height, seed);
-            (moist, biomes::classify(elev[r], moist, dist))
-        });
-        self.moisture_r = mb.iter().map(|m| m.0).collect();
-        self.biome_r = mb.iter().map(|m| m.1).collect();
-        self.region_r = vec![0u8; nr]; // named-Region tier starts unassigned; authored via paint_region
-
-        // Seed the per-cell trait fields from each cell's classified Region preset (the author
-        // paints/edits over this). `moisture_r` keeps its noise value (more varied than the preset).
-        // Pure per-region preset lookup → parallel; the per-field split below is cheap serial.
-        let biome = &self.biome_r;
-        let tr: Vec<biomes::CellTraits> = crate::util::par_map(nr, |r| biomes::default_traits_for(biome[r]));
+        // Pass 3 — biome pass (Region → Traits): seed each cell's trait primitives from its region
+        // preset. temperature & moisture are then *replaced* by the physical climate derivation (3b).
+        let region = &self.region_r;
+        let tr: Vec<regions::CellTraits> = crate::util::par_map(nr, |r| regions::default_traits_for(region[r]));
         self.jaggedness_r = tr.iter().map(|t| t.jaggedness as f64).collect();
         self.relief_r = tr.iter().map(|t| t.relief as f64).collect();
         self.foothill_falloff_r = tr.iter().map(|t| t.foothill_falloff as f64).collect();
         self.erosion_r = tr.iter().map(|t| t.erosion as f64).collect();
         self.temperature_r = tr.iter().map(|t| t.temperature as f64).collect();
+        self.moisture_r = tr.iter().map(|t| t.moisture as f64).collect();
         self.vegetation_r = tr.iter().map(|t| t.vegetation).collect();
         self.palette_family_r = tr.iter().map(|t| t.palette_family).collect();
-        // The painted base starts equal to the seeded fields (nothing painted yet); the brushes
-        // keep base + live in step, and `blend_traits` diffuses live from base.
+        // Painted base for the landform traits (the climate bases are set by `derive_climate`).
         self.jaggedness_base = self.jaggedness_r.clone();
         self.relief_base = self.relief_r.clone();
         self.foothill_falloff_base = self.foothill_falloff_r.clone();
         self.erosion_base = self.erosion_r.clone();
-        self.temperature_base = self.temperature_r.clone();
-        self.moisture_base = self.moisture_r.clone();
+
+        // Pass 3b — climate (physical traits): elevation→temperature (lapse) + orographic→moisture,
+        // with the region presets as biases. Uses `self.width/height/seed` (set at the top) for the
+        // moisture-noise lookup; sets `temperature_r`/`moisture_r` and their painted bases.
+        let positions: Vec<[f64; 2]> = crate::util::par_map(nr, |r| mesh.pos_of_r(r));
+        self.derive_climate(&positions);
 
         // Spatial grid for O(brush) brush queries (keeps painting fast at high detail).
         let grid_cell = (width.max(height) / 64.0).max(1.0);
@@ -315,13 +388,18 @@ impl World {
         self.grid_rows = rows;
         self.grid = grid;
 
-        self.width = width;
-        self.height = height;
         self.mesh = Some(mesh);
 
         // Partition into rendering chunks and cache smoothed colors for them.
         self.build_chunks();
-        self.color_cache = self.region_color();
+        // Pass 3b — neighbour-aware taper: diffuse the seeded traits across territory borders
+        // (blended transitions) from the base snapshots; this also caches the smoothed colours.
+        self.blend_traits(DEFAULT_TRANSITION_WIDTH_M);
+        // `blend_traits` flags every chunk dirty; a fresh build has nothing to re-tessellate yet
+        // (chunks stream/tessellate on demand), so clear the flags so the first edit reads clean.
+        for d in self.chunk_dirty.iter_mut() {
+            *d = false;
+        }
         // Liquid render caches (smoothed surface + wet mask), recomputed lazily on first request.
         self.liquid_surf_cache = vec![0.0; nr];
         self.liquid_wet_cache = vec![false; nr];
@@ -332,6 +410,31 @@ impl World {
         self.liquid_active_flag = vec![false; nr];
         self.liquid_delta = vec![0.0; nr];
         self.liquid_touched_flag = vec![false; nr];
+    }
+
+    /// Inject a region-map override: a front-end-resolved id grid (a region-coloured PNG matched to
+    /// the 14 region accents + ocean, row 0 = north). The next [`build`] samples this instead of the
+    /// built-in canon anchors. An empty/ill-sized grid clears the override.
+    pub fn set_region_layout(&mut self, ids: &[u8], cols: usize, rows: usize) {
+        if cols == 0 || rows == 0 || ids.len() < cols * rows {
+            self.region_layout_override = None;
+        } else {
+            self.region_layout_override = Some((ids.to_vec(), cols, rows));
+        }
+    }
+
+    /// Drop any imported region-map override → [`build`] reverts to the built-in canon anchors.
+    pub fn clear_region_layout(&mut self) {
+        self.region_layout_override = None;
+    }
+
+    /// Resolve the per-cell region ids for [`build`]: the imported PNG grid if one is set, else the
+    /// built-in canonical anchor layout.
+    fn canon_region_ids(&self, mesh: &Mesh, width: f64, height: f64) -> Vec<u8> {
+        match &self.region_layout_override {
+            Some((ids, cols, rows)) => regionmap::layout_from_grid(mesh, width, height, ids, *cols, *rows),
+            None => regionmap::layout_from_anchors(mesh, width, height),
+        }
     }
 
     pub fn region_count(&self) -> usize {
@@ -360,12 +463,60 @@ impl World {
     /// Deterministic decoration instances (rocks/trees); `density` 0..1.
     pub fn scatter_instances(&self, exaggeration: f64, density: f64, seed: u64) -> Vec<Instance> {
         match &self.mesh {
-            Some(mesh) => scatter::scatter(seed, mesh, &self.elevation_r, &self.biome_r, exaggeration, density),
+            Some(mesh) => scatter::scatter(seed, mesh, &self.elevation_r, &self.region_r, exaggeration, density),
             None => Vec::new(),
         }
     }
 
     // --- liquid simulation ---
+
+    /// Lowest authored elevation across the world (normalized); `0.0` before [`build`]. Lets the
+    /// front-end seat a default sea level a fixed height above the terrain's deepest basin.
+    pub fn min_elevation(&self) -> f64 {
+        if self.elevation_r.is_empty() {
+            return 0.0;
+        }
+        self.elevation_r.iter().copied().fold(f64::INFINITY, f64::min)
+    }
+
+    /// Largest height a dry cell stands above an adjacent **standing-water** surface (ocean or perched
+    /// lake) across a real mesh edge — the "shore wall" height (normalized elevation; multiply by the
+    /// render exaggeration for metres). `0` if there are no such shore edges. The honest shore-cliff
+    /// measure ([`grade_shorelines`] eases these; it walks the mesh adjacency, unlike a coarse grid
+    /// sample). Rivers are excluded — their cross-section is the bank taper, not a shore. Water surface
+    /// = the sea level for ocean cells, else the lake cell's `elevation + depth`.
+    pub fn max_water_edge_drop(&self) -> f32 {
+        let n = self.elevation_r.len();
+        if self.neighbors.len() != n {
+            return 0.0;
+        }
+        let sea = self.sea_level;
+        let lake = |r: usize| self.lake_mask.get(r).copied().unwrap_or(false);
+        let wet = |r: usize| self.elevation_r[r] <= sea || lake(r);
+        let surf = |r: usize| {
+            if self.elevation_r[r] <= sea {
+                sea
+            } else {
+                self.elevation_r[r] + self.field.depth[r]
+            }
+        };
+        let mut mx = 0.0f64;
+        for r in 0..n {
+            if wet(r) {
+                continue;
+            }
+            for &nbu in &self.neighbors[r] {
+                let w = nbu as usize;
+                if wet(w) {
+                    let d = self.elevation_r[r] - surf(w);
+                    if d > mx {
+                        mx = d;
+                    }
+                }
+            }
+        }
+        mx as f32
+    }
 
     /// Fill every region below `level` with water (instant sea + lakes).
     pub fn set_sea_level(&mut self, level: f64) {
@@ -378,6 +529,124 @@ impl World {
     pub fn rain(&mut self, amount: f64) {
         fluid::add_rain(&mut self.field, &self.elevation_r, self.sea_level, amount);
         self.mark_all_liquid_changed();
+    }
+
+    /// Deposit climate-driven rainfall: a per-cell field derived from each biome's water profile
+    /// (raininess / rain-shadow / evaporation) plus the per-cell moisture / temperature traits and
+    /// an orographic term (terrain rising into the prevailing wind rains more; the lee sits in
+    /// shadow). Run [`step_fluid`](World::step_fluid) afterwards to let it pool and drain.
+    pub fn apply_rainfall(&mut self) {
+        let n = self.elevation_r.len();
+        if n == 0 || self.mesh.is_none() {
+            return;
+        }
+        let positions: Vec<[f64; 2]> = {
+            let mesh = self.mesh.as_ref().unwrap();
+            (0..n).map(|r| mesh.pos_of_r(r)).collect()
+        };
+        let rain = rainfall::compute_rainfall(
+            &self.elevation_r,
+            &self.moisture_r,
+            &self.temperature_r,
+            &self.region_r,
+            &self.biome_water,
+            &positions,
+            &self.neighbors,
+            self.sea_level,
+            self.wind,
+        );
+        fluid::add_rain_field(&mut self.field, &self.elevation_r, self.sea_level, &rain);
+        self.mark_all_liquid_changed();
+    }
+
+    // --- climate derivation (the physical drivers behind temperature + moisture) ---
+
+    /// Derive the **physical** temperature + moisture traits from the current elevation, the region
+    /// presets (as biases), and the climate params:
+    /// - **#1 elevation→temperature (lapse):** `temperature = region_temp − lapse·max(0, elevation)`,
+    ///   so high ground is colder and snow caps / treelines emerge.
+    /// - **#2 orographic→moisture:** a regional moisture baseline (region preset + noise) shifted by
+    ///   the windward-wet / lee-dry rainfall field ([`rainfall::compute_rainfall`]).
+    ///
+    /// Sets `temperature_r`/`moisture_r` and their painted bases. Deterministic: `par_map` + lerp /
+    /// clamp + the transcendental-free rainfall pass; the max-normalise is an order-independent fold.
+    /// The cycle (rain needs moisture, moisture needs rain) is broken by feeding the *baseline*
+    /// moisture into the rainfall pass and folding the rainfall *output* into the final moisture.
+    fn derive_climate(&mut self, positions: &[[f64; 2]]) {
+        let n = self.elevation_r.len();
+        if n == 0 || self.neighbors.len() != n {
+            return;
+        }
+        let (width, height, seed, lapse) = (self.width, self.height, self.seed, self.lapse_rate);
+        let region = &self.region_r;
+        let elev = &self.elevation_r;
+        // #1 — temperature lapse (region preset is the bias / "latitude").
+        let temperature: Vec<f64> = crate::util::par_map(n, |r| {
+            let base = regions::default_traits_for(region[r]).temperature as f64;
+            (base - lapse * elev[r].max(0.0)).clamp(0.0, 1.0)
+        });
+        // Moisture baseline: region preset (bias) + noise variety, centred on the region.
+        let base_moist: Vec<f64> = crate::util::par_map(n, |r| {
+            let base = regions::default_traits_for(region[r]).moisture as f64;
+            let noise = regions::moisture_at(positions[r][0], positions[r][1], width, height, seed);
+            (base + (noise - 0.5) * MOISTURE_NOISE_AMP).clamp(0.0, 1.0)
+        });
+        // #2 — orographic rainfall → moisture (baseline moisture feeds in; the output shifts it).
+        let rain = rainfall::compute_rainfall(
+            &self.elevation_r, &base_moist, &temperature, &self.region_r, &self.biome_water,
+            positions, &self.neighbors, self.sea_level, self.wind,
+        );
+        let max_rain = rain.iter().copied().fold(0.0_f64, f64::max);
+        let w = self.orographic_strength;
+        let moisture: Vec<f64> = if max_rain > 0.0 {
+            crate::util::par_map(n, |r| {
+                let rain_norm = rain[r] / max_rain;
+                (base_moist[r] * (1.0 - w) + rain_norm * w).clamp(0.0, 1.0)
+            })
+        } else {
+            base_moist
+        };
+        self.temperature_r = temperature;
+        self.moisture_r = moisture;
+        self.temperature_base = self.temperature_r.clone();
+        self.moisture_base = self.moisture_r.clone();
+    }
+
+    /// Re-derive temperature + moisture from the current climate params + elevation, then re-taper +
+    /// recolour — the live path behind the climate sliders (no full regen). No-op before [`build`].
+    pub fn recompute_climate(&mut self) {
+        let n = self.elevation_r.len();
+        let positions: Vec<[f64; 2]> = match &self.mesh {
+            Some(m) if m.num_regions() == n => (0..n).map(|r| m.pos_of_r(r)).collect(),
+            _ => return,
+        };
+        self.derive_climate(&positions);
+        self.blend_traits(DEFAULT_TRANSITION_WIDTH_M); // re-tapers from the new bases + recolours
+    }
+
+    /// Temperature lapse strength (°/elevation). Re-run [`recompute_climate`] to apply.
+    pub fn set_lapse_rate(&mut self, v: f64) {
+        self.lapse_rate = v.max(0.0);
+    }
+    pub fn lapse_rate(&self) -> f64 {
+        self.lapse_rate
+    }
+    /// Orographic weight (0..1): how strongly windward-wet / lee-dry rainfall pulls moisture off its
+    /// regional baseline. Re-run [`recompute_climate`] to apply.
+    pub fn set_orographic_strength(&mut self, v: f64) {
+        self.orographic_strength = v.clamp(0.0, 1.0);
+    }
+    pub fn orographic_strength(&self) -> f64 {
+        self.orographic_strength
+    }
+    /// Set the prevailing wind vector (the front-end supplies `[cosθ, sinθ]`, keeping the core
+    /// transcendental-free). Normalised; a zero vector falls back to the default west→east.
+    pub fn set_wind(&mut self, wx: f64, wy: f64) {
+        let len = (wx * wx + wy * wy).sqrt();
+        self.wind = if len > 1e-9 { [wx / len, wy / len] } else { rainfall::WIND };
+    }
+    pub fn wind(&self) -> [f64; 2] {
+        self.wind
     }
 
     /// Advance the hydraulic solver `substeps` relaxation steps.
@@ -467,6 +736,117 @@ impl World {
     pub fn clear_liquid(&mut self) {
         self.field.clear();
         self.mark_all_liquid_changed();
+    }
+
+    /// Deposit **perched lakes**: standing water in every closed basin whose pour-point surface sits
+    /// *above* the global sea level, filled to that pour point via the priority-flood. This is the
+    /// lake tier of the two-tier water model: the ocean is `set_sea_level` (a single global surface);
+    /// lakes/ponds perch in highland basins, held by their ring like a real lake (e.g. Lake Tahoe),
+    /// independent of the ocean.
+    ///
+    /// The ponding **threshold** is per-cell: each cell takes its **Region's** lake-fill depth
+    /// ([`region_lake_depth_of`]) — itself seeded from the region's moisture trait and slider-tunable —
+    /// modulated by the cell's **local moisture** (wetter cells pond with shallower basins). So a basin
+    /// must be deeper than its region+trait threshold to hold water; shallower dips stay dry, which is
+    /// what gates terrain noise out of arid regions while letting Marsh/Great-Lake pond readily.
+    ///
+    /// It is a **static** fill (like the sea): it renders but does not wake the relaxation sim, which
+    /// — with no inflow — would drain a pour-point lake over its spill. Run after the ocean
+    /// `set_sea_level`; re-run if the sea level or a region threshold changes.
+    pub fn fill_lakes(&mut self) {
+        let n = self.elevation_r.len();
+        let num_boundary = match &self.mesh {
+            Some(m) => m.num_boundary_regions(),
+            None => return,
+        };
+        if self.neighbors.len() != n {
+            return;
+        }
+        // Reset the perched-lake mask: it records exactly the basins ponded this pass (the lake tier),
+        // recomputed from terrain so [`connect_lake_outlets`] reads a clean, river-free, re-run-stable set.
+        if self.lake_mask.len() != n {
+            self.lake_mask = vec![false; n];
+        } else {
+            for v in self.lake_mask.iter_mut() {
+                *v = false;
+            }
+        }
+        let filled = streams::fill_depressions(&self.elevation_r, &self.neighbors, num_boundary);
+        for r in num_boundary..n {
+            if !filled[r].is_finite() {
+                continue;
+            }
+            let lake = filled[r] - self.elevation_r[r];
+            // A perched lake: a closed basin whose water surface is above the ocean. (Ocean cells
+            // drain to the boundary ⇒ filled ≈ terrain ⇒ skipped; their water is `sea_fill`'s.)
+            if lake <= 0.0 || filled[r] <= self.sea_level {
+                continue;
+            }
+            // Threshold = the cell's Region default/slider, modulated by its local moisture trait.
+            let region = self.region_r.get(r).copied().unwrap_or(0) as usize;
+            let base = self.region_lake_depth.get(region).copied().unwrap_or(0.05);
+            let moisture = self.moisture_r.get(r).copied().unwrap_or(0.5).clamp(0.0, 1.0);
+            let factor = (1.4 - 0.8 * moisture).max(0.1); // dry 1.4× … wet 0.6× (centred at 0.5 → 1×)
+            if lake > base * factor {
+                // Pond depth, capped per Region (Marsh stays shallow); liquid kind per Region (Volcanic
+                // calderas pond lava, everywhere else water).
+                let depth = lake.min(regions::region_pond_cap(region as u8));
+                self.field.depth[r] = depth.max(self.field.depth[r]);
+                self.field.kind[r] = regions::default_liquid_kind(region as u8);
+                self.lake_mask[r] = true;
+            }
+        }
+        // Render the new water, but leave the sim asleep (a static fill, like the sea).
+        self.liquid_cache_dirty = true;
+        for d in self.liquid_chunk_dirty.iter_mut() {
+            *d = true;
+        }
+    }
+
+    /// Region `id`'s lake-fill threshold (normalized basin depth); `0` if out of range.
+    pub fn region_lake_depth_of(&self, id: usize) -> f64 {
+        self.region_lake_depth.get(id).copied().unwrap_or(0.0)
+    }
+    /// Set region `id`'s lake-fill threshold (clamped ≥ 0). Re-run [`fill_lakes`] to apply.
+    pub fn set_region_lake_depth(&mut self, id: usize, value: f64) {
+        if let Some(v) = self.region_lake_depth.get_mut(id) {
+            *v = value.max(0.0);
+        }
+    }
+    /// Export the per-Region lake-depth table (one threshold per region id) for save/load.
+    pub fn region_lake_depth_export(&self) -> Vec<f32> {
+        self.region_lake_depth.iter().map(|&v| v as f32).collect()
+    }
+    /// Restore the per-Region lake-depth table.
+    pub fn set_region_lake_depth_table(&mut self, vals: &[f32]) {
+        for (i, v) in self.region_lake_depth.iter_mut().enumerate() {
+            if i < vals.len() {
+                *v = vals[i] as f64;
+            }
+        }
+    }
+
+    /// Region `id`'s river threshold (fraction of basin peak flow); `0` if out of range.
+    pub fn river_threshold_of(&self, id: usize) -> f64 {
+        self.region_river_threshold.get(id).copied().unwrap_or(0.0)
+    }
+    /// Set region `id`'s river threshold (clamped ≥ 0). Re-run [`generate_rivers`] to apply.
+    pub fn set_river_threshold(&mut self, id: usize, value: f64) {
+        if let Some(v) = self.region_river_threshold.get_mut(id) {
+            *v = value.max(0.0);
+        }
+    }
+    /// Export the per-Region river-threshold table (one threshold per region id) for save/load.
+    pub fn river_threshold_export(&self) -> Vec<f32> {
+        self.region_river_threshold.iter().map(|&v| v as f32).collect()
+    }
+    /// Restore the per-Region river-threshold table.
+    pub fn set_river_threshold_table(&mut self, vals: &[f32]) {
+        for (i, v) in self.region_river_threshold.iter_mut().enumerate() {
+            if i < vals.len() {
+                *v = vals[i] as f64;
+            }
+        }
     }
 
     // --- brush tools ---
@@ -664,10 +1044,7 @@ impl World {
         }
         // Restore the previous stream carving first, so re-running is idempotent and
         // adapts to any sculpting done in between.
-        for r in 0..n {
-            self.elevation_r[r] = (self.elevation_r[r] + self.stream_carve[r]).clamp(ELEV_MIN, ELEV_MAX);
-            self.stream_carve[r] = 0.0;
-        }
+        self.restore_stream_carve();
 
         let num_b = self.mesh.as_ref().unwrap().num_boundary_regions();
         let res = streams::accumulate(&self.elevation_r, &self.neighbors, num_b, &self.course_mask, threshold, depth_gain);
@@ -693,6 +1070,298 @@ impl World {
         self.mark_all_liquid_changed(); // streams carve channels + lay water across the map
     }
 
+    /// Un-apply the last river/stream carving (add the recorded lowering back, zero the record) so the
+    /// next carve builds from clean terrain. Shared by [`generate_streams`], [`generate_rivers`], and
+    /// [`reshape_and_reflow`] — the latter calls it *before* shaping so relief never bakes onto a
+    /// stale channel.
+    fn restore_stream_carve(&mut self) {
+        let n = self.elevation_r.len();
+        if self.stream_carve.len() != n {
+            self.stream_carve = vec![0.0; n];
+            return;
+        }
+        for r in 0..n {
+            self.elevation_r[r] = (self.elevation_r[r] + self.stream_carve[r]).clamp(ELEV_MIN, ELEV_MAX);
+            self.stream_carve[r] = 0.0;
+        }
+    }
+
+    /// Grow **trunk rivers** automatically from the whole-map drainage — no painted seed needed. Every
+    /// land cell carrying at least its Region's share of the peak flow becomes a river (plus any painted
+    /// Course). Flow is **moisture-weighted**, so valleys in wetter regions run bigger — the climate
+    /// tie. `depth_gain` scales channel depth with `sqrt(flow)`. Idempotent (restore-then-recarve via
+    /// `stream_carve`); shares that buffer with [`generate_streams`], so run one or the other in a pass,
+    /// not both. The per-region cutoff is [`river_threshold_of`](World::river_threshold_of).
+    pub fn generate_rivers(&mut self, depth_gain: f64) {
+        if self.mesh.is_none() {
+            return;
+        }
+        let n = self.elevation_r.len();
+        if self.stream_carve.len() != n {
+            self.stream_carve = vec![0.0; n];
+        }
+        if self.course_mask.len() != n {
+            self.course_mask = vec![false; n];
+        }
+        // Build from clean terrain so a re-run adapts to any reshaping/sculpting in between.
+        self.restore_stream_carve();
+
+        let num_b = self.mesh.as_ref().unwrap().num_boundary_regions();
+        // Moisture weight: a dry floor (so even arid catchments route) plus a wet boost — rivers grow
+        // where the orographic-moisture climate is wetter.
+        let weight: Vec<f64> = (0..n)
+            .map(|r| 0.25 + self.moisture_r.get(r).copied().unwrap_or(0.5).clamp(0.0, 1.0))
+            .collect();
+        let dr = streams::drainage(&self.elevation_r, &self.neighbors, num_b, Some(&weight));
+
+        // Peak flow over land sets the scale the per-region thresholds are relative to.
+        let mut max_flow = 1.0f64;
+        for r in num_b..n {
+            if self.elevation_r[r] > self.sea_level && dr.flow[r] > max_flow {
+                max_flow = dr.flow[r];
+            }
+        }
+
+        // Raw per-cell channel depth for every river cell (painted Course, or flow past its region cutoff).
+        let mut carve = vec![0.0f64; n];
+        let mut is_river = vec![false; n];
+        for r in num_b..n {
+            let painted = self.course_mask.get(r).copied().unwrap_or(false);
+            let land = self.elevation_r[r] > self.sea_level;
+            let region = self.region_r.get(r).copied().unwrap_or(0) as usize;
+            let thr = self.river_threshold_of(region) * max_flow;
+            if !(painted || (land && dr.flow[r] >= thr)) {
+                continue;
+            }
+            let nf = (dr.flow[r] / max_flow).clamp(0.0, 1.0).sqrt();
+            carve[r] = streams::MIN_STREAM_DEPTH + depth_gain * nf;
+            is_river[r] = true;
+        }
+        // Taper the banks: max-spread a decaying fraction of each channel's depth onto its neighbours so
+        // the cross-section is a sloped V-valley a few cells wide, not a one-cell vertical slot. Serial +
+        // double-buffered ⇒ deterministic and thread-invariant (the cross-target contract).
+        if self.neighbors.len() == n {
+            for _ in 0..RIVER_BANK_PASSES {
+                let mut next = carve.clone();
+                for r in num_b..n {
+                    let mut m = carve[r];
+                    for &nb in &self.neighbors[r] {
+                        let v = carve[nb as usize] * RIVER_BANK_SPREAD;
+                        if v > m {
+                            m = v;
+                        }
+                    }
+                    next[r] = m;
+                }
+                carve = next;
+            }
+        }
+        // Apply: lower terrain by the (tapered) carve, record the actual drop so a re-run restores then
+        // re-carves (idempotent), and lay shallow water in the channel cells only — the banks stay dry.
+        let mut touched: Vec<u32> = Vec::new();
+        for r in num_b..n {
+            let cd = carve[r];
+            if cd <= 0.0 {
+                continue;
+            }
+            let before = self.elevation_r[r];
+            let after = (before - cd).clamp(ELEV_MIN, ELEV_MAX);
+            self.stream_carve[r] = before - after; // record the actual lowering
+            self.elevation_r[r] = after;
+            if is_river[r] {
+                // Fill most of the (now-shallow) channel so the river reads as visible water rather than a
+                // dry trench — surface sits just below the banks. Capped so a big trunk can't pool absurdly.
+                let wt = ((before - after) * 0.8).min(0.05);
+                if self.field.depth[r] < wt {
+                    self.field.depth[r] = wt;
+                }
+                self.field.kind[r] = 0; // water
+            }
+            touched.push(r as u32);
+        }
+
+        self.reclassify(&touched);
+        self.after_edit(&touched);
+        self.mark_all_liquid_changed(); // rivers carve channels + lay water across the map
+    }
+
+    /// Make every lake drain visibly: find each lake's spill (pour-point) cell and force its outlet —
+    /// the downstream receiver chain from the spill until it meets the ocean or an already-wet river —
+    /// to be a thin carved channel. Run **after** [`fill_lakes`] so the lake mask is current; without
+    /// it a lake whose outflow sits just under the river threshold would pool with no visible exit.
+    /// The carve is recorded into `stream_carve`, so [`reshape_and_reflow`] un-does it on a re-run.
+    pub fn connect_lake_outlets(&mut self) {
+        if self.mesh.is_none() {
+            return;
+        }
+        let n = self.elevation_r.len();
+        if self.neighbors.len() != n {
+            return;
+        }
+        let num_b = self.mesh.as_ref().unwrap().num_boundary_regions();
+        if self.stream_carve.len() != n {
+            self.stream_carve = vec![0.0; n];
+        }
+        // The perched-lake mask recorded by `fill_lakes` (terrain-derived, so it excludes rivers/ocean
+        // and is identical on a re-run). Cloned because the walk below mutates `self`.
+        let lake_mask = if self.lake_mask.len() == n {
+            self.lake_mask.clone()
+        } else {
+            return; // no lakes recorded yet — nothing to connect
+        };
+        let dr = streams::drainage(&self.elevation_r, &self.neighbors, num_b, None);
+        let spills = streams::lake_spill_cells(&dr.receiver, &lake_mask);
+
+        let mut touched: Vec<u32> = Vec::new();
+        for &spill in &spills {
+            // Walk downstream from the spill's receiver toward the ocean, carving a thin channel
+            // through each dry outlet cell until the chain joins the river network or another lake.
+            // Gate on `stream_carve` (zeroed at the start of every river pass) rather than the
+            // persistent water depth, so a re-run via `reshape_and_reflow` re-carves the same cells
+            // (idempotent — water depth survives a restore but `stream_carve` does not).
+            let mut r = dr.receiver[spill];
+            let mut guard = 0usize;
+            while r >= num_b && self.elevation_r[r] > self.sea_level && guard < n {
+                guard += 1;
+                if self.stream_carve[r] > 0.0 || lake_mask[r] {
+                    break; // reached the river network (or another lake) — the outlet already connects
+                }
+                let before = self.elevation_r[r];
+                let after = (before - streams::MIN_STREAM_DEPTH).clamp(ELEV_MIN, ELEV_MAX);
+                self.stream_carve[r] += before - after;
+                self.elevation_r[r] = after;
+                self.field.depth[r] = ((before - after) * 0.5).min(0.2).max(self.field.depth[r]);
+                self.field.kind[r] = 0; // water
+                touched.push(r as u32);
+                let next = dr.receiver[r];
+                if next == r {
+                    break;
+                }
+                r = next;
+            }
+        }
+
+        if !touched.is_empty() {
+            self.reclassify(&touched);
+            self.after_edit(&touched);
+            self.mark_all_liquid_changed();
+        }
+    }
+
+    /// The unified relief + hydrology pass, run in the one correct, idempotent order so a fresh Generate
+    /// (or any re-Apply) yields a complete watershed on shaped terrain:
+    /// **un-carve → shape relief → carve rivers → fill lakes → connect outlets.** Un-carving first is
+    /// what lets [`shape_terrain`] read clean terrain (never baking relief onto a stale channel); rivers
+    /// then carve the shaped terrain, lakes pond behind the carved outlets, and the outlets are forced
+    /// continuous. Call after the sea level is set (the river land-gate needs it). `shape_strength` is
+    /// the relief gain (1.0 nominal); `depth_gain` scales river channel depth.
+    pub fn reshape_and_reflow(&mut self, shape_strength: f64, depth_gain: f64) {
+        self.restore_stream_carve();
+        self.shape_terrain(shape_strength);
+        self.generate_rivers(depth_gain);
+        self.fill_lakes();
+        self.connect_lake_outlets();
+        self.grade_shorelines();
+    }
+
+    /// Ease dry land down to the waterline at every shore — the "cliffs at the water edge" fix. The wide
+    /// base grade rounds *low* shores, but a high region beside filled water floods only to its lowest
+    /// rim, leaving the higher shore as a sheer wall *above* the surface. This caps dry land within
+    /// [`SHORE_GRADE_M`] of any water to a gentle ramp (`water_surface + SHORE_RISE_PER_M · distance`)
+    /// via a multi-source breadth-first walk out from the water. Only protrusions above the ramp are
+    /// shaved (valleys/low land untouched); the cap never drops below the water surface, so it lays no
+    /// new water. The shave is recorded into `stream_carve`, so it's restored-then-recomputed on a
+    /// re-run alongside the river/outlet carving (idempotent). Run **after** the water is placed (it is
+    /// the last step of [`reshape_and_reflow`], and the live sea-level path re-runs it after re-flowing).
+    /// Serial BFS + serial apply ⇒ deterministic and thread-invariant (the cross-target contract).
+    pub fn grade_shorelines(&mut self) {
+        let n = self.elevation_r.len();
+        if n == 0 || self.neighbors.len() != n || self.lake_mask.len() != n {
+            return;
+        }
+        let num_b = match &self.mesh {
+            Some(m) => m.num_boundary_regions(),
+            None => return,
+        };
+        if self.stream_carve.len() != n {
+            self.stream_carve = vec![0.0; n];
+        }
+        let sea = self.sea_level;
+        // Water surface to grade toward, from terrain-only (idempotent) sources — NOT the accumulated
+        // `depth` field, which drifts across re-runs (it only ever grows by `max`). Seeds are the standing
+        // water bodies only: the ocean (`elev ≤ sea`, surface = sea level) and perched lakes (`lake_mask`,
+        // surface = the priority-flood pour level `fill_lakes` used). Rivers are deliberately excluded —
+        // their cross-section is the job of the bank taper, and grading a mountain valley's river down to
+        // its banks would flatten the mountains beside it (and a dry river *bank* isn't water anyway).
+        let filled = streams::fill_depressions(&self.elevation_r, &self.neighbors, num_b);
+        let mut dist = vec![u32::MAX; n];
+        let mut wlevel = vec![f64::INFINITY; n];
+        let mut frontier: Vec<u32> = Vec::new();
+        for r in 0..n {
+            let ocean = self.elevation_r[r] <= sea;
+            let lake = self.lake_mask[r];
+            if ocean || lake {
+                dist[r] = 0;
+                wlevel[r] = if ocean {
+                    sea
+                } else if filled[r].is_finite() {
+                    filled[r]
+                } else {
+                    self.elevation_r[r]
+                };
+                frontier.push(r as u32);
+            }
+        }
+        if frontier.is_empty() {
+            return;
+        }
+        let pitch = (self.width * self.height / n as f64).sqrt().max(1.0);
+        let max_rings = (SHORE_GRADE_M / pitch).round().clamp(1.0, 4096.0) as u32;
+        // BFS outward: each dry cell takes the nearest water's surface (ties → the lower surface, the
+        // gentler grade). First reach assigns its ring; same-ring re-reaches only lower `wlevel`.
+        let mut ring = 0u32;
+        while !frontier.is_empty() && ring < max_rings {
+            ring += 1;
+            let mut next: Vec<u32> = Vec::new();
+            for &ru in &frontier {
+                let wl = wlevel[ru as usize];
+                for &nbu in &self.neighbors[ru as usize] {
+                    let nb = nbu as usize;
+                    if dist[nb] < ring {
+                        continue; // wet (0) or assigned an earlier ring
+                    }
+                    if dist[nb] == ring {
+                        if wl < wlevel[nb] {
+                            wlevel[nb] = wl;
+                        }
+                        continue;
+                    }
+                    dist[nb] = ring; // first reach at this ring
+                    wlevel[nb] = wl;
+                    next.push(nbu);
+                }
+            }
+            frontier = next;
+        }
+        // Shave each in-band dry cell down to the ramp (only where it stands above it).
+        let mut touched: Vec<u32> = Vec::new();
+        for r in 0..n {
+            if dist[r] == 0 || dist[r] == u32::MAX {
+                continue; // wet, or beyond the grading band
+            }
+            let cap = wlevel[r] + SHORE_RISE_PER_M * (dist[r] as f64 * pitch);
+            let before = self.elevation_r[r];
+            if before > cap {
+                let after = cap.clamp(ELEV_MIN, ELEV_MAX);
+                self.stream_carve[r] += before - after; // restored-then-recomputed on re-run
+                self.elevation_r[r] = after;
+                touched.push(r as u32);
+            }
+        }
+        self.reclassify(&touched);
+        self.after_edit(&touched);
+    }
+
     // --- biomes ---
 
     /// Assign `biome_id` (1..=14) to every region under `(cx, cy)` within `radius`,
@@ -711,7 +1380,7 @@ impl World {
             let p = mesh.pos_of_r(ri);
             let dv = self.elevation_r[ri] * bexag - bhy; // 3D sphere: vertical term
             if (p[0] - cx).powi(2) + (p[1] - cy).powi(2) + dv * dv < r2 {
-                self.biome_r[ri] = biome_id;
+                self.region_r[ri] = biome_id;
                 if ri < self.biome_locked.len() {
                     self.biome_locked[ri] = true; // manual paint — protect from reclassify
                 }
@@ -797,9 +1466,9 @@ impl World {
         if let Some(a) = self.biome_landform.get_mut(region_id as usize) {
             a[idx] = value as f32;
         }
-        let n = self.biome_r.len();
+        let n = self.region_r.len();
         for r in 0..n {
-            if self.biome_r[r] != region_id {
+            if self.region_r[r] != region_id {
                 continue;
             }
             match idx {
@@ -872,7 +1541,7 @@ impl World {
         if self.mesh.is_none() {
             return Vec::new();
         }
-        let tr = biomes::default_traits_for(biome_id);
+        let tr = regions::default_traits_for(biome_id);
         let r2 = radius * radius;
         let candidates = self.brush_candidates(cx, cy, radius);
         let (bexag, bhy) = (self.brush_exag, self.brush_hit_y);
@@ -903,8 +1572,8 @@ impl World {
                     self.temperature_base[ri] = tr.temperature as f64;
                     self.moisture_base[ri] = self.moisture_r[ri];
                 }
-                if ri < self.biome_r.len() {
-                    self.biome_r[ri] = biome_id;
+                if ri < self.region_r.len() {
+                    self.region_r[ri] = biome_id;
                 }
                 if ri < self.biome_locked.len() {
                     self.biome_locked[ri] = true;
@@ -1010,6 +1679,48 @@ impl World {
         for d in self.chunk_dirty.iter_mut() {
             *d = true;
         }
+    }
+
+    /// Locally blend the scalar trait fields within the brush footprint — the **transition brush**.
+    /// A drag across a biome seam softens just the cells under the brush (Laplacian passes over the
+    /// footprint only), unlike the global [`blend_traits`] bake. `blend_width_m` maps to a pass count
+    /// the same way as the global bake. Smooths the live `*_r` fields in place (strokes accumulate);
+    /// leaves the painted `*_base` snapshots untouched, so a later global blend still grades from the
+    /// original paints. Returns the cells touched (for the front-end's dirty repaint).
+    pub fn blend_brush(&mut self, cx: f64, cy: f64, radius: f64, blend_width_m: f64) -> Vec<u32> {
+        let n = self.elevation_r.len();
+        if self.mesh.is_none() || n == 0 || self.neighbors.len() != n {
+            return Vec::new();
+        }
+        let r2 = radius * radius;
+        let candidates = self.brush_candidates(cx, cy, radius);
+        let (bexag, bhy) = (self.brush_exag, self.brush_hit_y);
+        let mut footprint: Vec<u32> = Vec::new();
+        {
+            let mesh = self.mesh.as_ref().unwrap();
+            for &rid in &candidates {
+                let ri = rid as usize;
+                let p = mesh.pos_of_r(ri);
+                let dv = self.elevation_r[ri] * bexag - bhy; // 3D sphere: vertical term
+                if (p[0] - cx).powi(2) + (p[1] - cy).powi(2) + dv * dv < r2 {
+                    footprint.push(rid);
+                }
+            }
+        }
+        if footprint.is_empty() {
+            return footprint;
+        }
+        // Width (m) → pass count, same mapping as blend_traits (one pass ≈ one cell-ring).
+        let pitch = (self.width * self.height / n as f64).sqrt().max(1.0);
+        let iters = ((blend_width_m / pitch).round() as usize).clamp(1, MAX_BLEND_ITERS);
+        diffuse_subset(&mut self.jaggedness_r, &self.neighbors, &footprint, iters);
+        diffuse_subset(&mut self.relief_r, &self.neighbors, &footprint, iters);
+        diffuse_subset(&mut self.foothill_falloff_r, &self.neighbors, &footprint, iters);
+        diffuse_subset(&mut self.erosion_r, &self.neighbors, &footprint, iters);
+        diffuse_subset(&mut self.temperature_r, &self.neighbors, &footprint, iters);
+        diffuse_subset(&mut self.moisture_r, &self.neighbors, &footprint, iters);
+        self.after_edit(&footprint);
+        footprint
     }
 
     /// Switch the colour view (see the `VIEW_*` consts): `Natural` shows the composed terrain
@@ -1159,10 +1870,10 @@ impl World {
     }
 
     /// Human descriptor of the emergent biome at world `(x, y)` (the nearest cell's traits), e.g.
-    /// "temperate forest hills". `None` outside the map. See [`biomes::biome_label`].
+    /// "temperate forest hills". `None` outside the map. See [`regions::biome_label`].
     pub fn biome_label_at(&self, x: f64, y: f64) -> Option<String> {
         let r = self.region_at(x, y)?;
-        Some(biomes::biome_label(
+        Some(regions::biome_label(
             self.elevation_r[r],
             self.jaggedness_r.get(r).copied().unwrap_or(0.0),
             self.relief_r.get(r).copied().unwrap_or(0.0),
@@ -1328,13 +2039,13 @@ impl World {
 
     /// Biome id (1..=14, 0 = none) at a region.
     pub fn biome_at(&self, region: usize) -> u8 {
-        self.biome_r.get(region).copied().unwrap_or(0)
+        self.region_r.get(region).copied().unwrap_or(0)
     }
 
     /// Reassign a single region's biome (Select right-click); locks it from reclassify.
     pub fn set_biome_of(&mut self, region: usize, id: u8) {
-        if region < self.biome_r.len() {
-            self.biome_r[region] = id;
+        if region < self.region_r.len() {
+            self.region_r[region] = id;
             if region < self.biome_locked.len() {
                 self.biome_locked[region] = true;
             }
@@ -1344,7 +2055,7 @@ impl World {
 
     // --- named-Region tier (Stage 4): the canon places as cell-membership sets ---
 
-    /// Assign `cells` to named Region `region_id` (`0` clears; `1..=BIOME_COUNT`). Pair with
+    /// Assign `cells` to named Region `region_id` (`0` clears; `1..=REGION_COUNT`). Pair with
     /// [`regions_in_polygon`] / [`select_contiguous`] for area assignment. Recolours the touched
     /// cells (so `VIEW_REGION` updates live) and flags their chunks.
     pub fn assign_region(&mut self, cells: &[u32], region_id: u8) {
@@ -1374,11 +2085,11 @@ impl World {
     /// excluding the boundary frame.
     pub fn select_contiguous(&self, region: usize) -> Vec<u32> {
         let start = region;
-        if start >= self.biome_r.len() || self.neighbors.len() != self.biome_r.len() {
+        if start >= self.region_r.len() || self.neighbors.len() != self.region_r.len() {
             return Vec::new();
         }
-        let target = self.biome_r[start];
-        let mut seen = vec![false; self.biome_r.len()];
+        let target = self.region_r[start];
+        let mut seen = vec![false; self.region_r.len()];
         let mut stack = vec![start];
         seen[start] = true;
         let mut out = Vec::new();
@@ -1386,7 +2097,7 @@ impl World {
             out.push(r as u32);
             for &nb in &self.neighbors[r] {
                 let nb = nb as usize;
-                if seen[nb] || self.biome_r.get(nb).copied() != Some(target) {
+                if seen[nb] || self.region_r.get(nb).copied() != Some(target) {
                     continue;
                 }
                 if let Some(m) = &self.mesh {
@@ -1459,7 +2170,7 @@ impl World {
         self.elevation_r.iter().map(|&e| e as f32).collect()
     }
     pub fn biome_export(&self) -> Vec<u8> {
-        self.biome_r.clone()
+        self.region_r.clone()
     }
     pub fn liquid_depth_export(&self) -> Vec<f32> {
         self.field.depth.iter().map(|&d| d as f32).collect()
@@ -1480,8 +2191,8 @@ impl World {
         }
     }
     pub fn set_biome(&mut self, b: &[u8]) {
-        if b.len() == self.biome_r.len() {
-            self.biome_r.copy_from_slice(b);
+        if b.len() == self.region_r.len() {
+            self.region_r.copy_from_slice(b);
         }
     }
     pub fn set_liquid(&mut self, depth: &[f32], kind: &[u8]) {
@@ -1519,9 +2230,11 @@ impl World {
     pub fn region_export(&self) -> Vec<u8> {
         self.region_r.clone()
     }
-    /// Restore named-Region membership (size must match the mesh).
+    /// Restore named-Region membership (size must match the mesh). Save compat: a pre-canon save has
+    /// `region` all-zero (regions were unpainted) while its `biome` array carried the data, so an
+    /// all-ocean slice is ignored — `set_biome` (which now writes the same field) keeps that data.
     pub fn set_region(&mut self, r: &[u8]) {
-        if r.len() == self.region_r.len() {
+        if r.len() == self.region_r.len() && r.iter().any(|&v| v != 0) {
             self.region_r.copy_from_slice(r);
         }
     }
@@ -1649,23 +2362,28 @@ impl World {
     }
 
     /// Base ground colour for one region from its biome palette + elevation + moisture
-    /// (before neighbour smoothing / jitter). The shared ramp ([`biomes::ground_color`]) is
+    /// (before neighbour smoothing / jitter). The shared ramp ([`regions::ground_color`]) is
     /// what ties biomes together; per-biome tokens give identity. Neutral if unsized.
     fn cell_color(&self, r: usize) -> [f32; 3] {
         // Data views: recolour by a single field directly (heatmap), decoupled from Natural colour.
         match self.view_mode {
             VIEW_TEMPERATURE => {
-                return biomes::heat_ramp(self.temperature_r.get(r).copied().unwrap_or(0.5) as f32);
+                return regions::heat_ramp(self.temperature_r.get(r).copied().unwrap_or(0.5) as f32);
             }
             VIEW_MOISTURE => {
-                return biomes::wet_ramp(self.moisture_r.get(r).copied().unwrap_or(0.5) as f32);
+                return regions::wet_ramp(self.moisture_r.get(r).copied().unwrap_or(0.5) as f32);
             }
             VIEW_ELEVATION => {
-                return biomes::elevation_ramp(self.elevation_r.get(r).copied().unwrap_or(0.0) as f32);
+                return regions::elevation_ramp(self.elevation_r.get(r).copied().unwrap_or(0.0) as f32);
             }
             VIEW_BIOME => {
-                let id = self.biome_r.get(r).copied().unwrap_or(0) as usize;
-                return self.biome_color.get(id).copied().unwrap_or([0.5, 0.5, 0.5]);
+                // The *emergent* ecological biome, composed from the trait primitives (Traits →
+                // Biome) — distinct from VIEW_REGION, which shows the authored canon place.
+                let e = self.elevation_r.get(r).copied().unwrap_or(0.0) as f32;
+                let temp = self.temperature_r.get(r).copied().unwrap_or(0.5) as f32;
+                let moist = self.moisture_r.get(r).copied().unwrap_or(0.5) as f32;
+                let veg = self.vegetation_r.get(r).copied().unwrap_or(regions::veg::GRASS);
+                return regions::emergent_biome_color(e, temp, moist, veg);
             }
             VIEW_REGION => {
                 let id = self.region_r.get(r).copied().unwrap_or(0) as usize;
@@ -1680,13 +2398,13 @@ impl World {
         } else if !self.base_palettes.is_empty() {
             self.base_palettes[0]
         } else {
-            biomes::base_palettes()[0]
+            regions::base_palettes()[0]
         };
-        let veg = self.vegetation_r.get(r).copied().unwrap_or(biomes::veg::GRASS);
+        let veg = self.vegetation_r.get(r).copied().unwrap_or(regions::veg::GRASS);
         let e = self.elevation_r.get(r).copied().unwrap_or(0.0) as f32;
         let temp = self.temperature_r.get(r).copied().unwrap_or(0.5) as f32;
         let moist = self.moisture_r.get(r).copied().unwrap_or(0.5) as f32;
-        biomes::resolve_color(&base, veg, e, temp, moist)
+        regions::resolve_color(&base, veg, e, temp, moist)
     }
 
     /// Per-region RGB color (3 floats per region) resolved from each region's biome palette
@@ -1759,13 +2477,13 @@ impl World {
         let mesh = self.mesh.as_ref().unwrap();
         for &rid in candidates {
             let ri = rid as usize;
-            if ri >= self.biome_r.len() || self.biome_locked.get(ri).copied().unwrap_or(false) {
+            if ri >= self.region_r.len() || self.biome_locked.get(ri).copied().unwrap_or(false) {
                 continue;
             }
             let p = mesh.pos_of_r(ri);
             let dist = ((p[0] - cx).powi(2) + (p[1] - cy).powi(2)).sqrt() / max_d;
-            let moist = biomes::moisture_at(p[0], p[1], width, height, seed);
-            self.biome_r[ri] = biomes::classify(self.elevation_r[ri], moist, dist);
+            let moist = regions::moisture_at(p[0], p[1], width, height, seed);
+            self.region_r[ri] = regions::classify(self.elevation_r[ri], moist, dist);
         }
     }
 
@@ -1851,6 +2569,16 @@ impl World {
     /// Current rendering-chunk edge length, in world metres.
     pub fn chunk_size_m(&self) -> f64 {
         self.chunk_size_m
+    }
+
+    /// Set the per-region base-elevation blend width (world metres), clamped ≥ 0. Call **before**
+    /// [`build`] — the base trunk is graded during build. Wider ⇒ gentler relief steps between regions.
+    pub fn set_base_blend_m(&mut self, m: f64) {
+        self.base_blend_m = m.max(0.0);
+    }
+    /// Current per-region base-elevation blend width, in world metres.
+    pub fn base_blend_m(&self) -> f64 {
+        self.base_blend_m
     }
 
     /// Number of rendering chunks.
@@ -2170,10 +2898,20 @@ impl World {
     }
 
     /// Rule-based scatter (the N3d model-slot library): deterministic placement from authored rules
-    /// over the trait fields (vegetation / region / elevation). `Instance::species` is the slot index.
+    /// over the trait fields (vegetation / biome / region / elevation). `Instance::species` is the
+    /// slot index.
     pub fn scatter_by_rules(&self, rules: &[scatter::ScatterRule], exaggeration: f64, seed: u64) -> Vec<Instance> {
         match &self.mesh {
-            Some(mesh) => scatter::scatter_by_rules(seed, mesh, &self.elevation_r, &self.vegetation_r, &self.region_r, rules, exaggeration),
+            Some(mesh) => scatter::scatter_by_rules(
+                seed,
+                mesh,
+                &self.elevation_r,
+                &self.vegetation_r,
+                &self.region_r,
+                &self.region_r,
+                rules,
+                exaggeration,
+            ),
             None => Vec::new(),
         }
     }
@@ -2472,7 +3210,7 @@ fn ease_into(v: &mut [f64], i: usize, target: f64, w: f64) {
 /// starting from `base`. Averaging only — deterministic and convergent, with no transcendentals,
 /// so it holds the cross-target contract. A locally-constant region is a fixed point (the mean of
 /// equal neighbours is itself), so the field only changes in the bands around discontinuities.
-fn diffuse_field(base: &[f64], neighbors: &[Vec<u32>], iters: usize) -> Vec<f64> {
+pub(crate) fn diffuse_field(base: &[f64], neighbors: &[Vec<u32>], iters: usize) -> Vec<f64> {
     let n = base.len();
     let mut cur = base.to_vec();
     if iters == 0 || neighbors.len() != n {
@@ -2496,6 +3234,36 @@ fn diffuse_field(base: &[f64], neighbors: &[Vec<u32>], iters: usize) -> Vec<f64>
         std::mem::swap(&mut cur, &mut next);
     }
     cur
+}
+
+/// Laplacian-smooth only the `subset` cells of `field` in place (Jacobi iteration: each pass reads
+/// the field state from the start of that pass, so it's order-independent and deterministic).
+/// Neighbours outside the subset act as fixed anchors — that's what pulls the brushed seam toward
+/// its surroundings. Used by [`World::blend_brush`].
+fn diffuse_subset(field: &mut [f64], neighbors: &[Vec<u32>], subset: &[u32], iters: usize) {
+    if iters == 0 || subset.is_empty() {
+        return;
+    }
+    let mut new_vals = vec![0.0f64; subset.len()];
+    for _ in 0..iters {
+        for (k, &rid) in subset.iter().enumerate() {
+            let r = rid as usize;
+            let nb = &neighbors[r];
+            if nb.is_empty() {
+                new_vals[k] = field[r];
+                continue;
+            }
+            let mut sum = 0.0;
+            for &j in nb {
+                sum += field[j as usize];
+            }
+            let mean = sum / nb.len() as f64;
+            new_vals[k] = field[r] + (mean - field[r]) * BLEND_W;
+        }
+        for (k, &rid) in subset.iter().enumerate() {
+            field[rid as usize] = new_vals[k];
+        }
+    }
 }
 
 /// Fast integer hash (fmix32-style) for deterministic per-region color jitter.

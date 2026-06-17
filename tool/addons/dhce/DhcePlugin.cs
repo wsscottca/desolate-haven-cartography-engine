@@ -13,6 +13,7 @@ namespace DesolateHaven.Cartography;
 public partial class DhcePlugin : EditorPlugin
 {
     private DhceDock _dock;
+    private EditorDock _editorDock;              // Godot 4.6 dock wrapper hosting _dock (replaces AddControlToDock)
     private DhceMinimap _minimap;                // overview map, floated in the 3D viewport's top-right corner
     private DhceMapPanel _mapPanel;              // surface readouts, docked under the minimap (VIEW selector now lives in the dock)
     private readonly ToolState _tool = new();   // shared by the dock and the viewport picking
@@ -36,7 +37,12 @@ public partial class DhcePlugin : EditorPlugin
         _mapPanel.Init();
         _dock.SetMinimap(_minimap);
         _dock.Init(_tool);
-        AddControlToDock(DockSlot.RightUl, _dock);
+        // Godot 4.6: AddControlToDock is deprecated — wrap the dock Control in an EditorDock and AddDock it.
+        _editorDock = new EditorDock();
+        _editorDock.AddChild(_dock);
+        _editorDock.Title = "DHCE";
+        _editorDock.DefaultSlot = EditorDock.DockSlot.RightUl;
+        AddDock(_editorDock);
         AddMinimapOverlay(_minimap);
         AddMapPanelOverlay(_mapPanel);
         SetProcess(true);
@@ -59,10 +65,11 @@ public partial class DhcePlugin : EditorPlugin
             _mapPanel.QueueFree();
         }
         _mapPanel = null;
-        if (_dock != null)
+        if (_editorDock != null)
         {
-            RemoveControlFromDocks(_dock);
-            _dock.QueueFree();
+            RemoveDock(_editorDock);
+            _editorDock.QueueFree(); // frees the hosted DhceDock child too
+            _editorDock = null;
             _dock = null;
         }
     }
@@ -96,7 +103,20 @@ public partial class DhcePlugin : EditorPlugin
         p.OffsetTop = margin + size + gap;               // below the minimap
     }
 
+    private bool _processErrLogged; // gate so a per-frame tick bug logs once, not thousands of times
+
     public override void _Process(double delta)
+    {
+        // A throw anywhere in the tick would otherwise spam the Output panel once per frame. Catch it,
+        // log the first occurrence with its full stack, then stay quiet so the editor remains usable.
+        try { ProcessTick(); }
+        catch (System.Exception ex)
+        {
+            if (!_processErrLogged) { _processErrLogged = true; GD.PrintErr("[DHCE] _Process exception (logged once): ", ex); }
+        }
+    }
+
+    private void ProcessTick()
     {
         // The 3D viewport may not exist yet at _EnterTree; attach the overlays the first frame it does.
         if (_minimap != null && GodotObject.IsInstanceValid(_minimap) && _minimap.GetParent() == null)
@@ -114,9 +134,6 @@ public partial class DhcePlugin : EditorPlugin
         {
             if (_needRepaint) { _edited.RepaintDirtyTerrain(); _needRepaint = false; }
             if (_needLiquid) { _edited.RebuildLiquid(); _needLiquid = false; }
-            // Progressive rain runs every frame while the Rain tool is active; any other tool stops it.
-            if (_tool.Active == ToolKind.Rain) _edited.StepRain(delta);
-            else if (_edited.RainActive) _edited.StopRain();
         }
         if (world == null || !world.GenDone) return;
         var cam = GetEditorCamera();
@@ -125,8 +142,14 @@ public partial class DhcePlugin : EditorPlugin
             Vector3 ClampCore(Vector3 p) => new Vector3(
                 Mathf.Clamp(p.X, 0f, world.WorldWidthM), 0f,
                 Mathf.Clamp(p.Z, 0f, world.WorldHeightM));
-            Vector3 ground = GroundFocus(cam);                       // editor-space point the camera looks at
-            Vector3 look = ClampCore(world.ToCore(ground));          // look ring + the map marker
+            Vector3 ground = GroundFocus(cam);                       // editor-space Y=0 fallback point
+            // Look ring: raycast the *actual* terrain the camera points at, in core space. The old
+            // flat Y=0 projection overshoots far past a tall peak (then clamps to the map edge), so the
+            // look ring stopped tracking once relief got tall — chunks beyond the seed never streamed.
+            Vector3 rayO = world.ToCore(cam.GlobalPosition);
+            Vector3 rayD = -cam.GlobalTransform.Basis.Z; // forward; render-root is translation-only
+            var lookHits = world.Engine.Call("raycast_terrain", rayO, rayD, (double)world.Exaggeration).As<Vector3[]>();
+            Vector3 look = lookHits.Length > 0 ? ClampCore(lookHits[0]) : ClampCore(world.ToCore(ground));
             Vector3 camFoot = ClampCore(world.ToCore(cam.GlobalPosition)); // footprint: keeps ground under us loaded
             Vector3 brush = _lastBrushHit.HasValue ? ClampCore(_lastBrushHit.Value) : look;
             world.UpdateStreaming(camFoot, look, brush);
@@ -260,25 +283,12 @@ public partial class DhcePlugin : EditorPlugin
                 return stop;
             }
 
-            // Rain tool: a click starts progressive rainfall over the area (a drifting cloud rains down).
-            if (_tool.Active == ToolKind.Rain)
-            {
-                world.StartRain(hit, _tool.RadiusM, _tool.RainRate);
-                _painting = true;
-                _dock?.SetStatus("raining — drag to move the cloud, switch tools to stop");
-                return stop;
-            }
             _painting = true;
         }
         else // motion
         {
             var mm = (InputEventMouseMotion)@event;
             if (_tool.Active == ToolKind.RegionSelect) return pass; // Select is click-only
-            if (_tool.Active == ToolKind.Rain) // drag relocates the rain area
-            {
-                if (_painting && mm.ButtonMask.HasFlag(MouseButtonMask.Left) && onTerrain) world.MoveRain(hit, _tool.RadiusM);
-                return stop;
-            }
             if (!_painting || !mm.ButtonMask.HasFlag(MouseButtonMask.Left) || !onTerrain) return pass;
         }
 

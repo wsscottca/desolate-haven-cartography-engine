@@ -34,9 +34,10 @@ fn biome_decor(biome: u8) -> (f64, f32) {
 }
 
 /// One authored scatter rule — a model slot's placement gate (the N3d scatter library). Bitmasks:
-/// `veg_mask` over the 7 vegetation enum values (`1 << veg`), `region_mask` over Region ids 1..=14
-/// (`1 << (region-1)`); a `0` mask means "any". `density` 0..1, `scale` range in world metres, `elev`
-/// band in normalized height. `species` on the produced [`Instance`] carries the `slot` index.
+/// `veg_mask` over the 7 vegetation enum values (`1 << veg`), `biome_mask` over painted biome ids
+/// 1..=14 (`1 << (biome-1)`), `region_mask` over named-Region ids 1..=14 (`1 << (region-1)`); a `0`
+/// mask means "any". `density` 0..1, `scale` range in world metres, `elev` band in normalized height.
+/// `species` on the produced [`Instance`] carries the `slot` index.
 #[derive(Clone, Copy, Debug)]
 pub struct ScatterRule {
     pub slot: u32,
@@ -47,6 +48,7 @@ pub struct ScatterRule {
     pub elev_max: f64,
     pub veg_mask: u32,
     pub region_mask: u32,
+    pub biome_mask: u32,
 }
 
 /// Rule-based deterministic scatter: at most one instance per cell (first matching rule wins). The
@@ -58,6 +60,7 @@ pub fn scatter_by_rules(
     elevation: &[f64],
     vegetation: &[u8],
     region: &[u8],
+    biome: &[u8],
     rules: &[ScatterRule],
     exaggeration: f64,
 ) -> Vec<Instance> {
@@ -77,6 +80,7 @@ pub fn scatter_by_rules(
         let e = elevation.get(r).copied().unwrap_or(0.0);
         let veg = vegetation.get(r).copied().unwrap_or(0) as u32;
         let reg = region.get(r).copied().unwrap_or(0);
+        let bio = biome.get(r).copied().unwrap_or(0);
         for rule in rules {
             if e < rule.elev_min || e > rule.elev_max {
                 continue;
@@ -85,6 +89,9 @@ pub fn scatter_by_rules(
                 continue;
             }
             if rule.region_mask != 0 && (reg == 0 || rule.region_mask & (1 << (reg as u32 - 1)) == 0) {
+                continue;
+            }
+            if rule.biome_mask != 0 && (bio == 0 || rule.biome_mask & (1 << (bio as u32 - 1)) == 0) {
                 continue;
             }
             if roll >= rule.density {
