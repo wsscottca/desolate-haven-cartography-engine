@@ -128,6 +128,17 @@ impl DhceEngine {
     fn chunk_size_m(&self) -> f64 {
         self.world.chunk_size_m()
     }
+    /// Set the per-region base-elevation blend width (world metres). Call **before** `build`. Wider ⇒
+    /// gentler relief steps between regions.
+    #[func]
+    fn set_base_blend_m(&mut self, m: f64) {
+        self.world.set_base_blend_m(m);
+    }
+    /// Current per-region base-elevation blend width, in world metres.
+    #[func]
+    fn base_blend_m(&self) -> f64 {
+        self.world.base_blend_m()
+    }
     #[func]
     fn chunk_count(&self) -> i64 {
         self.world.chunk_count() as i64
@@ -316,6 +327,55 @@ impl DhceEngine {
     #[func]
     fn set_region_lake_depth_table(&mut self, vals: PackedFloat32Array) {
         self.world.set_region_lake_depth_table(&vals.to_vec());
+    }
+    /// Region `id`'s river threshold (fraction of basin peak flow before a cell becomes a trunk river).
+    #[func]
+    fn river_threshold_of(&self, id: i64) -> f64 {
+        self.world.river_threshold_of(id.max(0) as usize)
+    }
+    /// Set region `id`'s river threshold; re-run `generate_rivers` (or `reshape_and_reflow`) to apply.
+    #[func]
+    fn set_river_threshold(&mut self, id: i64, value: f64) {
+        self.world.set_river_threshold(id.max(0) as usize, value);
+    }
+    /// Export the per-Region river-threshold table for save/load.
+    #[func]
+    fn river_threshold_export(&self) -> PackedFloat32Array {
+        PackedFloat32Array::from(self.world.river_threshold_export().as_slice())
+    }
+    /// Restore the per-Region river-threshold table.
+    #[func]
+    fn set_river_threshold_table(&mut self, vals: PackedFloat32Array) {
+        self.world.set_river_threshold_table(&vals.to_vec());
+    }
+    /// Grow trunk rivers automatically from the whole-map (moisture-weighted) drainage, gated by the
+    /// per-region thresholds. `depth_gain` scales channel depth with flow. Nulls the liquid caches.
+    #[func]
+    fn generate_rivers(&mut self, depth_gain: f64) {
+        self.world.generate_rivers(depth_gain);
+        self.liquid = None;
+        self.liquid_chunk_cache = None;
+    }
+    /// Force every perched lake a visible outlet (run after `fill_lakes`). Nulls the liquid caches.
+    #[func]
+    fn connect_lake_outlets(&mut self) {
+        self.world.connect_lake_outlets();
+        self.liquid = None;
+        self.liquid_chunk_cache = None;
+    }
+    /// Ease dry land down to the ocean/lake waterlines (no sheer shore walls). Run after the water is
+    /// placed; the live sea-level path calls it after re-flowing so a slider move re-eases the shores.
+    #[func]
+    fn grade_shorelines(&mut self) {
+        self.world.grade_shorelines();
+    }
+    /// The unified relief + hydrology pass — shape relief, carve rivers, fill lakes, connect outlets in
+    /// the one correct, idempotent order. Call after `set_sea_level`. Nulls the liquid caches.
+    #[func]
+    fn reshape_and_reflow(&mut self, shape_strength: f64, depth_gain: f64) {
+        self.world.reshape_and_reflow(shape_strength, depth_gain);
+        self.liquid = None;
+        self.liquid_chunk_cache = None;
     }
     /// Lowest authored elevation (normalized); lets the tool seat a default sea level a fixed height
     /// above the deepest basin at generate.

@@ -260,21 +260,40 @@ pub fn region_presets() -> [RegionDef; REGION_COUNT] {
     const MK_WHITE: u32 = 0xF2F0FA;
     const MK_TEAL: u32 = 0x2E8C8C;
     const MK_GREEN: u32 = 0x5A9A4A;
+    // traits: t(jaggedness, relief, foothill_falloff, erosion, temperature, moisture, vegetation, palette_family).
+    // Tuned per the canon biome catalog (guide `lore/biome-features.md`) so each place reads distinctly while
+    // a wide `foothill_falloff` lets mountains taper into hills (the "foothills" transition). Accents + labels
+    // are canon and unchanged; only the landform/water knobs move. Liquids: Volcanic ponds lava, Marsh shallow
+    // murky pools (see `default_liquid_kind` / `region_pond_cap`).
     [
-        RegionDef { label: "Jagged Mountains",     accent: c(MK_GOLD),      traits: t(0.90, 0.70, 0.50, 0.40, 0.30, 0.40, veg::EVERGREEN, fam::STONE),   water: w(1.0, 1.3, 0.4, 0.30, 1.4) },
-        RegionDef { label: "Sacred Woods Plateau", accent: c(MK_BLUE),      traits: t(0.30, 0.50, 0.60, 0.30, 0.50, 0.60, veg::FOREST,    fam::VERDANT), water: w(1.1, 0.9, 0.5, 0.25, 1.2) },
-        RegionDef { label: "Great Lake",           accent: c(MK_BLUE),      traits: t(0.10, 0.20, 0.50, 0.20, 0.50, 0.90, veg::GRASS,     fam::VERDANT), water: w(1.2, 0.7, 0.8, 0.4, 1.8) },
-        RegionDef { label: "Temperate Forest",     accent: c(MK_WHITE),     traits: t(0.30, 0.50, 0.50, 0.30, 0.55, 0.60, veg::FOREST,    fam::VERDANT), water: w(1.1, 0.9, 0.6, 0.3, 1.2) },
-        RegionDef { label: "Open Plains",          accent: c(MK_WHITE),     traits: t(0.10, 0.30, 0.70, 0.30, 0.60, 0.40, veg::GRASS,     fam::ARID),    water: w(0.9, 1.0, 0.7, 0.2, 1.0) },
-        RegionDef { label: "Underdeep",            accent: c(MK_SILVER),    traits: t(0.40, 0.50, 0.50, 0.50, 0.45, 0.40, veg::SCRUB,     fam::STONE),   water: w(0.6, 1.2, 0.3, 0.2, 1.6) },
-        RegionDef { label: "Deep Wood",            accent: c(MK_PURPLE),    traits: t(0.30, 0.50, 0.50, 0.30, 0.50, 0.70, veg::EVERGREEN, fam::EXOTIC),  water: w(1.2, 0.8, 0.5, 0.3, 1.2) },
-        RegionDef { label: "Frozen Reaches",       accent: c(MK_LIGHTBLUE), traits: t(0.50, 0.40, 0.50, 0.40, 0.05, 0.50, veg::BARREN,    fam::FROST),   water: w(0.8, 1.1, 0.2, 0.2, 1.4) },
-        RegionDef { label: "Lost Isles",           accent: c(MK_TEAL),      traits: t(0.70, 0.30, 0.40, 0.60, 0.40, 0.50, veg::SCRUB,     fam::STONE),   water: w(1.2, 0.7, 0.8, 0.3, 1.6) },
-        RegionDef { label: "Blisterwood",          accent: c(MK_RED),       traits: t(0.50, 0.50, 0.50, 0.50, 0.70, 0.30, veg::THORN,     fam::ASHEN),   water: w(0.9, 1.0, 0.5, 0.25, 1.2) },
-        RegionDef { label: "Volcanic Scape",       accent: c(MK_ORANGE),    traits: t(0.80, 0.50, 0.40, 0.60, 0.95, 0.20, veg::BARREN,    fam::ASHEN),   water: w(0.5, 1.4, 0.3, 0.2, 1.4) },
-        RegionDef { label: "Blight Ruins",         accent: c(MK_BLACK),     traits: t(0.40, 0.40, 0.50, 0.60, 0.50, 0.40, veg::BARREN,    fam::ASHEN),   water: w(0.7, 1.1, 0.4, 0.2, 1.2) },
-        RegionDef { label: "Scattered Isles",      accent: c(MK_SILVER),    traits: t(0.30, 0.30, 0.50, 0.40, 0.55, 0.60, veg::GRASS,     fam::ARID),    water: w(1.2, 0.7, 0.9, 0.35, 1.7) },
-        RegionDef { label: "Marsh Bog",            accent: c(MK_GREEN),     traits: t(0.10, 0.30, 0.60, 0.30, 0.55, 0.95, veg::MARSH,     fam::WETLAND), water: w(1.3, 0.6, 0.7, 0.3, 1.3) },
+        // Jagged peaks above a broad green hill ring (high jaggedness + wide foothill skirt, crisp/low erosion).
+        RegionDef { label: "Jagged Mountains",     accent: c(MK_GOLD),      traits: t(0.92, 0.68, 0.75, 0.28, 0.28, 0.42, veg::EVERGREEN, fam::STONE),   water: w(1.0, 1.3, 0.4, 0.30, 1.4) },
+        // A flat-topped elevated plateau (low jaggedness, very wide skirt → table-land, not peaks).
+        RegionDef { label: "Sacred Woods Plateau", accent: c(MK_BLUE),      traits: t(0.18, 0.42, 0.82, 0.35, 0.50, 0.62, veg::FOREST,    fam::VERDANT), water: w(1.1, 0.9, 0.5, 0.25, 1.2) },
+        RegionDef { label: "Great Lake",           accent: c(MK_BLUE),      traits: t(0.10, 0.20, 0.55, 0.20, 0.50, 0.90, veg::GRASS,     fam::VERDANT), water: w(1.2, 0.7, 0.8, 0.4, 1.8) },
+        // Rolling forested hills.
+        RegionDef { label: "Temperate Forest",     accent: c(MK_WHITE),     traits: t(0.35, 0.55, 0.60, 0.30, 0.55, 0.62, veg::FOREST,    fam::VERDANT), water: w(1.1, 0.9, 0.6, 0.3, 1.2) },
+        // Big-sky flatland (very low relief, very wide skirt) — the foothill apron mountains taper into.
+        RegionDef { label: "Open Plains",          accent: c(MK_WHITE),     traits: t(0.06, 0.20, 0.85, 0.35, 0.62, 0.38, veg::GRASS,     fam::ARID),    water: w(0.9, 1.0, 0.7, 0.2, 1.0) },
+        // Rolling-hill surface over the cavern/mine network (low jaggedness, moderate relief = rolling, per canon).
+        RegionDef { label: "Underdeep",            accent: c(MK_SILVER),    traits: t(0.22, 0.55, 0.55, 0.50, 0.45, 0.42, veg::SCRUB,     fam::STONE),   water: w(0.6, 1.2, 0.3, 0.2, 1.6) },
+        // Dense old-growth on rolling ground.
+        RegionDef { label: "Deep Wood",            accent: c(MK_PURPLE),    traits: t(0.30, 0.55, 0.55, 0.30, 0.48, 0.72, veg::EVERGREEN, fam::EXOTIC),  water: w(1.2, 0.8, 0.5, 0.3, 1.2) },
+        // Frozen buttes.
+        RegionDef { label: "Frozen Reaches",       accent: c(MK_LIGHTBLUE), traits: t(0.55, 0.45, 0.50, 0.40, 0.05, 0.50, veg::BARREN,    fam::FROST),   water: w(0.8, 1.1, 0.2, 0.2, 1.4) },
+        // Tall ROUNDED rock knobs rising from the sea (high relief = tall, very low jaggedness + high erosion =
+        // smooth/rounded, narrow skirt → distinct isles). Deliberately distinct from the sharp Jagged Mountains
+        // (per the user's steer — guide canon updated to match: rounded Pandora-style rock, not jagged spires).
+        RegionDef { label: "Lost Isles",           accent: c(MK_TEAL),      traits: t(0.18, 0.88, 0.25, 0.65, 0.42, 0.55, veg::SCRUB,     fam::STONE),   water: w(1.2, 0.7, 0.9, 0.3, 2.0) },
+        RegionDef { label: "Blisterwood",          accent: c(MK_RED),       traits: t(0.55, 0.52, 0.45, 0.50, 0.70, 0.30, veg::THORN,     fam::ASHEN),   water: w(0.9, 1.0, 0.5, 0.25, 1.2) },
+        // Active volcanic peaks — jagged steep cones (narrow skirt) with lava in the calderas.
+        RegionDef { label: "Volcanic Scape",       accent: c(MK_ORANGE),    traits: t(0.88, 0.62, 0.32, 0.45, 0.95, 0.18, veg::BARREN,    fam::ASHEN),   water: w(0.5, 1.4, 0.3, 0.2, 1.4) },
+        // Grey blighted ruins — STONE family for the canon grey `--blight`, not the volcanic-red ashen.
+        RegionDef { label: "Blight Ruins",         accent: c(MK_BLACK),     traits: t(0.40, 0.42, 0.50, 0.62, 0.50, 0.38, veg::BARREN,    fam::STONE),   water: w(0.7, 1.1, 0.4, 0.2, 1.2) },
+        // Flat wet lowland threaded by water channels (low relief, wide skirt, wet) — the port city.
+        RegionDef { label: "Scattered Isles",      accent: c(MK_SILVER),    traits: t(0.10, 0.20, 0.80, 0.40, 0.58, 0.68, veg::GRASS,     fam::ARID),    water: w(1.2, 0.7, 0.7, 0.45, 1.7) },
+        // Flat sodden ground holding shallow murky pools.
+        RegionDef { label: "Marsh Bog",            accent: c(MK_GREEN),     traits: t(0.08, 0.20, 0.72, 0.30, 0.55, 0.95, veg::MARSH,     fam::WETLAND), water: w(1.3, 0.6, 0.7, 0.3, 1.3) },
     ]
 }
 
@@ -295,18 +314,23 @@ pub fn default_traits_for(region_id: u8) -> CellTraits {
 /// sea level so [`crate::fluid::sea_fill`] floods them, coastal isles sit just under. Id `0` = ocean.
 /// Starting values — tuned live in the editor. Order matches [`region_presets`] (id = index + 1).
 pub fn base_elevation_for(region_id: u8) -> f64 {
+    // Compressed land trunk: the highlands are pulled toward the lowland band (each value > 0.20
+    // mapped `0.20 + (old − 0.20)·0.55`) so regions keep their order/identity but read as mountains &
+    // hills rising from gentler ground rather than tall stepped plateaus — the within-region landform
+    // relief baked by `shape_terrain` now dominates the base steps. Lowlands/coast (≤ 0.20) and the
+    // water basins (Great Lake, ocean) are left below so `sea_fill` still floods them. Tuned live.
     match region_id {
-        1 => 0.80,  // Jagged Mountains — jagged peaks ringed by rolling hills
-        2 => 0.46,  // Sacred Woods & Plateau — an elevated plateau
+        1 => 0.53,  // Jagged Mountains — jagged peaks ringed by rolling hills (was 0.80)
+        2 => 0.34,  // Sacred Woods & Plateau — an elevated plateau (was 0.46)
         3 => -0.10, // Great Lake (perched basin — floor above the ocean, filled to its pour point)
-        4 => 0.38,  // Temperate Forest — mountainous forest band
+        4 => 0.30,  // Temperate Forest — mountainous forest band (was 0.38)
         5 => 0.08,  // Open Plains
-        6 => 0.24,  // Underdeep — rolling-hill surface
-        7 => 0.28,  // Deep Wood — old-growth lowland forest
-        8 => 0.44,  // Frozen Reaches — frozen buttes
+        6 => 0.22,  // Underdeep — rolling-hill surface (was 0.24)
+        7 => 0.24,  // Deep Wood — old-growth lowland forest (was 0.28)
+        8 => 0.33,  // Frozen Reaches — frozen buttes (was 0.44)
         9 => 0.05,  // Lost Isles (low island land — rim drowns the coast into spires)
-        10 => 0.30, // Blisterwood
-        11 => 0.62, // Volcanic Scape — active volcanic mountains
+        10 => 0.26, // Blisterwood (was 0.30)
+        11 => 0.43, // Volcanic Scape — active volcanic mountains (was 0.62)
         12 => 0.20, // Blight Ruins
         13 => 0.02, // Scattered Isles (archipelago — noise + rim break it into isles)
         14 => 0.02, // Marsh & Bog (wet lowland)
@@ -320,10 +344,56 @@ pub fn base_elevation_for(region_id: u8) -> f64 {
 /// these per region (id `1..=14`) and exposes a slider to fine-tune each; [`crate::world::World::fill_lakes`]
 /// reads the per-region value (further modulated by each cell's local moisture). Id `0` (ocean) is unused.
 pub fn default_lake_min_depth(region_id: u8) -> f64 {
+    // Volcanic Scape ponds **lava** (see [`default_liquid_kind`]); give it a low threshold so molten pools
+    // gather in the calderas even though it's arid (the moisture rule would otherwise resist ponding).
+    if region_id == 11 {
+        return 0.03;
+    }
     let moisture = default_traits_for(region_id).moisture as f64; // 0 dry … 1 wet
     // moisture 1 → 0.004 (ponds readily); moisture 0 → 0.18 (only deep basins hold water).
     const LO: f64 = 0.004;
     const HI: f64 = 0.18;
+    HI + (LO - HI) * moisture.clamp(0.0, 1.0)
+}
+
+/// The liquid a Region's ponded basins fill with (see [`crate::liquids::LiquidType`], stored as `u8`):
+/// the **Volcanic Scape** fills with lava/magma, every other Region with water. Read by
+/// [`crate::world::World::fill_lakes`] so a fresh map shows molten calderas in the volcanic land.
+pub fn default_liquid_kind(region_id: u8) -> u8 {
+    match region_id {
+        11 => crate::liquids::LiquidType::Lava as u8, // Volcanic Scape
+        _ => crate::liquids::LiquidType::Water as u8,
+    }
+}
+
+/// Cap on a Region's ponded depth (normalized) — `f64::INFINITY` for a normal lake/pour-point fill.
+/// The **Marsh & Bog** caps shallow so its pools read as shallow murky water, not deep lakes (the
+/// wetland palette already gives the murk). Read by [`crate::world::World::fill_lakes`].
+pub fn region_pond_cap(region_id: u8) -> f64 {
+    match region_id {
+        // Marsh & Bog — mostly shallow murky water, but the cap allows the canon "deeper bog pools" too
+        // (still well short of a full pour-point lake). ~0.02 ≈ 33 m at the 5 km height scale.
+        14 => 0.02,
+        _ => f64::INFINITY,
+    }
+}
+
+/// Per-Region **default river threshold** (fraction of the basin's peak flow a cell must carry before
+/// it becomes a trunk river) — the biome/trait tie for the river tier, the mirror of
+/// [`default_lake_min_depth`]. Derived from the region's moisture trait: a wet place rivers readily
+/// (low threshold ⇒ a denser network), an arid one only along the major valleys (high threshold).
+/// The editor stores these per region (id `1..=14`) and exposes a slider per region;
+/// [`crate::world::World::generate_rivers`] reads the per-region value to gate each cell. Id `0` is unused.
+pub fn default_river_threshold(region_id: u8) -> f64 {
+    // Scattered Isles is a port laced with waterways — drop its threshold so a dense channel network
+    // (not just the trunk) carves through the lowland.
+    if region_id == 13 {
+        return 0.02;
+    }
+    let moisture = default_traits_for(region_id).moisture as f64; // 0 dry … 1 wet
+    // moisture 1 → 0.02 (fine tributaries appear); moisture 0 → 0.10 (only the trunk valleys carry).
+    const LO: f64 = 0.02;
+    const HI: f64 = 0.10;
     HI + (LO - HI) * moisture.clamp(0.0, 1.0)
 }
 

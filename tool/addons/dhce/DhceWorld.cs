@@ -33,6 +33,10 @@ public partial class DhceWorld : Node3D
     [Export] public float LapseRate = 0.6f;           // climate #1: temperature drop per unit elevation (cold peaks)
     [Export] public float OrographicStrength = 0.45f; // climate #2: 0..1 windward-wet / lee-dry pull on moisture
     [Export] public float WindDeg = 0f;               // prevailing wind direction (degrees; 0 = +X, west→east)
+    [Export] public float ShapeStrength = 1.0f;       // relief gain: bakes per-region landform (mountains/hills) into terrain at Generate
+    [Export] public float RiverDepthGain = 0.015f;    // auto river channel depth: carve = 0.005 + this·sqrt(flow);
+                                                      // ~0.015 ⇒ ~8 m streams … ~35 m for the biggest trunk (shallow, natural)
+    [Export] public float BaseBlendM = 1800f;         // width (m) regions' base-elevation trunk blends — softer steps between places
 
     /// Normalized-elevation span the core clamps to (ELEV_MAX − ELEV_MIN in world.rs).
     private const float ElevSpan = 3.0f;
@@ -51,6 +55,8 @@ public partial class DhceWorld : Node3D
     private float _exaggeration;
     private float _widthM, _heightM;
     private bool _genDone;
+    private bool _streamWholeWorld;              // editor: small worlds build every chunk up-front (no camera streaming)
+    private const int WholeWorldChunkCap = 2500; // ≲ ~13 km @ 256 m — above this, fall back to per-frame streaming
     private readonly List<(int dist, int ci, bool lod)> _pending = new();
     private readonly List<Node> _scatterPreview = new(); // ephemeral N3d scatter preview nodes
     private MeshInstance3D _cavePreview;        // ephemeral N5 carved-cave preview
@@ -60,6 +66,29 @@ public partial class DhceWorld : Node3D
 
     private static readonly Color WaterColor = new Color(0.20f, 0.45f, 0.75f, 0.6f);
     private static readonly Color LavaColor = new Color(0.95f, 0.35f, 0.10f, 0.9f);
+
+    /// Region-map import key — 14 DISTINCT flat colours (index = region id) + ocean at [0]. Distinct
+    /// because several regions SHARE a `--mk-*` accent (Sacred/Great Lake, Underdeep/Scattered,
+    /// Temperate/Plains), so matching a painted map on accents can't tell those pairs apart. Paint each
+    /// region its colour below (north = top of the image); leave the sea transparent (A&lt;0.5) or navy.
+    private static readonly string[] RegionKeyHex =
+    {
+        "0c1c36", // 0  Ocean (deep navy) — or just leave transparent
+        "c7a24b", // 1  Jagged Mountains   (gold)
+        "2e5c9e", // 2  Sacred Woods & Plateau (blue)
+        "19c3c3", // 3  Great Lake         (cyan)
+        "5a9a4a", // 4  Temperate Forest   (green)
+        "e6d24a", // 5  Open Plains        (yellow)
+        "9aa0aa", // 6  Underdeep          (grey)
+        "6e5a82", // 7  Deep Wood          (purple)
+        "6fa9ce", // 8  Frozen Reaches     (light blue)
+        "2e8c8c", // 9  Lost Isles         (teal)
+        "b23a2e", // 10 Blisterwood        (red)
+        "d6883a", // 11 Volcanic Scape     (orange)
+        "3a2e4a", // 12 Blight Ruins       (dark violet)
+        "c77fa8", // 13 Scattered Isles    (pink)
+        "6e7a4b", // 14 Marsh & Bog        (olive)
+    };
 
     public GodotObject Engine => _engine;
     public float Exaggeration => _exaggeration;
@@ -133,6 +162,7 @@ public partial class DhceWorld : Node3D
         int perSide = Mathf.Max(1, Mathf.RoundToInt(WorldSizeKm * 1000f / chunk));
         _widthM = _heightM = perSide * chunk;
         _engine.Call("set_chunk_size_m", (double)chunk);
+        _engine.Call("set_base_blend_m", (double)BaseBlendM); // softer per-region base-elevation steps
 
         // Centre the world on the origin: the core generates in [0, size] (origin at a corner), but the
         // editor camera looks at the origin — so shift the preview by -WorldCenter to put the world's
@@ -167,12 +197,7 @@ public partial class DhceWorld : Node3D
 
         const int RegionCount = 14;
         var refs = new Color[RegionCount + 1];
-        refs[0] = new Color(0.05f, 0.11f, 0.21f); // ocean reference (canon water-deep)
-        for (int id = 1; id <= RegionCount; id++)
-        {
-            float[] c = _engine.Call("biome_color_of", id).As<float[]>();
-            refs[id] = (c is { Length: >= 3 }) ? new Color(c[0], c[1], c[2]) : new Color(0.5f, 0.5f, 0.5f);
-        }
+        for (int id = 0; id <= RegionCount; id++) refs[id] = new Color(RegionKeyHex[id]);
 
         int imgW = img.GetWidth(), imgH = img.GetHeight();
         int cols = Mathf.Min(imgW, 256), rows = Mathf.Min(imgH, 256);
@@ -229,7 +254,7 @@ public partial class DhceWorld : Node3D
         _rows = grid.Y;
         _sx = _sy = (float)_engine.Call("chunk_size_m").As<double>(); // fixed tile size
         int n = _engine.Call("chunk_count").As<int>();
-        GD.Print($"[DHCE] regions={_engine.Call("region_count")} chunks={n} grid={_cols}x{_rows} tile={_sx:0}m gen {genMs:0} ms");
+        GD.Print($"[DHCE] gen world={WorldSizeKm}km render={RenderDistance} cpf={ChunksPerFrame} regions={_engine.Call("region_count")} chunks={n} grid={_cols}x{_rows} tile={_sx:0}m {genMs:0}ms");
 
         // Lazy nodes: only the in-range ring is instantiated (in BuildChunk), so the live node count
         // tracks the visible area, not the whole map — a 20 km world at 256 m is ~6 000 tile *slots*
@@ -250,9 +275,26 @@ public partial class DhceWorld : Node3D
             float minElev = (float)_engine.Call("min_elevation").As<double>();
             SeaLevelNorm = minElev + 1000f / _exaggeration;
             _engine.Call("set_sea_level", (double)SeaLevelNorm);
-            _engine.Call("fill_lakes"); // perched lakes/ponds, per-Region thresholds
+            // Unified relief + hydrology pass: bake the per-region landform (mountains/hills), then carve
+            // rivers, pond perched lakes behind their carved outlets, and connect each lake's outflow —
+            // one coherent watershed on shaped terrain. (Load() restores the baked result instead.)
+            _engine.Call("reshape_and_reflow", (double)ShapeStrength, (double)RiverDepthGain);
         }
-        UpdateStreaming(WorldCenter); // seed the centre so something shows immediately
+        // Iteration-sized worlds: build every chunk up-front so the 3D view shows the *whole* authored
+        // world (like the minimap) and never depends on per-frame streaming — which a C# hot-reload can
+        // leave stuck (the recurring "only the centre loads" sliver). Larger worlds still stream.
+        _streamWholeWorld = n <= WholeWorldChunkCap;
+        if (_streamWholeWorld) BuildAllChunks();
+        else UpdateStreaming(WorldCenter); // seed the centre so something shows immediately
+    }
+
+    /// Build every chunk slot at full detail (editor whole-world view for small maps). One up-front cost
+    /// at Generate instead of camera-driven streaming, so the preview is complete and reload-proof.
+    private void BuildAllChunks()
+    {
+        if (_chunks == null) return;
+        for (int i = 0; i < _chunks.Length; i++)
+            if (!_built[i]) BuildChunk(i, false); // full TIN, no LOD
     }
 
     private void ClearChunks()
@@ -282,6 +324,7 @@ public partial class DhceWorld : Node3D
     public void UpdateStreaming(Vector3 camPos, Vector3 lookFocus, Vector3 brush)
     {
         if (!_genDone || _chunks == null) return;
+        if (_streamWholeWorld) return; // small world: every chunk is already built, nothing to stream/free
         int maxGx = Mathf.Max(_cols - 1, 0), maxGy = Mathf.Max(_rows - 1, 0);
         int CellX(float x) => Mathf.Clamp((int)(x / _sx), 0, maxGx);
         int CellY(float z) => Mathf.Clamp((int)(z / _sy), 0, maxGy);
@@ -424,7 +467,13 @@ public partial class DhceWorld : Node3D
         SeaLevelNorm = (float)level;
         if (_engine == null) return;
         _engine.Call("set_sea_level", level);
-        _engine.Call("fill_lakes"); // re-pond perched lakes (per-Region thresholds) at the new ocean level
+        // Re-flow the watershed at the new ocean level (relief is unchanged, so no reshape): re-carve
+        // rivers on the current terrain, re-pond lakes behind them, and reconnect the outlets.
+        _engine.Call("generate_rivers", (double)RiverDepthGain);
+        _engine.Call("fill_lakes"); // per-Region thresholds
+        _engine.Call("connect_lake_outlets");
+        _engine.Call("grade_shorelines"); // ease the shores down (else a slider move re-cliffs them)
+        RepaintDirtyTerrain(); // rivers carve terrain → re-tessellate affected tiles
         RebuildLiquid();
     }
 
@@ -532,7 +581,7 @@ public partial class DhceWorld : Node3D
         return new DhceWorldState
         {
             Seed = Seed, WorldSizeKm = WorldSizeKm, SpacingM = SpacingM, Octaves = Octaves,
-            TerrainHeightKm = TerrainHeightKm, ChunkSizeM = ChunkSizeM, SeaLevel = SeaLevelNorm,
+            TerrainHeightKm = TerrainHeightKm, ChunkSizeM = ChunkSizeM, BaseBlendM = BaseBlendM, SeaLevel = SeaLevelNorm,
             LapseRate = LapseRate, OrographicStrength = OrographicStrength, WindDeg = WindDeg,
             Elevation = _engine.Call("elevation_export").As<float[]>(),
             Biome = _engine.Call("biome_export").As<byte[]>(),
@@ -546,6 +595,7 @@ public partial class DhceWorld : Node3D
             BasePalettes = _engine.Call("base_palettes_export").As<float[]>(),
             RegionLandform = _engine.Call("region_landform_export").As<float[]>(),
             RegionLakeDepth = _engine.Call("region_lake_depth_export").As<float[]>(),
+            RegionRiverThreshold = _engine.Call("river_threshold_export").As<float[]>(),
         };
     }
 
@@ -554,7 +604,7 @@ public partial class DhceWorld : Node3D
     {
         if (s == null) return;
         Seed = s.Seed; WorldSizeKm = s.WorldSizeKm; SpacingM = s.SpacingM; Octaves = s.Octaves;
-        TerrainHeightKm = s.TerrainHeightKm; ChunkSizeM = s.ChunkSizeM;
+        TerrainHeightKm = s.TerrainHeightKm; ChunkSizeM = s.ChunkSizeM; BaseBlendM = s.BaseBlendM;
         LapseRate = s.LapseRate; OrographicStrength = s.OrographicStrength; WindDeg = s.WindDeg;
         _loadingState = true;
         Generate(); // deterministic mesh + chunk slots from the params (skips the default sea level)
@@ -581,6 +631,7 @@ public partial class DhceWorld : Node3D
         SetF("set_base_palettes", s.BasePalettes);
         SetF("set_region_landform_table", s.RegionLandform);
         SetF("set_region_lake_depth_table", s.RegionLakeDepth); // per-Region lake thresholds (saved liquid already holds the lakes)
+        SetF("set_river_threshold_table", s.RegionRiverThreshold); // per-Region river thresholds (saved liquid already holds the rivers)
         _engine.Call("refresh_colors");
         for (int i = 0; i < _built.Length; i++) if (_built[i]) BuildChunk(i, _chunkLod[i] == 1); // re-tessellate the meshed ring
     }

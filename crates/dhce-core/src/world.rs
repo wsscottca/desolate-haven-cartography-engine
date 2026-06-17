@@ -19,6 +19,20 @@ use std::collections::HashMap;
 
 /// Channel-carve depth per unit tool intensity (Course tool).
 const CHANNEL_DEPTH_GAIN: f64 = 6.0;
+/// Auto-river bank taper (the "rivers dig in" fix): each pass spreads this fraction of a channel cell's
+/// carve depth onto its neighbours (max-combined), and this many passes set the valley half-width — so
+/// a river is a sloped V-valley a few cells wide rather than a one-cell vertical slot. Only the channel
+/// cells take water; the lowered banks stay dry land.
+const RIVER_BANK_SPREAD: f64 = 0.6;
+const RIVER_BANK_PASSES: usize = 3;
+/// Shoreline grading (the "cliffs at the water edge" fix): after water is placed, dry land within
+/// `SHORE_GRADE_M` of any waterline is capped to a gentle ramp rising `SHORE_RISE_PER_M` (normalized
+/// elevation per metre) from the water surface — so a high region beside filled water eases down to the
+/// shore instead of standing as a sheer wall. ~0.0004/m ≈ 34° at the editor's 1667 m/unit; the ~1 km
+/// reach fully grades even a ~600 m cliff. Only protrusions *above* the ramp are shaved (valleys/low
+/// land untouched), and the cap never drops below the water, so no new flooding.
+const SHORE_RISE_PER_M: f64 = 0.0004;
+const SHORE_GRADE_M: f64 = 1000.0;
 /// Thin water laid down per unit tool intensity as a Course stroke is painted.
 const COURSE_WATER_GAIN: f64 = 3.0;
 /// Per-region color smoothing: passes + blend toward the neighbour mean (softens hard
@@ -47,7 +61,8 @@ pub const VIEW_REGION: u8 = 5;
 const SHAPE_JAG_FREQ: f64 = 22.0;
 const SHAPE_JAG_AMP: f64 = 0.30;
 const SHAPE_RELIEF_FREQ: f64 = 7.0;
-const SHAPE_RELIEF_AMP: f64 = 0.18;
+const SHAPE_RELIEF_AMP: f64 = 0.26; // mid-freq rolling hills — raised so relief reads over the
+                                    // (now-compressed) per-region base steps; rides `ShapeStrength`
 const SHAPE_EROSION_PASSES: usize = 3;
 const SHAPE_EROSION_W: f64 = 0.5;
 const SHAPE_JAG_SALT: u64 = 0x9E37_79B9_7F4A_7C15;
@@ -136,6 +151,10 @@ pub struct World {
     /// tunable knob [`fill_lakes`](World::fill_lakes) reads; seeded from the moisture-tied
     /// [`regions::default_lake_min_depth`].
     region_lake_depth: Vec<f64>,
+    /// Per-Region river threshold (fraction of the basin's peak flow a cell must carry to become a
+    /// trunk river), id `1..=REGION_COUNT` — the river-tier mirror of `region_lake_depth`, seeded from
+    /// [`regions::default_river_threshold`] and read by [`generate_rivers`](World::generate_rivers).
+    region_river_threshold: Vec<f64>,
     /// True where the user manually set a region's biome — protected from auto-reclassify.
     biome_locked: Vec<bool>,
     /// True where the user painted a Course (main-river) stroke — the stream seed mask.
@@ -143,6 +162,11 @@ pub struct World {
     /// Per-region elevation lowering currently applied by the last stream pass, so a
     /// re-run restores then re-carves (idempotent + adapts to edits in between).
     stream_carve: Vec<f64>,
+    /// True where [`fill_lakes`] ponded a **perched lake** this pass (a closed basin above the sea) —
+    /// the lake-tier cell mask read by [`connect_lake_outlets`] to find each lake's spill. Recomputed
+    /// from the terrain each `fill_lakes`, so (unlike the transient `field` water, which also holds
+    /// rivers and the ocean) it is stable across re-runs and excludes flowing channels.
+    lake_mask: Vec<bool>,
     /// Per-cell elevation delta (signed) applied by the last [`shape_terrain`] pass. Restored then
     /// recomputed each run, so re-shaping is idempotent and adapts to edits made in between.
     shape_delta: Vec<f64>,
@@ -159,6 +183,10 @@ pub struct World {
     /// Edge length of a rendering chunk in world metres (see [`set_chunk_size_m`]); the chunk grid
     /// is `ceil(dim / chunk_size_m)` tiles each side. Set before [`build`]; defaults sensibly.
     chunk_size_m: f64,
+    /// Width (world metres) the per-region **base-elevation trunk** grades across territory borders at
+    /// [`build`] — i.e. how soft the macro relief steps between regions are. Set before [`build`] (see
+    /// [`set_base_blend_m`]); defaults to [`DEFAULT_BASE_BLEND_M`]. Wider ⇒ gentler transitions.
+    base_blend_m: f64,
     /// Dimensions of the (square) chunk grid; `chunk id = gy * chunk_cols + gx`. Both 0
     /// until [`build`] partitions the mesh. Stored so the front-end can map the camera to
     /// visible tiles (render-distance streaming) without re-deriving the layout.
@@ -217,6 +245,10 @@ impl World {
         for (i, slot) in region_lake_depth.iter_mut().enumerate() {
             *slot = regions::default_lake_min_depth(i as u8);
         }
+        let mut region_river_threshold = vec![0.0f64; regions::REGION_COUNT + 1];
+        for (i, slot) in region_river_threshold.iter_mut().enumerate() {
+            *slot = regions::default_river_threshold(i as u8);
+        }
         World {
             width: 0.0,
             height: 0.0,
@@ -250,9 +282,11 @@ impl World {
             biome_landform,
             biome_water,
             region_lake_depth,
+            region_river_threshold,
             biome_locked: Vec::new(),
             course_mask: Vec::new(),
             stream_carve: Vec::new(),
+            lake_mask: Vec::new(),
             shape_delta: Vec::new(),
             grid_cell: 0.0,
             grid_cols: 0,
@@ -262,6 +296,7 @@ impl World {
             region_chunks: Vec::new(),
             chunk_dirty: Vec::new(),
             chunk_size_m: DEFAULT_CHUNK_SIZE_M,
+            base_blend_m: DEFAULT_BASE_BLEND_M,
             chunk_cols: 0,
             chunk_rows: 0,
             color_cache: Vec::new(),
@@ -293,6 +328,7 @@ impl World {
         self.field = LiquidField::new(nr);
         self.course_mask = vec![false; nr];
         self.stream_carve = vec![0.0; nr];
+        self.lake_mask = vec![false; nr];
         self.shape_delta = vec![0.0; nr];
 
         // --- Canon-map pipeline (ADR 0004 / the canon-map generator) ---------------------------
@@ -308,7 +344,7 @@ impl World {
         // Pass 2 — region-guided elevation: a diffused per-region base trunk + low-freq noise +
         // a banded ocean rim. Then flood the ocean + the Great Lake basin to the stored sea level.
         self.elevation_r = elevation::assign_region_elevation_canon(
-            &mesh, width, height, seed, octaves, &region_ids, &self.neighbors, DEFAULT_BASE_BLEND_M,
+            &mesh, width, height, seed, octaves, &region_ids, &self.neighbors, self.base_blend_m,
         );
         fluid::sea_fill(&mut self.field, &self.elevation_r, self.sea_level);
 
@@ -441,6 +477,45 @@ impl World {
             return 0.0;
         }
         self.elevation_r.iter().copied().fold(f64::INFINITY, f64::min)
+    }
+
+    /// Largest height a dry cell stands above an adjacent **standing-water** surface (ocean or perched
+    /// lake) across a real mesh edge — the "shore wall" height (normalized elevation; multiply by the
+    /// render exaggeration for metres). `0` if there are no such shore edges. The honest shore-cliff
+    /// measure ([`grade_shorelines`] eases these; it walks the mesh adjacency, unlike a coarse grid
+    /// sample). Rivers are excluded — their cross-section is the bank taper, not a shore. Water surface
+    /// = the sea level for ocean cells, else the lake cell's `elevation + depth`.
+    pub fn max_water_edge_drop(&self) -> f32 {
+        let n = self.elevation_r.len();
+        if self.neighbors.len() != n {
+            return 0.0;
+        }
+        let sea = self.sea_level;
+        let lake = |r: usize| self.lake_mask.get(r).copied().unwrap_or(false);
+        let wet = |r: usize| self.elevation_r[r] <= sea || lake(r);
+        let surf = |r: usize| {
+            if self.elevation_r[r] <= sea {
+                sea
+            } else {
+                self.elevation_r[r] + self.field.depth[r]
+            }
+        };
+        let mut mx = 0.0f64;
+        for r in 0..n {
+            if wet(r) {
+                continue;
+            }
+            for &nbu in &self.neighbors[r] {
+                let w = nbu as usize;
+                if wet(w) {
+                    let d = self.elevation_r[r] - surf(w);
+                    if d > mx {
+                        mx = d;
+                    }
+                }
+            }
+        }
+        mx as f32
     }
 
     /// Fill every region below `level` with water (instant sea + lakes).
@@ -687,6 +762,15 @@ impl World {
         if self.neighbors.len() != n {
             return;
         }
+        // Reset the perched-lake mask: it records exactly the basins ponded this pass (the lake tier),
+        // recomputed from terrain so [`connect_lake_outlets`] reads a clean, river-free, re-run-stable set.
+        if self.lake_mask.len() != n {
+            self.lake_mask = vec![false; n];
+        } else {
+            for v in self.lake_mask.iter_mut() {
+                *v = false;
+            }
+        }
         let filled = streams::fill_depressions(&self.elevation_r, &self.neighbors, num_boundary);
         for r in num_boundary..n {
             if !filled[r].is_finite() {
@@ -704,8 +788,12 @@ impl World {
             let moisture = self.moisture_r.get(r).copied().unwrap_or(0.5).clamp(0.0, 1.0);
             let factor = (1.4 - 0.8 * moisture).max(0.1); // dry 1.4× … wet 0.6× (centred at 0.5 → 1×)
             if lake > base * factor {
-                self.field.depth[r] = lake.max(self.field.depth[r]);
-                self.field.kind[r] = crate::liquids::LiquidType::Water as u8;
+                // Pond depth, capped per Region (Marsh stays shallow); liquid kind per Region (Volcanic
+                // calderas pond lava, everywhere else water).
+                let depth = lake.min(regions::region_pond_cap(region as u8));
+                self.field.depth[r] = depth.max(self.field.depth[r]);
+                self.field.kind[r] = regions::default_liquid_kind(region as u8);
+                self.lake_mask[r] = true;
             }
         }
         // Render the new water, but leave the sim asleep (a static fill, like the sea).
@@ -732,6 +820,29 @@ impl World {
     /// Restore the per-Region lake-depth table.
     pub fn set_region_lake_depth_table(&mut self, vals: &[f32]) {
         for (i, v) in self.region_lake_depth.iter_mut().enumerate() {
+            if i < vals.len() {
+                *v = vals[i] as f64;
+            }
+        }
+    }
+
+    /// Region `id`'s river threshold (fraction of basin peak flow); `0` if out of range.
+    pub fn river_threshold_of(&self, id: usize) -> f64 {
+        self.region_river_threshold.get(id).copied().unwrap_or(0.0)
+    }
+    /// Set region `id`'s river threshold (clamped ≥ 0). Re-run [`generate_rivers`] to apply.
+    pub fn set_river_threshold(&mut self, id: usize, value: f64) {
+        if let Some(v) = self.region_river_threshold.get_mut(id) {
+            *v = value.max(0.0);
+        }
+    }
+    /// Export the per-Region river-threshold table (one threshold per region id) for save/load.
+    pub fn river_threshold_export(&self) -> Vec<f32> {
+        self.region_river_threshold.iter().map(|&v| v as f32).collect()
+    }
+    /// Restore the per-Region river-threshold table.
+    pub fn set_river_threshold_table(&mut self, vals: &[f32]) {
+        for (i, v) in self.region_river_threshold.iter_mut().enumerate() {
             if i < vals.len() {
                 *v = vals[i] as f64;
             }
@@ -933,10 +1044,7 @@ impl World {
         }
         // Restore the previous stream carving first, so re-running is idempotent and
         // adapts to any sculpting done in between.
-        for r in 0..n {
-            self.elevation_r[r] = (self.elevation_r[r] + self.stream_carve[r]).clamp(ELEV_MIN, ELEV_MAX);
-            self.stream_carve[r] = 0.0;
-        }
+        self.restore_stream_carve();
 
         let num_b = self.mesh.as_ref().unwrap().num_boundary_regions();
         let res = streams::accumulate(&self.elevation_r, &self.neighbors, num_b, &self.course_mask, threshold, depth_gain);
@@ -960,6 +1068,298 @@ impl World {
         self.reclassify(&idx);
         self.after_edit(&idx);
         self.mark_all_liquid_changed(); // streams carve channels + lay water across the map
+    }
+
+    /// Un-apply the last river/stream carving (add the recorded lowering back, zero the record) so the
+    /// next carve builds from clean terrain. Shared by [`generate_streams`], [`generate_rivers`], and
+    /// [`reshape_and_reflow`] — the latter calls it *before* shaping so relief never bakes onto a
+    /// stale channel.
+    fn restore_stream_carve(&mut self) {
+        let n = self.elevation_r.len();
+        if self.stream_carve.len() != n {
+            self.stream_carve = vec![0.0; n];
+            return;
+        }
+        for r in 0..n {
+            self.elevation_r[r] = (self.elevation_r[r] + self.stream_carve[r]).clamp(ELEV_MIN, ELEV_MAX);
+            self.stream_carve[r] = 0.0;
+        }
+    }
+
+    /// Grow **trunk rivers** automatically from the whole-map drainage — no painted seed needed. Every
+    /// land cell carrying at least its Region's share of the peak flow becomes a river (plus any painted
+    /// Course). Flow is **moisture-weighted**, so valleys in wetter regions run bigger — the climate
+    /// tie. `depth_gain` scales channel depth with `sqrt(flow)`. Idempotent (restore-then-recarve via
+    /// `stream_carve`); shares that buffer with [`generate_streams`], so run one or the other in a pass,
+    /// not both. The per-region cutoff is [`river_threshold_of`](World::river_threshold_of).
+    pub fn generate_rivers(&mut self, depth_gain: f64) {
+        if self.mesh.is_none() {
+            return;
+        }
+        let n = self.elevation_r.len();
+        if self.stream_carve.len() != n {
+            self.stream_carve = vec![0.0; n];
+        }
+        if self.course_mask.len() != n {
+            self.course_mask = vec![false; n];
+        }
+        // Build from clean terrain so a re-run adapts to any reshaping/sculpting in between.
+        self.restore_stream_carve();
+
+        let num_b = self.mesh.as_ref().unwrap().num_boundary_regions();
+        // Moisture weight: a dry floor (so even arid catchments route) plus a wet boost — rivers grow
+        // where the orographic-moisture climate is wetter.
+        let weight: Vec<f64> = (0..n)
+            .map(|r| 0.25 + self.moisture_r.get(r).copied().unwrap_or(0.5).clamp(0.0, 1.0))
+            .collect();
+        let dr = streams::drainage(&self.elevation_r, &self.neighbors, num_b, Some(&weight));
+
+        // Peak flow over land sets the scale the per-region thresholds are relative to.
+        let mut max_flow = 1.0f64;
+        for r in num_b..n {
+            if self.elevation_r[r] > self.sea_level && dr.flow[r] > max_flow {
+                max_flow = dr.flow[r];
+            }
+        }
+
+        // Raw per-cell channel depth for every river cell (painted Course, or flow past its region cutoff).
+        let mut carve = vec![0.0f64; n];
+        let mut is_river = vec![false; n];
+        for r in num_b..n {
+            let painted = self.course_mask.get(r).copied().unwrap_or(false);
+            let land = self.elevation_r[r] > self.sea_level;
+            let region = self.region_r.get(r).copied().unwrap_or(0) as usize;
+            let thr = self.river_threshold_of(region) * max_flow;
+            if !(painted || (land && dr.flow[r] >= thr)) {
+                continue;
+            }
+            let nf = (dr.flow[r] / max_flow).clamp(0.0, 1.0).sqrt();
+            carve[r] = streams::MIN_STREAM_DEPTH + depth_gain * nf;
+            is_river[r] = true;
+        }
+        // Taper the banks: max-spread a decaying fraction of each channel's depth onto its neighbours so
+        // the cross-section is a sloped V-valley a few cells wide, not a one-cell vertical slot. Serial +
+        // double-buffered ⇒ deterministic and thread-invariant (the cross-target contract).
+        if self.neighbors.len() == n {
+            for _ in 0..RIVER_BANK_PASSES {
+                let mut next = carve.clone();
+                for r in num_b..n {
+                    let mut m = carve[r];
+                    for &nb in &self.neighbors[r] {
+                        let v = carve[nb as usize] * RIVER_BANK_SPREAD;
+                        if v > m {
+                            m = v;
+                        }
+                    }
+                    next[r] = m;
+                }
+                carve = next;
+            }
+        }
+        // Apply: lower terrain by the (tapered) carve, record the actual drop so a re-run restores then
+        // re-carves (idempotent), and lay shallow water in the channel cells only — the banks stay dry.
+        let mut touched: Vec<u32> = Vec::new();
+        for r in num_b..n {
+            let cd = carve[r];
+            if cd <= 0.0 {
+                continue;
+            }
+            let before = self.elevation_r[r];
+            let after = (before - cd).clamp(ELEV_MIN, ELEV_MAX);
+            self.stream_carve[r] = before - after; // record the actual lowering
+            self.elevation_r[r] = after;
+            if is_river[r] {
+                // Fill most of the (now-shallow) channel so the river reads as visible water rather than a
+                // dry trench — surface sits just below the banks. Capped so a big trunk can't pool absurdly.
+                let wt = ((before - after) * 0.8).min(0.05);
+                if self.field.depth[r] < wt {
+                    self.field.depth[r] = wt;
+                }
+                self.field.kind[r] = 0; // water
+            }
+            touched.push(r as u32);
+        }
+
+        self.reclassify(&touched);
+        self.after_edit(&touched);
+        self.mark_all_liquid_changed(); // rivers carve channels + lay water across the map
+    }
+
+    /// Make every lake drain visibly: find each lake's spill (pour-point) cell and force its outlet —
+    /// the downstream receiver chain from the spill until it meets the ocean or an already-wet river —
+    /// to be a thin carved channel. Run **after** [`fill_lakes`] so the lake mask is current; without
+    /// it a lake whose outflow sits just under the river threshold would pool with no visible exit.
+    /// The carve is recorded into `stream_carve`, so [`reshape_and_reflow`] un-does it on a re-run.
+    pub fn connect_lake_outlets(&mut self) {
+        if self.mesh.is_none() {
+            return;
+        }
+        let n = self.elevation_r.len();
+        if self.neighbors.len() != n {
+            return;
+        }
+        let num_b = self.mesh.as_ref().unwrap().num_boundary_regions();
+        if self.stream_carve.len() != n {
+            self.stream_carve = vec![0.0; n];
+        }
+        // The perched-lake mask recorded by `fill_lakes` (terrain-derived, so it excludes rivers/ocean
+        // and is identical on a re-run). Cloned because the walk below mutates `self`.
+        let lake_mask = if self.lake_mask.len() == n {
+            self.lake_mask.clone()
+        } else {
+            return; // no lakes recorded yet — nothing to connect
+        };
+        let dr = streams::drainage(&self.elevation_r, &self.neighbors, num_b, None);
+        let spills = streams::lake_spill_cells(&dr.receiver, &lake_mask);
+
+        let mut touched: Vec<u32> = Vec::new();
+        for &spill in &spills {
+            // Walk downstream from the spill's receiver toward the ocean, carving a thin channel
+            // through each dry outlet cell until the chain joins the river network or another lake.
+            // Gate on `stream_carve` (zeroed at the start of every river pass) rather than the
+            // persistent water depth, so a re-run via `reshape_and_reflow` re-carves the same cells
+            // (idempotent — water depth survives a restore but `stream_carve` does not).
+            let mut r = dr.receiver[spill];
+            let mut guard = 0usize;
+            while r >= num_b && self.elevation_r[r] > self.sea_level && guard < n {
+                guard += 1;
+                if self.stream_carve[r] > 0.0 || lake_mask[r] {
+                    break; // reached the river network (or another lake) — the outlet already connects
+                }
+                let before = self.elevation_r[r];
+                let after = (before - streams::MIN_STREAM_DEPTH).clamp(ELEV_MIN, ELEV_MAX);
+                self.stream_carve[r] += before - after;
+                self.elevation_r[r] = after;
+                self.field.depth[r] = ((before - after) * 0.5).min(0.2).max(self.field.depth[r]);
+                self.field.kind[r] = 0; // water
+                touched.push(r as u32);
+                let next = dr.receiver[r];
+                if next == r {
+                    break;
+                }
+                r = next;
+            }
+        }
+
+        if !touched.is_empty() {
+            self.reclassify(&touched);
+            self.after_edit(&touched);
+            self.mark_all_liquid_changed();
+        }
+    }
+
+    /// The unified relief + hydrology pass, run in the one correct, idempotent order so a fresh Generate
+    /// (or any re-Apply) yields a complete watershed on shaped terrain:
+    /// **un-carve → shape relief → carve rivers → fill lakes → connect outlets.** Un-carving first is
+    /// what lets [`shape_terrain`] read clean terrain (never baking relief onto a stale channel); rivers
+    /// then carve the shaped terrain, lakes pond behind the carved outlets, and the outlets are forced
+    /// continuous. Call after the sea level is set (the river land-gate needs it). `shape_strength` is
+    /// the relief gain (1.0 nominal); `depth_gain` scales river channel depth.
+    pub fn reshape_and_reflow(&mut self, shape_strength: f64, depth_gain: f64) {
+        self.restore_stream_carve();
+        self.shape_terrain(shape_strength);
+        self.generate_rivers(depth_gain);
+        self.fill_lakes();
+        self.connect_lake_outlets();
+        self.grade_shorelines();
+    }
+
+    /// Ease dry land down to the waterline at every shore — the "cliffs at the water edge" fix. The wide
+    /// base grade rounds *low* shores, but a high region beside filled water floods only to its lowest
+    /// rim, leaving the higher shore as a sheer wall *above* the surface. This caps dry land within
+    /// [`SHORE_GRADE_M`] of any water to a gentle ramp (`water_surface + SHORE_RISE_PER_M · distance`)
+    /// via a multi-source breadth-first walk out from the water. Only protrusions above the ramp are
+    /// shaved (valleys/low land untouched); the cap never drops below the water surface, so it lays no
+    /// new water. The shave is recorded into `stream_carve`, so it's restored-then-recomputed on a
+    /// re-run alongside the river/outlet carving (idempotent). Run **after** the water is placed (it is
+    /// the last step of [`reshape_and_reflow`], and the live sea-level path re-runs it after re-flowing).
+    /// Serial BFS + serial apply ⇒ deterministic and thread-invariant (the cross-target contract).
+    pub fn grade_shorelines(&mut self) {
+        let n = self.elevation_r.len();
+        if n == 0 || self.neighbors.len() != n || self.lake_mask.len() != n {
+            return;
+        }
+        let num_b = match &self.mesh {
+            Some(m) => m.num_boundary_regions(),
+            None => return,
+        };
+        if self.stream_carve.len() != n {
+            self.stream_carve = vec![0.0; n];
+        }
+        let sea = self.sea_level;
+        // Water surface to grade toward, from terrain-only (idempotent) sources — NOT the accumulated
+        // `depth` field, which drifts across re-runs (it only ever grows by `max`). Seeds are the standing
+        // water bodies only: the ocean (`elev ≤ sea`, surface = sea level) and perched lakes (`lake_mask`,
+        // surface = the priority-flood pour level `fill_lakes` used). Rivers are deliberately excluded —
+        // their cross-section is the job of the bank taper, and grading a mountain valley's river down to
+        // its banks would flatten the mountains beside it (and a dry river *bank* isn't water anyway).
+        let filled = streams::fill_depressions(&self.elevation_r, &self.neighbors, num_b);
+        let mut dist = vec![u32::MAX; n];
+        let mut wlevel = vec![f64::INFINITY; n];
+        let mut frontier: Vec<u32> = Vec::new();
+        for r in 0..n {
+            let ocean = self.elevation_r[r] <= sea;
+            let lake = self.lake_mask[r];
+            if ocean || lake {
+                dist[r] = 0;
+                wlevel[r] = if ocean {
+                    sea
+                } else if filled[r].is_finite() {
+                    filled[r]
+                } else {
+                    self.elevation_r[r]
+                };
+                frontier.push(r as u32);
+            }
+        }
+        if frontier.is_empty() {
+            return;
+        }
+        let pitch = (self.width * self.height / n as f64).sqrt().max(1.0);
+        let max_rings = (SHORE_GRADE_M / pitch).round().clamp(1.0, 4096.0) as u32;
+        // BFS outward: each dry cell takes the nearest water's surface (ties → the lower surface, the
+        // gentler grade). First reach assigns its ring; same-ring re-reaches only lower `wlevel`.
+        let mut ring = 0u32;
+        while !frontier.is_empty() && ring < max_rings {
+            ring += 1;
+            let mut next: Vec<u32> = Vec::new();
+            for &ru in &frontier {
+                let wl = wlevel[ru as usize];
+                for &nbu in &self.neighbors[ru as usize] {
+                    let nb = nbu as usize;
+                    if dist[nb] < ring {
+                        continue; // wet (0) or assigned an earlier ring
+                    }
+                    if dist[nb] == ring {
+                        if wl < wlevel[nb] {
+                            wlevel[nb] = wl;
+                        }
+                        continue;
+                    }
+                    dist[nb] = ring; // first reach at this ring
+                    wlevel[nb] = wl;
+                    next.push(nbu);
+                }
+            }
+            frontier = next;
+        }
+        // Shave each in-band dry cell down to the ramp (only where it stands above it).
+        let mut touched: Vec<u32> = Vec::new();
+        for r in 0..n {
+            if dist[r] == 0 || dist[r] == u32::MAX {
+                continue; // wet, or beyond the grading band
+            }
+            let cap = wlevel[r] + SHORE_RISE_PER_M * (dist[r] as f64 * pitch);
+            let before = self.elevation_r[r];
+            if before > cap {
+                let after = cap.clamp(ELEV_MIN, ELEV_MAX);
+                self.stream_carve[r] += before - after; // restored-then-recomputed on re-run
+                self.elevation_r[r] = after;
+                touched.push(r as u32);
+            }
+        }
+        self.reclassify(&touched);
+        self.after_edit(&touched);
     }
 
     // --- biomes ---
@@ -2169,6 +2569,16 @@ impl World {
     /// Current rendering-chunk edge length, in world metres.
     pub fn chunk_size_m(&self) -> f64 {
         self.chunk_size_m
+    }
+
+    /// Set the per-region base-elevation blend width (world metres), clamped ≥ 0. Call **before**
+    /// [`build`] — the base trunk is graded during build. Wider ⇒ gentler relief steps between regions.
+    pub fn set_base_blend_m(&mut self, m: f64) {
+        self.base_blend_m = m.max(0.0);
+    }
+    /// Current per-region base-elevation blend width, in world metres.
+    pub fn base_blend_m(&self) -> f64 {
+        self.base_blend_m
     }
 
     /// Number of rendering chunks.

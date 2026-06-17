@@ -93,16 +93,33 @@ fn resolve_is_deterministic() {
 #[test]
 fn lake_threshold_tracks_region_moisture() {
     use dhce_core::regions::default_lake_min_depth;
-    // Wet regions pond with a shallower basin than dry ones (lower threshold). Great Lake (3, very
-    // wet) and Marsh Bog (14, wettest) sit well below Volcanic Scape (11, arid) and Open Plains (5).
-    let lake = default_lake_min_depth(3);
-    let marsh = default_lake_min_depth(14);
-    let volcanic = default_lake_min_depth(11);
-    let plains = default_lake_min_depth(5);
+    // For the **water** regions, wetter ponds with a shallower basin (lower threshold) than drier.
+    let lake = default_lake_min_depth(3); // Great Lake — very wet
+    let marsh = default_lake_min_depth(14); // Marsh Bog — wettest
+    let plains = default_lake_min_depth(5); // Open Plains
+    let blisterwood = default_lake_min_depth(10); // drier than the plains (moisture 0.30 < 0.38)
     assert!(lake < plains, "the wet Great Lake ponds easier than the plains ({lake} < {plains})");
     assert!(marsh < plains, "the marsh ponds easier than the plains ({marsh} < {plains})");
-    assert!(plains < volcanic, "arid Volcanic Scape resists ponding more than the plains ({plains} < {volcanic})");
-    assert!(lake > 0.0 && volcanic > 0.0, "thresholds are positive");
+    assert!(plains < blisterwood, "drier Blisterwood resists ponding more than the plains ({plains} < {blisterwood})");
+    assert!(lake > 0.0, "thresholds are positive");
+    // Volcanic Scape is the lava exception: a deliberately low threshold so molten pools gather in its
+    // calderas even though it's arid (it would otherwise resist ponding by the moisture rule).
+    assert!(default_lake_min_depth(11) < plains, "Volcanic ponds (lava) readily despite being arid");
+}
+
+#[test]
+fn region_liquid_and_pond_specials() {
+    use dhce_core::regions::{default_liquid_kind, default_river_threshold, region_pond_cap};
+    // Volcanic Scape (11) ponds lava (kind 1); everything else water (kind 0).
+    assert_eq!(default_liquid_kind(11), 1, "Volcanic ponds lava");
+    assert_eq!(default_liquid_kind(3), 0, "the Great Lake is water");
+    assert_eq!(default_liquid_kind(14), 0, "the marsh is water");
+    // Marsh & Bog (14) caps its pools shallow; other regions fill to the pour point (no cap).
+    assert!(region_pond_cap(14).is_finite() && region_pond_cap(14) < 0.05, "marsh pools are shallow");
+    assert!(region_pond_cap(5).is_infinite(), "the plains have no shallow cap");
+    // Scattered Isles (13, the port) rivers densely — a lower threshold than its moisture alone implies.
+    assert!(default_river_threshold(13) <= 0.02, "Scattered Isles carves a dense channel network");
+    assert!(default_river_threshold(5) > default_river_threshold(13), "the plains river less densely than the port");
 }
 
 #[test]

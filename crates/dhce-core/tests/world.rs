@@ -12,6 +12,14 @@ fn built() -> World {
     w
 }
 
+/// A realistic-scale (8 km) canon world — territories are large relative to the border-grading width,
+/// so drainage and relief read clearly (a 1 km map washes the basins out). Mirrors the canon test.
+fn built_canon() -> World {
+    let mut w = World::new();
+    w.build(8000.0, 8000.0, 40.0, 7, 5);
+    w
+}
+
 #[test]
 fn build_is_deterministic() {
     let a = built();
@@ -216,6 +224,208 @@ fn streams_are_idempotent_after_a_course() {
     w.generate_streams(0.5, 0.05);
     let second: Vec<u32> = w.elevation_export().iter().map(|v| v.to_bits()).collect();
     assert_eq!(first, second, "restore-then-recarve must be bit-identical on re-run");
+}
+
+#[test]
+fn auto_rivers_form_without_a_painted_course() {
+    // The watershed gap #3 closes: trunk rivers must emerge from flow accumulation alone, with no
+    // hand-painted Course seed. After fixing the ocean, generating rivers should lay water on land.
+    let mut w = built_canon();
+    w.set_sea_level(-0.4);
+    let wet0 = w.liquid_depth_export().iter().filter(|&&d| d > 0.0).count();
+    w.generate_rivers(0.05); // no paint_course anywhere
+    let depth = w.liquid_depth_export();
+    let elev = w.elevation_export();
+    let land_rivers = (0..elev.len()).filter(|&r| elev[r] > -0.4 && depth[r] > 0.0).count();
+    assert!(land_rivers > 0, "trunk rivers form from flow alone (no seed): {land_rivers} land river cells");
+    assert!(depth.iter().filter(|&&d| d > 0.0).count() > wet0, "rivers add water beyond the ocean");
+}
+
+#[test]
+fn shorelines_are_not_cliffs() {
+    // The follow-up report: with the wide base grade, *low* shores round off but a *high* region standing
+    // beside the filled water reads as a sheer wall — a basin floods only to its lowest rim, so any higher
+    // shore stands as a cliff above the waterline. `grade_shorelines` (run inside reshape_and_reflow) eases
+    // dry land down to every waterline. Measured on the true mesh adjacency (not a coarse grid), the worst
+    // shore wall must be gentle. Pre-fix this world measured ~540 m; the ~34°/cell ramp brings it under ~120 m.
+    let mut w = World::new();
+    w.set_base_blend_m(1800.0); // editor default
+    w.build(8000.0, 8000.0, 40.0, 7, 5);
+    let exag = 5000.0 / 3.0; // TerrainHeightKm 5 → metres per normalized unit
+    let sea = w.min_elevation() + 1000.0 / exag; // editor's default sea level (OnGenDone)
+    w.set_sea_level(sea);
+    w.reshape_and_reflow(1.0, 0.015); // editor ShapeStrength + RiverDepthGain
+    let wall = w.max_water_edge_drop() as f64 * exag;
+    println!("max shore wall (true mesh edge): {wall:.0} m");
+    assert!(wall < 120.0, "shoreline grading must ease water edges; worst wall is {wall:.0} m");
+}
+
+#[test]
+fn auto_rivers_carve_tapered_banks_not_slots() {
+    // The "rivers dig in" fix: auto-rivers must carve a sloped V-valley (channel + tapered dry banks),
+    // not a one-cell vertical slot. The defining signature is that the carve reaches *dry* bank cells
+    // beyond the watered channel — so the set of carved cells is strictly larger than the watered
+    // (river) cells. (The old slot carve lowered only the channel, which always took water.)
+    let mut w = built_canon();
+    let sea = -0.4;
+    w.set_sea_level(sea);
+    let elev0 = w.elevation_export();
+    w.generate_rivers(0.05); // no painted Course — auto trunk rivers from flow
+    let elev1 = w.elevation_export();
+    let depth1 = w.liquid_depth_export();
+    let eps = 1e-6;
+    let carved = (0..elev1.len()).filter(|&r| (elev1[r] as f64) < elev0[r] as f64 - eps).count();
+    // Watered channel cells standing above the ocean (the river itself, not the sea fill).
+    let channels = (0..elev1.len())
+        .filter(|&r| depth1[r] as f64 > eps && elev1[r] as f64 > sea)
+        .count();
+    assert!(carved > 0 && channels > 0, "rivers carve terrain and lay water (carved={carved} channels={channels})");
+    assert!(
+        carved > channels,
+        "carve must reach dry banks beyond the watered channel (V-valley, not a slot): carved={carved} channels={channels}"
+    );
+}
+
+#[test]
+fn auto_shaping_gives_mountains_more_relief_than_plains() {
+    // Relief fix: the per-region landform dials must reach the geometry at Generate. Jagged Mountains
+    // (jaggedness 0.90) should end up with materially more elevation variance than Open Plains (0.10).
+    let mut w = built_canon();
+    w.set_sea_level(-0.4);
+    w.reshape_and_reflow(1.0, 0.05);
+    let elev = w.elevation_export();
+    let region = w.region_export();
+    let variance = |rid: u8| {
+        let v: Vec<f64> = (0..elev.len()).filter(|&r| region[r] == rid).map(|r| elev[r] as f64).collect();
+        if v.len() < 2 {
+            return 0.0;
+        }
+        let mean = v.iter().sum::<f64>() / v.len() as f64;
+        v.iter().map(|x| (x - mean) * (x - mean)).sum::<f64>() / v.len() as f64
+    };
+    let jagged = variance(1); // Jagged Mountains
+    let plains = variance(5); // Open Plains
+    assert!(jagged > plains, "shaping gives the mountains more relief than the plains ({jagged} vs {plains})");
+}
+
+#[test]
+fn base_trunk_borders_are_gentle_not_cliffs() {
+    // The recurring "heights too severe / cliffs at borders + around the lake" report. The macro
+    // base-elevation trunk must grade across territory borders gently enough that the *visible* land
+    // rise reads as hills/mountainsides, not vertical steps. We measure the steepest adjacent-sample
+    // slope over **dry land** (above the ocean and not under a perched lake — so a submerged basin wall
+    // doesn't count) on the base+water field, before shaping (which legitimately roughens peaks), at the
+    // real vertical exaggeration the editor uses.
+    let mut w = built_canon(); // 8 km
+    let sea = -0.4;
+    w.set_sea_level(sea);
+    w.fill_lakes(); // pond the Great Lake so its basin wall is underwater (not a "visible" cliff)
+    let elev = w.elevation_export();
+    let depth = w.liquid_depth_export();
+    let exag = 5000.0 / 3.0; // TerrainHeightKm 5 → metres per normalized unit (DhceWorld.cs)
+    let step = 40.0; // ≈ the region spacing
+    let n = (8000.0 / step) as usize;
+    // Dry interior land at a sample: inside the coastal ocean-rim band (d < 0.78 — the rim's land→sea
+    // plunge is a separate concern from the interior the user is looking at), above the ocean, and not
+    // under a perched lake.
+    let dry = |x: f64, y: f64| -> Option<f64> {
+        let (du, dv) = ((x - 4000.0) / 8000.0, (y - 4000.0) / 8000.0);
+        if (du * du + dv * dv).sqrt() * 2.0 >= 0.78 {
+            return None;
+        }
+        let ri = w.region_at(x, y)?;
+        let e = elev[ri] as f64;
+        if e <= sea || depth[ri] as f64 > 1e-3 {
+            return None;
+        }
+        Some(e)
+    };
+    let mut max_slope = 0.0f64;
+    let mut max_at = (0.0, 0.0);
+    let mut steep = 0usize; // adjacent dry-land pairs steeper than 45°
+    let mut land_pairs = 0usize;
+    for iy in 0..n {
+        let y = iy as f64 * step + step * 0.5;
+        for ix in 0..n {
+            let x = ix as f64 * step + step * 0.5;
+            let e = match dry(x, y) {
+                Some(e) => e,
+                None => continue,
+            };
+            for (nx, ny) in [(x + step, y), (x, y + step)] {
+                if let Some(en) = dry(nx, ny) {
+                    land_pairs += 1;
+                    let slope = (e - en).abs() * exag / step;
+                    if slope > max_slope {
+                        max_slope = slope;
+                        max_at = (x, y);
+                    }
+                    if slope > 1.0 {
+                        steep += 1;
+                    }
+                }
+            }
+        }
+    }
+    let steep_frac = steep as f64 / land_pairs.max(1) as f64;
+    let reg = w.region_id_at(max_at.0, max_at.1);
+    println!(
+        "dry-land base slopes: max={max_slope:.2} ({:.0}°) at ({:.0},{:.0}) region={reg}, >45° fraction={steep_frac:.4} over {land_pairs} pairs",
+        max_slope.atan().to_degrees(), max_at.0, max_at.1
+    );
+    // Regression guard against the cliff regime (the wide coarse-grid grade replaced the too-narrow
+    // Jacobi diffuser). Pre-fix this world measured max≈11.5 (85°) with 13% of interior dry-land steeper
+    // than 45°; post-fix it's ~2.6 (69°) with <3%. The fraction is the systematic signal; the max bound
+    // catches a return toward vertical border steps (the isolated worst spot is a perched-basin rim).
+    assert!(steep_frac < 0.05, "interior dry-land must not be cliff-ridden, got {steep_frac:.4} > 45°");
+    assert!(max_slope < 4.0, "no near-vertical border steps, got max slope {max_slope:.2}");
+}
+
+#[test]
+fn watershed_connects_lakes_rivers_and_ocean() {
+    // After the unified pass all three water tiers coexist: an ocean below sea level, plus perched
+    // water (lakes + their feeder/outlet rivers) standing on the land above it.
+    let mut w = built_canon();
+    w.set_sea_level(-0.4);
+    w.reshape_and_reflow(1.0, 0.05);
+    let depth = w.liquid_depth_export();
+    let elev = w.elevation_export();
+    let ocean = (0..elev.len()).filter(|&r| elev[r] <= -0.4 && depth[r] > 0.0).count();
+    let perched = (0..elev.len()).filter(|&r| elev[r] > -0.4 && depth[r] > 0.0).count();
+    assert!(ocean > 0, "the ocean tier is present");
+    assert!(perched > 0, "perched water (lakes + rivers) sits above the sea — the watershed reaches land");
+}
+
+#[test]
+fn reshape_and_reflow_is_idempotent() {
+    // The un-carve → shape → carve rivers → fill lakes → connect outlets stack must not compound: a
+    // second pass from the same dials yields bit-identical elevation (the contract for saved worlds).
+    let mut w = built_canon();
+    w.set_sea_level(-0.4);
+    w.reshape_and_reflow(1.0, 0.05);
+    let first: Vec<u32> = w.elevation_export().iter().map(|v| v.to_bits()).collect();
+    w.reshape_and_reflow(1.0, 0.05);
+    let second: Vec<u32> = w.elevation_export().iter().map(|v| v.to_bits()).collect();
+    assert_eq!(first, second, "reshape_and_reflow must be bit-identical on re-run");
+}
+
+#[test]
+fn reshape_and_reflow_is_invariant_to_thread_count() {
+    // Relief + rivers ride the same parallel index→value maps as the rest of gen, so the whole pass
+    // must be bit-identical regardless of thread count (parallel == serial keeps saves from desyncing).
+    let prep = || {
+        let mut w = built_canon();
+        w.set_sea_level(-0.4);
+        w.reshape_and_reflow(1.0, 0.05);
+        w
+    };
+    let one = rayon::ThreadPoolBuilder::new().num_threads(1).build().unwrap();
+    let many = rayon::ThreadPoolBuilder::new().num_threads(4).build().unwrap();
+    let a = one.install(prep);
+    let b = many.install(prep);
+    let bits = |v: Vec<f32>| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+    assert_eq!(bits(a.elevation_export()), bits(b.elevation_export()), "carved+shaped elevation identical across threads");
+    assert_eq!(bits(a.liquid_depth_export()), bits(b.liquid_depth_export()), "liquid identical across threads");
 }
 
 #[test]

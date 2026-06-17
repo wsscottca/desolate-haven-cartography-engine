@@ -28,13 +28,14 @@ public partial class DhceDock : ScrollContainer
     private readonly List<Button> _toolButtons = new();
     private static readonly Dictionary<string, Texture2D> _iconCache = new();
 
-    private SpinBox _seed, _oct, _size, _spacing, _chunk;
+    private SpinBox _seed, _oct, _size, _spacing, _chunk, _baseBlend;
     private OptionButton _liquidKind, _traitEnum, _palFamily, _landRegion;
     private HSlider _traitSlider;
     private Label _traitSliderLabel, _traitEnumLabel;
     private ColorPickerButton[] _palPickers;
     private SpinBox[] _landSpins;
     private SpinBox _lakeDepthSpin;   // per-Region lake-fill threshold (tied to the same region picker)
+    private SpinBox _riverThreshSpin; // per-Region river threshold (tied to the same region picker)
     private CheckButton _simulate;
     private DhceMinimap _minimap;
     private LineEdit _exportPath;
@@ -177,6 +178,7 @@ public partial class DhceDock : ScrollContainer
         _size = SpinRow("Size (km)", 1, 60, 1, 30);
         _spacing = SpinRow("Spacing (m)", 4, 60, 1, 10);
         _chunk = SpinRow("Chunk size (m)", 32, 2048, 32, 256);
+        _baseBlend = SpinRow("Base blend (m)", 0, 6000, 50, 1800); // softer per-region base-elevation steps; regen to apply
         Slider("Height (km)", 0.1, 10, 0.1, 5.0, v => _world?.SetTerrainHeight((float)v));
 
         BuildRegionMapSection(); // optional region-coloured PNG → overrides the built-in canon layout
@@ -355,28 +357,32 @@ public partial class DhceDock : ScrollContainer
             sb.ValueChanged += v => OnRegionLandform(idx, v);
             _landSpins[i] = sb;
         }
-        // Per-region lake-fill threshold (the water tier): how deep a closed basin must be before it
-        // holds a lake/pond in this region. Defaults track the region's moisture; lower ⇒ more water.
+        // Per-region water tiers. Lake fill depth: how deep a closed basin must be before it holds a
+        // lake/pond here. River threshold: what share of the basin's peak flow a cell must carry before
+        // it becomes a trunk river here. Both default from the region's moisture; lower ⇒ more water.
         _lakeDepthSpin = SpinRow("Lake fill depth", 0, 0.5, 0.005, 0);
         _lakeDepthSpin.ValueChanged += v => OnRegionLakeDepth(v);
-        Button(_target, "Apply lakes", () =>
+        _riverThreshSpin = SpinRow("River threshold", 0, 0.2, 0.005, 0);
+        _riverThreshSpin.ValueChanged += v => OnRegionRiverThreshold(v);
+        Button(_target, "Apply water", () =>
         {
             if (!HasWorld) return;
-            _world.SetSeaLevel(_world.SeaLevelNorm); // re-establish ocean + perched lakes with the current thresholds
-            SetStatus("Lakes refilled from the per-region thresholds.");
+            _world.SetSeaLevel(_world.SeaLevelNorm); // re-flow rivers + lakes + outlets at the current thresholds
+            SetStatus("Rivers + lakes re-flowed from the per-region thresholds.");
         });
-        _target.AddChild(Dim("Per-region: how deep a basin must be to hold water (lower ⇒ more lakes/ponds). Default tracks the region's moisture. Apply lakes to update."));
+        _target.AddChild(Dim("Per-region water: lake fill depth (lower ⇒ more lakes) and river threshold (lower ⇒ more rivers). Defaults track moisture. Apply water to update."));
 
         Header("SHAPING", open: false);
-        _target.AddChild(Dim("Bake the landform dials into the terrain height."));
+        _target.AddChild(Dim("Bake the landform dials into the terrain height, then re-flow the watershed."));
         Slider("Strength", 0, 2, 0.05, _shapeStrength, v => _shapeStrength = v);
         Button(_target, "Apply shaping", () =>
         {
             if (!HasWorld) return;
-            Eng.Call("shape_terrain", _shapeStrength);
+            // Reshape relief then re-flow rivers/lakes on it, in the one idempotent order.
+            Eng.Call("reshape_and_reflow", _shapeStrength, (double)_world.RiverDepthGain);
             _world.RepaintDirtyTerrain(); _world.RebuildLiquid();
             _minimap?.Refresh();
-            SetStatus($"shaped @ strength {_shapeStrength:0.##}");
+            SetStatus($"shaped @ strength {_shapeStrength:0.##} — rivers + lakes re-flowed");
         });
 
         Header("TRANSITIONS", open: false);
@@ -433,6 +439,7 @@ public partial class DhceDock : ScrollContainer
         _world.WorldSizeKm = (float)_size.Value;
         _world.SpacingM = (float)_spacing.Value;
         _world.ChunkSizeM = (float)_chunk.Value;
+        _world.BaseBlendM = (float)_baseBlend.Value;
         SetStatus("Generating… (the editor pauses a few seconds)");
         _world.Generate();
         _wasGenDone = false; // force a value reload on the next Bind
@@ -494,6 +501,7 @@ public partial class DhceDock : ScrollContainer
         _size.Value = _world.WorldSizeKm;
         _spacing.Value = _world.SpacingM;
         _chunk.Value = _world.ChunkSizeM;
+        _baseBlend.Value = _world.BaseBlendM;
         if (_seaLevelSlider != null)
         {
             _seaLevelSlider.SetValueNoSignal(_world.SeaLevelNorm);
@@ -532,6 +540,8 @@ public partial class DhceDock : ScrollContainer
         for (int i = 0; i < _landSpins.Length && i < a.Length; i++) _landSpins[i].Value = a[i];
         if (_lakeDepthSpin != null)
             _lakeDepthSpin.Value = Eng.Call("region_lake_depth_of", SelectedLandRegion()).As<double>();
+        if (_riverThreshSpin != null)
+            _riverThreshSpin.Value = Eng.Call("river_threshold_of", SelectedLandRegion()).As<double>();
         _loadingLandform = false;
     }
 
@@ -548,7 +558,15 @@ public partial class DhceDock : ScrollContainer
         if (_loadingLandform || !HasWorld) return;
         int id = SelectedLandRegion();
         Eng.Call("set_region_lake_depth", id, v);
-        SetStatus($"{BiomeNames[id - 1]}: lake fill depth {v:0.###} — Apply lakes to update");
+        SetStatus($"{BiomeNames[id - 1]}: lake fill depth {v:0.###} — Apply water to update");
+    }
+
+    private void OnRegionRiverThreshold(double v)
+    {
+        if (_loadingLandform || !HasWorld) return;
+        int id = SelectedLandRegion();
+        Eng.Call("set_river_threshold", id, v);
+        SetStatus($"{BiomeNames[id - 1]}: river threshold {v:0.###} (lower ⇒ more rivers) — Apply water to update");
     }
 
     // Physical climate sliders: temperature follows elevation (lapse), moisture follows the wind
