@@ -10,8 +10,8 @@ public partial class DhceMapPanel : PanelContainer
 {
     private static readonly string[] BiomeNames =
     {
-        "Jagged Mountains", "Sacred Woods Plateau", "Great Lake", "Temperate Forest",
-        "Open Plains", "Underdeep", "Deep Wood", "Frozen Reaches", "Lost Isles",
+        "Jagged Mountains", "Sacred Forest", "Great Lake", "Temperate Forest",
+        "Rolling Plains", "Underdeep", "Deep Wood", "Frozen Reaches", "Lost Isles",
         "Blisterwood", "Volcanic Scape", "Blight Ruins", "Scattered Isles", "Marsh & Bog",
     };
 

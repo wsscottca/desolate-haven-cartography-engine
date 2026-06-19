@@ -28,7 +28,9 @@ public partial class DhceDock : ScrollContainer
     private readonly List<Button> _toolButtons = new();
     private static readonly Dictionary<string, Texture2D> _iconCache = new();
 
-    private SpinBox _seed, _oct, _size, _spacing, _chunk, _baseBlend;
+    private SpinBox _seed, _oct, _size, _height, _spacing, _chunk, _baseBlend;
+    private SpinBox _brushRadius; // absolute brush radius (m); 0 = zoom-coupled (the size icons)
+    private CheckButton _flatBase; // flat authoring base vs auto canon relief
     private OptionButton _liquidKind, _traitEnum, _palFamily, _landRegion;
     private HSlider _traitSlider;
     private Label _traitSliderLabel, _traitEnumLabel;
@@ -37,12 +39,21 @@ public partial class DhceDock : ScrollContainer
     private SpinBox _lakeDepthSpin;   // per-Region lake-fill threshold (tied to the same region picker)
     private SpinBox _riverThreshSpin; // per-Region river threshold (tied to the same region picker)
     private SpinBox _erosionSpin;     // per-Region river-erosion strength (tied to the same region picker)
+    private SpinBox _baseHeightSpin;  // per-Region base height (m); seeds the trunk — regen to apply
+    private SpinBox _gradientSpin;    // per-Region gradient total rise (m)
+    private SpinBox _gradientRotSpin; // per-Region gradient rotation (degrees, 0=N, CW)
+    private CheckBox _gradientAnchorCheck; // pin the gradient pivot (else it follows base height)
+    private SpinBox _gradientAnchorSpin;   // per-Region gradient anchor height (m), when pinned
     private CheckButton _simulate;
     private DhceMinimap _minimap;
     private LineEdit _exportPath;
 
     // Contextual brush-option groups — only the active tool's group is shown (see RefreshBrushOptions).
     private VBoxContainer _optSize, _optStrength, _optLiquid, _optTransition, _optCave, _optBiome, _optRegion, _optTrait;
+    private VBoxContainer _optZone;                       // Zone Edit options panel
+    private Label _zoneCountLabel;                        // "Selection: N cells"
+    private Button _zoneUndoBtn;                          // enabled only when a zone snapshot exists
+    private readonly ButtonGroup _zoneModeGroup = new();  // the zone select sub-mode buttons (one active)
     private HSlider _seaLevelSlider;
     private Label _seaLevelLabel;
 
@@ -73,8 +84,8 @@ public partial class DhceDock : ScrollContainer
     private static readonly string[] SlotNames = { "Deep water", "Shallows", "Low cover", "Rock", "Cap (warm)", "Cap (snow)" };
     private static readonly string[] BiomeNames =
     {
-        "Jagged Mountains", "Sacred Woods Plateau", "Great Lake", "Temperate Forest",
-        "Open Plains", "Underdeep", "Deep Wood", "Frozen Reaches", "Lost Isles",
+        "Jagged Mountains", "Sacred Forest", "Great Lake", "Temperate Forest",
+        "Rolling Plains", "Underdeep", "Deep Wood", "Frozen Reaches", "Lost Isles",
         "Blisterwood", "Volcanic Scape", "Blight Ruins", "Scattered Isles", "Marsh & Bog",
     };
 
@@ -178,11 +189,18 @@ public partial class DhceDock : ScrollContainer
         Header("WORLD");
         _seed = SpinRow("Seed", 0, 999999, 1, 12345);
         _oct = SpinRow("Octaves", 1, 12, 1, 6);
-        _size = SpinRow("Size (km)", 1, 60, 1, 30);
+        _size = SpinRow("Width (km)", 1, 80, 1, 40);   // E–W; canon map is 4:3 (40×30)
+        _height = SpinRow("Height (km)", 1, 80, 1, 30); // N–S
         _spacing = SpinRow("Spacing (m)", 4, 60, 1, 10);
         _chunk = SpinRow("Chunk size (m)", 32, 2048, 32, 256);
         _baseBlend = SpinRow("Base blend (m)", 0, 6000, 50, 1800); // softer per-region base-elevation steps; regen to apply
-        Slider("Height (km)", 0.1, 10, 0.1, 5.0, v => _world?.SetTerrainHeight((float)v));
+        _flatBase = new CheckButton
+        {
+            Text = "Flat base (sculpt all relief)", ButtonPressed = true,
+            TooltipText = "On: a flat plate draped with the canon art, sea level = plate (indent to add water; sculpt all relief).\nOff: auto canon relief + rivers/lakes. Regenerate to apply.",
+        };
+        _target.AddChild(_flatBase);
+        Slider("Terrain height (km)", 0.1, 10, 0.1, 5.0, v => _world?.SetTerrainHeight((float)v));
 
         BuildRegionMapSection(); // optional region-coloured PNG → overrides the built-in canon layout
         BuildBrushes();        // all paint tools + their contextual options
@@ -243,6 +261,7 @@ public partial class DhceDock : ScrollContainer
         AddTraitBrushButton(toolRow, "palette", "Palette family", 3);
         AddToolButton(toolRow, "cave", "Cave", ToolKind.Cave);
         AddToolButton(toolRow, "transition", "Transition", ToolKind.Transition);
+        AddToolButton(toolRow, "zone", "Zone Edit", ToolKind.Zone);
 
         // SIZE — applies to every tool, always shown.
         _optSize = NewGroup(sec);
@@ -250,6 +269,16 @@ public partial class DhceDock : ScrollContainer
         var sizeRow = new HFlowContainer();
         _optSize.AddChild(sizeRow);
         for (int lvl = 0; lvl < ToolState.SizeFractions.Length; lvl++) AddSizeButton(sizeRow, lvl);
+        // Absolute-radius override: type an exact brush radius in metres to shape very large or very
+        // small areas regardless of zoom. 0 = auto (the zoom-coupled icons above); else 0.2 m … 2 km.
+        _optSize.AddChild(Dim("Radius (m) — 0 = auto, else 0.2 … 2000:"));
+        _brushRadius = new SpinBox
+        {
+            MinValue = 0, MaxValue = 2000, Step = 0.1, Value = 0,
+            TooltipText = "Absolute brush radius in metres (0.2–2000). 0 = zoom-coupled (size icons).",
+        };
+        _brushRadius.ValueChanged += v => _tool.RadiusOverrideM = (float)v;
+        _optSize.AddChild(_brushRadius);
 
         // STRENGTH — sculpt tools.
         _optStrength = NewGroup(sec);
@@ -260,7 +289,7 @@ public partial class DhceDock : ScrollContainer
         // LIQUID — River / Flood.
         _optLiquid = NewGroup(sec);
         _target = _optLiquid;
-        _liquidKind = Options(new[] { "Water", "Lava" }, 0, idx => _tool.LiquidKind = (int)idx);
+        _liquidKind = Options(new[] { "Water", "Lava", "Marsh", "Ice" }, 0, idx => _tool.LiquidKind = (int)idx);
         Button(_optLiquid, "Generate streams", () => { if (HasWorld) { Eng.Call("generate_streams", 0.5, 1.0); _world.RepaintDirtyTerrain(); _world.RebuildLiquid(); } });
         _target = sec;
 
@@ -320,7 +349,152 @@ public partial class DhceDock : ScrollContainer
         _optTrait.AddChild(_traitEnumLabel);
         _optTrait.AddChild(_traitEnum);
 
+        BuildZoneOptions(sec);
+
         _target = sec;
+    }
+
+    // ZONE EDIT — select a whole zone, then apply whole-zone operations (the selection persists, so
+    // you can chain: select lake → Drop → Smooth edges → Fill). Selecting happens in the viewport;
+    // these buttons run the ops on the current selection (held in ToolState.ZoneSelection).
+    private void BuildZoneOptions(VBoxContainer sec)
+    {
+        _optZone = NewGroup(sec);
+        _target = _optZone;
+        _optZone.AddChild(Dim("Select a zone in the viewport, then edit it as one. Shift-click adds."));
+
+        // Selection sub-mode.
+        var modeRow = new HFlowContainer();
+        AddZoneModeButton(modeRow, "Smart", ToolState.ZoneSelectMode.Smart, "Grow across smooth terrain, snap at sharp contrast");
+        AddZoneModeButton(modeRow, "Water", ToolState.ZoneSelectMode.Water, "Select a whole lake / water body");
+        AddZoneModeButton(modeRow, "Region", ToolState.ZoneSelectMode.Contiguous, "Select the contiguous same-region area");
+        AddZoneModeButton(modeRow, "Polygon", ToolState.ZoneSelectMode.Polygon, "Draw an outline (right-click closes)");
+        _optZone.AddChild(modeRow);
+        Slider("Smart tolerance", 0.005, 0.3, 0.005, _tool.ZoneTolerance, v => _tool.ZoneTolerance = (float)v);
+        _zoneCountLabel = Dim("Selection: 0 cells");
+        _optZone.AddChild(_zoneCountLabel);
+        Button(_optZone, "Clear selection", ClearZoneSelectionFromDock);
+
+        _optZone.AddChild(Dim("— Elevation —"));
+        Slider("Offset (m)", 1, 2000, 1, _tool.ZoneOffsetM, v => _tool.ZoneOffsetM = (float)v);
+        var offsetRow = new HBoxContainer();
+        Button(offsetRow, "Drop", () => ZoneOffset(-1));
+        Button(offsetRow, "Raise", () => ZoneOffset(+1));
+        _optZone.AddChild(offsetRow);
+        Button(_optZone, "Level (to mean)", ZoneLevel);
+        Button(_optZone, "Add grade (click low → high)", ArmZoneGrade);
+
+        _optZone.AddChild(Dim("— Smoothing —"));
+        Slider("Iterations", 1, 30, 1, _tool.ZoneSmoothIters, v => _tool.ZoneSmoothIters = (int)v);
+        Slider("Strength", 0.05, 1, 0.05, _tool.ZoneSmoothWeight, v => _tool.ZoneSmoothWeight = (float)v);
+        Button(_optZone, "Smooth zone", ZoneSmooth);
+        Slider("Feather width (m)", 50, 4000, 50, _tool.ZoneFeatherWidthM, v => _tool.ZoneFeatherWidthM = (float)v);
+        Button(_optZone, "Smooth edges (feather)", ZoneFeather);
+
+        _optZone.AddChild(Dim("— Water —"));
+        Options(new[] { "Water", "Lava", "Marsh", "Ice" }, 0, idx => _tool.ZoneFillKind = (int)idx);
+        Slider("Fill above rim (m)", 0, 1000, 5, _tool.ZoneFillOffsetM, v => _tool.ZoneFillOffsetM = (float)v);
+        Button(_optZone, "Fill water (to rim)", ZoneFill);
+
+        _zoneUndoBtn = new Button { Text = "Undo last zone edit", SizeFlagsHorizontal = SizeFlags.ExpandFill, Disabled = true };
+        _zoneUndoBtn.Pressed += () => { _world?.UndoZone(); RefreshZoneButtons(); SetStatus("undid last zone edit"); };
+        _optZone.AddChild(_zoneUndoBtn);
+
+        _target = sec;
+    }
+
+    private void AddZoneModeButton(Container parent, string label, ToolState.ZoneSelectMode mode, string tip)
+    {
+        var b = new Button { Text = label, ToggleMode = true, ButtonGroup = _zoneModeGroup, TooltipText = tip };
+        b.Pressed += () => { _tool.Active = ToolKind.Zone; _tool.ZoneSelect = mode; RefreshBrushOptions(); SetStatus($"zone select: {label}"); };
+        if (_tool.ZoneSelect == mode) b.ButtonPressed = true;
+        parent.AddChild(b);
+    }
+
+    private bool HasZoneSel => HasWorld && _tool.HasZoneSelection;
+
+    private void ZoneOffset(int sign)
+    {
+        if (!HasZoneSel) { SetStatus("select a zone first"); return; }
+        double delta = sign * _tool.ZoneOffsetM / Mathf.Max(_world.Exaggeration, 1f);
+        _world.SnapshotForZone(true);
+        var touched = Eng.Call("zone_offset", _tool.ZoneSelection, delta).As<int[]>();
+        AfterZoneEdit($"{(sign < 0 ? "dropped" : "raised")} {touched.Length} cells");
+    }
+
+    private void ZoneLevel()
+    {
+        if (!HasZoneSel) { SetStatus("select a zone first"); return; }
+        double mean = Eng.Call("zone_mean_elevation", _tool.ZoneSelection).AsDouble();
+        _world.SnapshotForZone(true);
+        var touched = Eng.Call("zone_level", _tool.ZoneSelection, mean, (double)_tool.ZoneLevelWeight).As<int[]>();
+        AfterZoneEdit($"levelled {touched.Length} cells to mean");
+    }
+
+    private void ZoneSmooth()
+    {
+        if (!HasZoneSel) { SetStatus("select a zone first"); return; }
+        _world.SnapshotForZone(true);
+        var touched = Eng.Call("zone_smooth", _tool.ZoneSelection, (long)_tool.ZoneSmoothIters, (double)_tool.ZoneSmoothWeight).As<int[]>();
+        AfterZoneEdit($"smoothed {touched.Length} cells");
+    }
+
+    private void ZoneFeather()
+    {
+        if (!HasZoneSel) { SetStatus("select a zone first"); return; }
+        _world.SnapshotForZone(true);
+        var touched = Eng.Call("zone_feather_edges", _tool.ZoneSelection, (double)_tool.ZoneFeatherWidthM,
+            (double)_tool.ZoneSmoothWeight, (long)_tool.ZoneSmoothIters).As<int[]>();
+        AfterZoneEdit($"feathered {touched.Length} edge cells");
+    }
+
+    private void ZoneFill()
+    {
+        if (!HasZoneSel) { SetStatus("select a zone first"); return; }
+        double rim = Eng.Call("zone_rim_level", _tool.ZoneSelection).AsDouble();
+        if (double.IsNaN(rim)) { SetStatus("zone has no rim to fill to"); return; }
+        double target = rim + _tool.ZoneFillOffsetM / Mathf.Max(_world.Exaggeration, 1f);
+        _world.SnapshotForZone(true);
+        var touched = Eng.Call("zone_fill_liquid", _tool.ZoneSelection, target, (long)_tool.ZoneFillKind).As<int[]>();
+        _world.RepaintDirtyTerrain();
+        _world.RebuildLiquid();
+        _world.BuildSelectionOverlay(_tool.ZoneSelection);
+        RefreshZoneButtons();
+        SetStatus($"filled {touched.Length} cells to the rim");
+    }
+
+    private void ArmZoneGrade()
+    {
+        if (!HasZoneSel) { SetStatus("select a zone first"); return; }
+        _tool.ZoneGradeArmed = true; _tool.ZoneGradeHasLow = false;
+        SetStatus("grade: click the LOW point, then the HIGH point (Esc cancels)");
+    }
+
+    /// Re-tessellate, re-conform the selection overlay to the new surface, and refresh the buttons.
+    private void AfterZoneEdit(string msg)
+    {
+        _world.RepaintDirtyTerrain();
+        _world.RebuildLiquid();
+        _world.BuildSelectionOverlay(_tool.ZoneSelection);
+        RefreshZoneButtons();
+        SetStatus(msg);
+    }
+
+    private void ClearZoneSelectionFromDock()
+    {
+        _tool.ZoneSelection = System.Array.Empty<int>();
+        _tool.ZoneGradeArmed = false; _tool.ZoneGradeHasLow = false;
+        if (_world != null) { _world.ClearSelectionOverlay(); _world.DimCanonForSelection(false); }
+        RefreshZoneButtons();
+        SetStatus("cleared selection");
+    }
+
+    /// Refresh the zone readout (cell count) and the undo button's enabled state. Called by the plugin
+    /// after a viewport selection and by the dock after each op.
+    public void RefreshZoneButtons()
+    {
+        if (_zoneCountLabel != null) _zoneCountLabel.Text = $"Selection: {(_tool?.ZoneSelection?.Length ?? 0)} cells";
+        if (_zoneUndoBtn != null) _zoneUndoBtn.Disabled = !(_world != null && _world.HasZoneUndo);
     }
 
     /// Show only the active tool's option group (size always shows).
@@ -338,6 +512,15 @@ public partial class DhceDock : ScrollContainer
         if (_optBiome != null) _optBiome.Visible = a == ToolKind.Biome;
         if (_optRegion != null) _optRegion.Visible = region;
         if (_optTrait != null) _optTrait.Visible = a == ToolKind.Trait;
+        if (_optZone != null) _optZone.Visible = a == ToolKind.Zone;
+        // The zone selection persists across tool switches (for chaining), but its highlight + canon dim
+        // only show while the Zone tool is active — so other tools see the normal canon drape.
+        if (HasWorld)
+        {
+            bool zoneShown = a == ToolKind.Zone && _tool.HasZoneSelection;
+            _world.SetSelectionOverlayVisible(zoneShown);
+            _world.DimCanonForSelection(zoneShown);
+        }
     }
 
     private VBoxContainer NewGroup(Container parent)
@@ -365,6 +548,26 @@ public partial class DhceDock : ScrollContainer
             sb.ValueChanged += v => OnRegionLandform(idx, v);
             _landSpins[i] = sb;
         }
+        // Per-region base terrain (seeds the region-guided elevation; takes effect on Generate). Base
+        // height in metres; gradient is the TOTAL rise across the region from its low edge to its high
+        // edge along the rotation (0° = North, clockwise). The gradient pivots about the region centre,
+        // which sits at the base height (so changing base height moves the whole ramp) — tick "Pin anchor"
+        // to fix the pivot at an explicit height instead.
+        _target.AddChild(Dim("— Base terrain (regenerate to apply) —"));
+        _baseHeightSpin = SpinRow("Base height (m)", -8000, 8000, 10, 0);
+        _baseHeightSpin.ValueChanged += v => OnRegionBaseHeight(v);
+        _gradientSpin = SpinRow("Gradient — total rise (m)", -8000, 8000, 10, 0);
+        _gradientSpin.ValueChanged += v => OnRegionGradient(v);
+        _gradientRotSpin = SpinRow("Gradient rotation (°, 0=N CW)", 0, 360, 5, 0);
+        _gradientRotSpin.ValueChanged += v => OnRegionGradientRotation(v);
+        _gradientAnchorCheck = new CheckBox { Text = "Pin gradient anchor (else follows base)" };
+        _gradientAnchorCheck.Toggled += _ => OnRegionGradientAnchor();
+        _target.AddChild(_gradientAnchorCheck);
+        _gradientAnchorSpin = SpinRow("Anchor height (m)", -8000, 8000, 10, 0);
+        _gradientAnchorSpin.Editable = false;
+        _gradientAnchorSpin.ValueChanged += _ => OnRegionGradientAnchor();
+        _target.AddChild(Dim("Applies on Generate. Generate with 'Flat authoring base' OFF (WORLD) to see it — the flat base ignores region heights. Heights clamp to the world's height scale (TerrainHeightKm)."));
+
         // Per-region water tiers. Lake fill depth: how deep a closed basin must be before it holds a
         // lake/pond here. River threshold: what share of the basin's peak flow a cell must carry before
         // it becomes a trunk river here. Both default from the region's moisture; lower ⇒ more water.
@@ -463,13 +666,18 @@ public partial class DhceDock : ScrollContainer
         _world.Seed = (int)_seed.Value;
         _world.Octaves = (int)_oct.Value;
         _world.WorldSizeKm = (float)_size.Value;
+        _world.WorldHeightKm = (float)_height.Value;
         _world.SpacingM = (float)_spacing.Value;
         _world.ChunkSizeM = (float)_chunk.Value;
         _world.BaseBlendM = (float)_baseBlend.Value;
+        _world.FlatBase = _flatBase.ButtonPressed;
         SetStatus("Generating… (the editor pauses a few seconds)");
         _world.Generate();
         _wasGenDone = false; // force a value reload on the next Bind
-        SetStatus($"Generated ~{_world.WorldWidthM / 1000f:0.0} km. Select the node and left-drag to paint.");
+        // Auto-select the world node so the viewport brushes are live immediately — the plugin only
+        // forwards 3D input while the DhceWorld is the selected/edited node (else the cursor reads "dead").
+        try { var sel = EditorInterface.Singleton.GetSelection(); sel.Clear(); sel.AddNode(_world); } catch { }
+        SetStatus($"Generated ~{_world.WorldWidthM / 1000f:0.0} km — node selected; left-drag in the 3D view to paint.");
     }
 
     // --- region map (canon layout source) ---
@@ -481,8 +689,8 @@ public partial class DhceDock : ScrollContainer
     private void BuildRegionMapSection()
     {
         Header("REGION MAP", open: false);
-        _target.AddChild(Dim("Optional. Paint each region in its accent colour (see VIEW → Region for the accents); anything else or transparent reads as ocean. North = top. Blank = built-in canon layout."));
-        Button(_target, "Import region PNG…", OpenRegionMapDialog);
+        _target.AddChild(Dim("Optional. Paint each region in its accent colour (see VIEW → Region) and any water in a liquid colour (teal=water, orange=lava, olive=marsh, pale-blue=ice) to pool a 10 m body there. Fuzzy edges, shading & contour lines are OK — it votes by majority. Transparent/navy = ocean. North = top. Blank = built-in canon layout."));
+        Button(_target, "Import region map (PNG/JPG)…", OpenRegionMapDialog);
         Button(_target, "Use built-in canon layout", () =>
         {
             if (_world == null) { SetStatus("No DhceWorld in the scene."); return; }
@@ -501,9 +709,9 @@ public partial class DhceDock : ScrollContainer
             {
                 FileMode = FileDialog.FileModeEnum.OpenFile,
                 Access = FileDialog.AccessEnum.Filesystem,
-                Title = "Select a region-coloured PNG",
+                Title = "Select a region-coloured map (PNG/JPG)",
             };
-            _regionMapDialog.AddFilter("*.png", "PNG image");
+            _regionMapDialog.AddFilter("*.png,*.jpg,*.jpeg", "Image (PNG/JPG)");
             _regionMapDialog.FileSelected += OnRegionMapSelected;
             AddChild(_regionMapDialog);
         }
@@ -525,9 +733,11 @@ public partial class DhceDock : ScrollContainer
         _seed.Value = _world.Seed;
         _oct.Value = _world.Octaves;
         _size.Value = _world.WorldSizeKm;
+        _height.Value = _world.WorldHeightKm;
         _spacing.Value = _world.SpacingM;
         _chunk.Value = _world.ChunkSizeM;
         _baseBlend.Value = _world.BaseBlendM;
+        _flatBase.ButtonPressed = _world.FlatBase;
         if (_seaLevelSlider != null)
         {
             _seaLevelSlider.SetValueNoSignal(_world.SeaLevelNorm);
@@ -570,7 +780,64 @@ public partial class DhceDock : ScrollContainer
             _riverThreshSpin.Value = Eng.Call("river_threshold_of", SelectedLandRegion()).As<double>();
         if (_erosionSpin != null)
             _erosionSpin.Value = Eng.Call("erosion_of", SelectedLandRegion()).As<double>();
+        // Base-terrain knobs (stored normalized; shown in metres via the world's height scale).
+        float exag = Mathf.Max(_world.Exaggeration, 1f);
+        int lr = SelectedLandRegion();
+        if (_baseHeightSpin != null)
+            _baseHeightSpin.Value = Eng.Call("region_base_height_of", lr).As<double>() * exag;
+        if (_gradientSpin != null)
+            _gradientSpin.Value = Eng.Call("region_gradient_of", lr).As<double>() * exag;
+        if (_gradientRotSpin != null)
+            _gradientRotSpin.Value = Eng.Call("region_gradient_rotation_of", lr).As<double>();
+        if (_gradientAnchorCheck != null)
+        {
+            double anchorNorm = Eng.Call("region_gradient_anchor_of", lr).As<double>();
+            bool pinned = !double.IsNaN(anchorNorm);
+            _gradientAnchorCheck.ButtonPressed = pinned;
+            if (_gradientAnchorSpin != null)
+            {
+                _gradientAnchorSpin.Value = (pinned ? anchorNorm : Eng.Call("region_base_height_of", lr).As<double>()) * exag;
+                _gradientAnchorSpin.Editable = pinned;
+            }
+        }
         _loadingLandform = false;
+    }
+
+    private void OnRegionBaseHeight(double meters)
+    {
+        if (_loadingLandform || !HasWorld) return;
+        int id = SelectedLandRegion();
+        Eng.Call("set_region_base_height", id, meters / Mathf.Max(_world.Exaggeration, 1f));
+        SetStatus($"{BiomeNames[id - 1]}: base height {meters:0} m — Generate to apply");
+    }
+
+    private void OnRegionGradient(double meters)
+    {
+        if (_loadingLandform || !HasWorld) return;
+        int id = SelectedLandRegion();
+        Eng.Call("set_region_gradient", id, meters / Mathf.Max(_world.Exaggeration, 1f));
+        SetStatus($"{BiomeNames[id - 1]}: gradient {meters:0} m total rise — Generate to apply");
+    }
+
+    private void OnRegionGradientRotation(double deg)
+    {
+        if (_loadingLandform || !HasWorld) return;
+        int id = SelectedLandRegion();
+        Eng.Call("set_region_gradient_rotation", id, deg);
+        SetStatus($"{BiomeNames[id - 1]}: gradient rotation {deg:0}° — Generate to apply");
+    }
+
+    private void OnRegionGradientAnchor()
+    {
+        if (_loadingLandform || !HasWorld) return;
+        int id = SelectedLandRegion();
+        bool pinned = _gradientAnchorCheck != null && _gradientAnchorCheck.ButtonPressed;
+        if (_gradientAnchorSpin != null) _gradientAnchorSpin.Editable = pinned;
+        double value = pinned ? _gradientAnchorSpin.Value / Mathf.Max(_world.Exaggeration, 1f) : double.NaN;
+        Eng.Call("set_region_gradient_anchor", id, value);
+        SetStatus(pinned
+            ? $"{BiomeNames[id - 1]}: gradient anchor pinned at {_gradientAnchorSpin.Value:0} m — Generate to apply"
+            : $"{BiomeNames[id - 1]}: gradient anchor follows base height — Generate to apply");
     }
 
     private void OnRegionLandform(int idx, double v)
@@ -751,7 +1018,8 @@ public partial class DhceDock : ScrollContainer
     {
         var b = new Button { ToggleMode = true, ButtonGroup = _sizeGroup };
         StyleIcon(b, $"size{level + 1}", $"Brush size {level + 1}");
-        b.Pressed += () => _tool.SetSizeLevel(level);
+        // Picking a zoom-coupled icon clears any absolute-radius override (back to auto).
+        b.Pressed += () => { _tool.SetSizeLevel(level); if (_brushRadius != null) _brushRadius.Value = 0; };
         if (level == _tool.SizeLevel) b.ButtonPressed = true;
         parent.AddChild(b);
     }

@@ -17,12 +17,14 @@ public partial class DhceWorldState : Resource
 {
     // Generation params (the deterministic seed of the whole world).
     [Export] public int Seed = 12345;
-    [Export] public float WorldSizeKm = 20f;
+    [Export] public float WorldSizeKm = 40f;   // world WIDTH km (E–W)
+    [Export] public float WorldHeightKm = 30f; // world HEIGHT km (N–S); canon map is 4:3
     [Export] public float SpacingM = 12f;
     [Export] public int Octaves = 6;
-    [Export] public float TerrainHeightKm = 2.4f;
+    [Export] public float TerrainHeightKm = 14.0f;
     [Export] public float ChunkSizeM = 256f;
     [Export] public float BaseBlendM = 1800f;         // width regions' base-elevation trunk blends (softer steps)
+    [Export] public bool FlatBase = true;             // flat authoring base (canon art on a one-level plate; sculpt all relief)
     [Export] public float SeaLevel = 0f; // water level (normalized elevation); default set at generate
     [Export] public float LapseRate = 0.6f;           // climate: temperature drop per unit elevation
     [Export] public float OrographicStrength = 0.45f; // climate: windward-wet / lee-dry moisture pull
@@ -54,4 +56,10 @@ public partial class DhceWorldState : Resource
     [Export] public float[] RegionLakeDepth = System.Array.Empty<float>();
     [Export] public float[] RegionRiverThreshold = System.Array.Empty<float>();
     [Export] public float[] RegionErosion = System.Array.Empty<float>();
+    // Per-Region base-terrain knobs (15 each; seed the region-guided elevation at Generate). Base height
+    // + gradient are stored normalized; rotation in degrees; anchor normalized (NaN = follow base height).
+    [Export] public float[] RegionBaseHeight = System.Array.Empty<float>();
+    [Export] public float[] RegionGradient = System.Array.Empty<float>();
+    [Export] public float[] RegionGradientRot = System.Array.Empty<float>();
+    [Export] public float[] RegionGradientAnchor = System.Array.Empty<float>();
 }

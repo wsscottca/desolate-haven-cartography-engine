@@ -167,6 +167,7 @@ public partial class DhcePlugin : EditorPlugin
 
     public override void _Edit(GodotObject @object)
     {
+        ClearZoneSelection();
         _edited = @object as DhceWorld;
         _painting = false;
         ClearPolygon();
@@ -175,7 +176,7 @@ public partial class DhcePlugin : EditorPlugin
 
     public override void _MakeVisible(bool visible)
     {
-        if (!visible) { FreeGizmo(); _edited = null; _painting = false; ClearPolygon(); FreeCaveOverlay(); }
+        if (!visible) { FreeGizmo(); ClearZoneSelection(); _edited = null; _painting = false; ClearPolygon(); FreeCaveOverlay(); }
     }
 
     /// Route 3D viewport input to the active tool: brush stroke (sculpt/trait/region brush), polygon
@@ -195,8 +196,11 @@ public partial class DhcePlugin : EditorPlugin
         bool isKey = @event is InputEventKey;
         if (!isButton && !isMotion && !isKey) return pass;
 
-        // Leaving the Territory tool mid-polygon cancels the in-progress outline.
-        if (_tool.Active != ToolKind.Territory && _polyVerts.Count > 0) ClearPolygon();
+        // Leaving the polygon tools mid-outline cancels the in-progress polygon (Territory assigns a
+        // region; Zone+Polygon sets the zone selection — both share the _polyVerts outline).
+        bool polyToolActive = _tool.Active == ToolKind.Territory
+            || (_tool.Active == ToolKind.Zone && _tool.ZoneSelect == ToolState.ZoneSelectMode.Polygon);
+        if (!polyToolActive && _polyVerts.Count > 0) ClearPolygon();
 
         // Resolve the hovered surface point (drives readouts, the gizmo, and polygon vertices).
         Vector3 hit = Vector3.Zero;
@@ -216,10 +220,13 @@ public partial class DhcePlugin : EditorPlugin
             _mapPanel?.SetTraitReadout(
                 onTerrain ? world.Engine.Call("trait_at", hit.X, hit.Z, 4).AsDouble() : double.NaN,
                 onTerrain ? world.Engine.Call("trait_at", hit.X, hit.Z, 5).AsDouble() : double.NaN);
-            // Zoom-coupled brush: radius = fraction of the camera→cursor distance, so the ring keeps a
-            // constant on-screen size at any zoom. hit is core space → convert to editor space to measure.
+            // Brush radius: an absolute metre override (dock number picker) wins when set; otherwise it's
+            // zoom-coupled — a fraction of the camera→cursor distance, so the ring keeps a constant
+            // on-screen size at any zoom. hit is core space → convert to editor space to measure.
             if (onTerrain)
-                _tool.RadiusM = Mathf.Max(_tool.RadiusFraction * camera.GlobalPosition.DistanceTo(world.ToEditor(hit)), 1f);
+                _tool.RadiusM = _tool.RadiusOverrideM > 0f
+                    ? _tool.RadiusOverrideM
+                    : Mathf.Max(_tool.RadiusFraction * camera.GlobalPosition.DistanceTo(world.ToEditor(hit)), 1f);
         }
 
         // Polygon Territory tool owns clicks; no brush gizmo while it's active.
@@ -227,6 +234,14 @@ public partial class DhcePlugin : EditorPlugin
         {
             FreeGizmo();
             return HandlePolygon(world, @event, hit, onTerrain) ? stop : pass;
+        }
+
+        // Zone Edit tool: clicks pick a whole zone (smart / water / contiguous / polygon) and the
+        // two-click grade; the actual edits run from the dock's op buttons. No brush gizmo.
+        if (_tool.Active == ToolKind.Zone)
+        {
+            FreeGizmo();
+            return HandleZone(world, @event, hit, onTerrain) ? stop : pass;
         }
 
         // Cave brush: a left-drag lays a tube of carve spheres (spaced ~half the zoom-coupled radius);
@@ -396,6 +411,142 @@ public partial class DhcePlugin : EditorPlugin
     {
         if (_polyLine != null && GodotObject.IsInstanceValid(_polyLine)) _polyLine.QueueFree();
         _polyLine = null;
+    }
+
+    // --- Zone Edit tool: click to select a whole zone, then edit it from the dock ---
+
+    /// Returns true if the event was consumed. Picks the zone selection by sub-mode, or captures the
+    /// two-click grade (low → high) when the dock has armed it.
+    private bool HandleZone(DhceWorld world, InputEvent e, Vector3 hit, bool onTerrain)
+    {
+        // Two-click grade capture (armed from the dock): first click = low point, second = high → apply.
+        if (_tool.ZoneGradeArmed)
+        {
+            if (e is InputEventKey gk && gk.Pressed && gk.Keycode == Key.Escape)
+            {
+                _tool.ZoneGradeArmed = false; _tool.ZoneGradeHasLow = false;
+                _dock?.SetStatus("grade cancelled");
+                return true;
+            }
+            if (e is InputEventMouseButton gb && gb.Pressed && gb.ButtonIndex == MouseButton.Left)
+            {
+                if (!onTerrain) return true;
+                if (!_tool.ZoneGradeHasLow)
+                {
+                    _tool.ZoneGradeLow = hit; _tool.ZoneGradeHasLow = true;
+                    _dock?.SetStatus("grade: now click the HIGH point");
+                    return true;
+                }
+                float exag = Mathf.Max(world.Exaggeration, 1f);
+                Vector3 lo = _tool.ZoneGradeLow;
+                if (_tool.HasZoneSelection)
+                {
+                    world.SnapshotForZone(true);
+                    var touched = world.Engine.Call("zone_grade", _tool.ZoneSelection,
+                        (double)lo.X, (double)lo.Z, (double)(lo.Y / exag),
+                        (double)hit.X, (double)hit.Z, (double)(hit.Y / exag)).As<int[]>();
+                    world.RepaintDirtyTerrain(); world.RebuildLiquid();
+                    world.BuildSelectionOverlay(_tool.ZoneSelection);
+                    _dock?.SetStatus($"graded {touched.Length} cells");
+                }
+                _tool.ZoneGradeArmed = false; _tool.ZoneGradeHasLow = false;
+                _dock?.RefreshZoneButtons();
+                return true;
+            }
+            return e is InputEventMouseButton; // swallow other clicks while arming
+        }
+
+        // Polygon sub-mode reuses the territory outline, but sets the zone selection on close.
+        if (_tool.ZoneSelect == ToolState.ZoneSelectMode.Polygon)
+            return HandleZonePolygon(world, e, hit, onTerrain);
+
+        // Click selection (smart / water / contiguous). Shift adds to the current selection.
+        if (e is InputEventMouseButton mb && mb.Pressed && mb.ButtonIndex == MouseButton.Left)
+        {
+            if (!onTerrain) return false; // off terrain → let the editor select
+            long cell = world.Engine.Call("region_at", hit.X, hit.Z).AsInt64();
+            if (cell < 0) return true;
+            int[] sel = _tool.ZoneSelect switch
+            {
+                ToolState.ZoneSelectMode.Water => world.Engine.Call("select_water_body", cell).As<int[]>(),
+                ToolState.ZoneSelectMode.Contiguous => world.Engine.Call("select_contiguous", cell).As<int[]>(),
+                _ => world.Engine.Call("select_by_elevation", cell, (double)_tool.ZoneTolerance).As<int[]>(),
+            };
+            bool additive = e is InputEventWithModifiers mod && mod.ShiftPressed;
+            if (additive && _tool.HasZoneSelection) sel = UnionCells(_tool.ZoneSelection, sel);
+            SetZoneSelection(world, sel);
+            _dock?.SetStatus($"selected {sel.Length} cells");
+            return true;
+        }
+        return false;
+    }
+
+    private bool HandleZonePolygon(DhceWorld world, InputEvent e, Vector3 hit, bool onTerrain)
+    {
+        if (e is InputEventKey k && k.Pressed && k.Keycode == Key.Escape)
+        {
+            ClearPolygon(); _dock?.SetStatus("polygon cancelled"); return true;
+        }
+        if (e is InputEventMouseMotion)
+        {
+            if (_polyVerts.Count > 0) UpdatePolyOverlay(world, onTerrain ? hit : (Vector3?)null);
+            return false; // keep camera navigation working while outlining
+        }
+        if (e is InputEventMouseButton mb && mb.Pressed)
+        {
+            if (mb.ButtonIndex == MouseButton.Left)
+            {
+                if (!onTerrain) return false;
+                _polyVerts.Add(hit);
+                UpdatePolyOverlay(world, null);
+                _dock?.SetStatus($"polygon: {_polyVerts.Count} pts — right-click to close, Esc to cancel");
+                return true;
+            }
+            if (mb.ButtonIndex == MouseButton.Right && _polyVerts.Count >= 3)
+            {
+                var xs = new float[_polyVerts.Count];
+                var ys = new float[_polyVerts.Count];
+                for (int i = 0; i < _polyVerts.Count; i++) { xs[i] = _polyVerts[i].X; ys[i] = _polyVerts[i].Z; }
+                var sel = world.Engine.Call("regions_in_polygon", xs, ys).As<int[]>();
+                SetZoneSelection(world, sel);
+                _dock?.SetStatus($"selected {sel.Length} cells (polygon)");
+                ClearPolygon();
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// Store the new zone selection, redraw the overlay, and dim the canon drape so it reads.
+    private void SetZoneSelection(DhceWorld world, int[] cells)
+    {
+        _tool.ZoneSelection = cells ?? System.Array.Empty<int>();
+        world.BuildSelectionOverlay(_tool.ZoneSelection);
+        world.DimCanonForSelection(_tool.HasZoneSelection);
+        _dock?.RefreshZoneButtons();
+    }
+
+    /// Drop the zone selection (overlay + canon dim) — called on world change / tool teardown.
+    private void ClearZoneSelection()
+    {
+        if (_edited != null && GodotObject.IsInstanceValid(_edited))
+        {
+            _edited.ClearSelectionOverlay();
+            _edited.DimCanonForSelection(false);
+        }
+        _tool.ZoneSelection = System.Array.Empty<int>();
+        _tool.ZoneGradeArmed = false; _tool.ZoneGradeHasLow = false;
+        _dock?.RefreshZoneButtons();
+    }
+
+    /// Union two cell-id sets (Shift-add to a selection), de-duplicated.
+    private static int[] UnionCells(int[] a, int[] b)
+    {
+        var set = new System.Collections.Generic.HashSet<int>(a);
+        foreach (var c in b) set.Add(c);
+        var outArr = new int[set.Count];
+        set.CopyTo(outArr);
+        return outArr;
     }
 
     // --- cave carve-volume gizmos (translucent spheres; geometry baked at export) ---

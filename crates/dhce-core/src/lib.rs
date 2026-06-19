@@ -26,6 +26,7 @@ pub mod liquids;
 pub mod geometry;
 pub mod regions;
 pub mod regionmap;
+pub mod canon_color;
 pub mod scatter;
 pub mod volumetric;
 pub mod world;

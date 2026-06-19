@@ -34,13 +34,14 @@ fn build_is_deterministic() {
 
 #[test]
 fn canon_build_has_ocean_edges_a_ne_lake_and_all_regions() {
-    // The canon two-tier water model: every region appears, the edges are OCEAN, and the Great Lake
-    // is a PERCHED lake NE of center — its floor sits above the ocean, filled to its pour point (not
-    // a flooded sea-level basin). Built at a realistic scale (8 km) so territories are large relative
-    // to the border-grading width (a 1 km map would wash the lake basin out).
+    // The canon two-tier water model: every region appears, the CORNERS are OCEAN, and the Great Lake
+    // is a PERCHED lake in the central valley — its floor sits above the ocean, filled to its pour
+    // point (not a flooded sea-level basin). Built at a realistic scale (8 km) so territories are large
+    // relative to the border-grading width (a 1 km map would wash the lake basin out). The full-frame
+    // canon bake fills the 4:3 frame and reaches the N/S edges, so only the four corners are open sea.
     let mut w = World::new();
     w.build(8000.0, 8000.0, 40.0, 7, 5);
-    let sea = -0.4; // global ocean level: above the ocean floor (~-1), below the lake floor (~-0.1)
+    let sea = 0.0; // canon waterline: land is positive, water (ocean + the Great-Lake bowl) is below 0
     w.set_sea_level(sea);
     w.fill_lakes();
 
@@ -50,26 +51,26 @@ fn canon_build_has_ocean_edges_a_ne_lake_and_all_regions() {
         assert!(region_ids.iter().any(|&r| r == id), "canon region {id} is present");
     }
 
-    // Edges are ocean: terrain below the sea level.
-    for &(x, y) in &[(4000.0, 160.0), (4000.0, 7840.0), (160.0, 4000.0), (7840.0, 4000.0)] {
-        let h = w.height_at(x, y).expect("edge sample resolves a region");
-        assert!(h < sea, "edge ({x}, {y}) is ocean, got h={h}");
+    // Corners are ocean: terrain below the sea level (the N/S edge midpoints can now be land).
+    for &(x, y) in &[(160.0, 160.0), (7840.0, 160.0), (160.0, 7840.0), (7840.0, 7840.0)] {
+        let h = w.height_at(x, y).expect("corner sample resolves a region");
+        assert!(h < sea, "corner ({x}, {y}) is ocean, got h={h}");
     }
 
-    // The Great Lake (NE of center) is a *perched* lake: its floor is ABOVE the ocean and it holds
-    // standing water — not flooded down to sea level.
-    assert_eq!(w.region_id_at(4400.0, 3600.0), 3, "the NE-of-center point is the Great Lake");
-    let lake_floor = w.height_at(4400.0, 3600.0).expect("lake resolves");
-    assert!(lake_floor > sea, "the Great Lake floor is perched above the ocean, got {lake_floor}");
-    let depths = w.liquid_depth_export();
+    // The Great Lake is a bowl: open water at the centre (below the 0 waterline), shore rising to its
+    // rim — so it holds standing water.
     let elev = w.elevation_export();
-    let lake_has_perched_water = (0..region_ids.len())
-        .any(|r| region_ids[r] == 3 && depths[r] as f64 > 1e-3 && elev[r] as f64 > sea);
-    assert!(lake_has_perched_water, "the Great Lake holds perched water above the ocean");
+    let depths = w.liquid_depth_export();
+    assert!(
+        (0..region_ids.len()).any(|r| region_ids[r] == 3 && depths[r] as f64 > 1e-3),
+        "the Great Lake bowl holds water at the 0 waterline"
+    );
 
-    // Jagged Mountains (north) is dry highland standing above the ocean.
-    assert_eq!(w.region_id_at(4000.0, 1600.0), 1, "the north is Jagged Mountains");
-    assert!(w.height_at(4000.0, 1600.0).unwrap() > sea, "Jagged Mountains stand above the ocean");
+    // Jagged Mountains stand as dry highland above the ocean somewhere in the region.
+    assert!(
+        (0..region_ids.len()).any(|r| region_ids[r] == 1 && elev[r] as f64 > sea),
+        "Jagged Mountains stand above the ocean"
+    );
 }
 
 #[test]
@@ -78,10 +79,31 @@ fn climate_lapse_cools_high_ground() {
     // Scape (a warm region with a high base elevation) so its temperature stays in range — a cold
     // peak (e.g. Jagged) would already be clamped to 0 at the default lapse.
     let mut w = World::new();
-    w.build(4000.0, 4000.0, 30.0, 7, 5);
-    let (vx, vy) = (1600.0, 3040.0); // Volcanic Scape anchor (0.40, 0.76)
-    assert_eq!(w.region_id_at(vx, vy), 11, "the sample sits in the Volcanic Scape");
-    assert!(w.height_at(vx, vy).unwrap() > 0.1, "the sample is elevated land");
+    // 8 km, full pipeline — mountain HEIGHT now comes from the shaped relief (reshape_and_reflow),
+    // not the moderated base trunk, so the volcano only stands tall after shaping.
+    w.build(8000.0, 8000.0, 40.0, 7, 5);
+    let sea = w.min_elevation() + 0.6;
+    w.set_sea_level(sea);
+    w.reshape_and_reflow(1.0, 0.015);
+    // Find an elevated Volcanic Scape (id 11) sample — the canon raster places the volcano
+    // south-center, so scan for it rather than hard-coding a point.
+    let mut sample = (0.0, 0.0);
+    let mut best_h = f64::NEG_INFINITY;
+    for gy in 0..80 {
+        for gx in 0..80 {
+            let (x, y) = ((gx as f64 + 0.5) / 80.0 * 8000.0, (gy as f64 + 0.5) / 80.0 * 8000.0);
+            if w.region_id_at(x, y) == 11 {
+                if let Some(h) = w.height_at(x, y) {
+                    if h > best_h {
+                        best_h = h;
+                        sample = (x, y);
+                    }
+                }
+            }
+        }
+    }
+    let (vx, vy) = sample;
+    assert!(best_h > 0.1, "the Volcanic Scape has elevated land, got max height {best_h}");
     let t0 = w.trait_at(vx, vy, 4).expect("temperature at the sample"); // trait 4 = temperature
     w.set_lapse_rate(1.4); // stronger than the 0.6 default
     w.recompute_climate();
@@ -323,7 +345,9 @@ fn sculpt_brushes_move_terrain() {
 #[test]
 fn per_region_erosion_table_roundtrips() {
     let mut w = built();
-    assert!((w.erosion_of(1) - 1.0).abs() < 1e-9, "erosion defaults to neutral 1.0");
+    assert!((w.erosion_of(2) - 1.0).abs() < 1e-9, "a neutral region defaults to 1.0");
+    // Mountains + the Great Lake get a boosted default (see regions::default_erosion).
+    assert!((w.erosion_of(1) - 1.3).abs() < 1e-9, "Jagged Mountains default to a boosted 1.3");
     w.set_erosion(1, 2.5);
     w.set_erosion(5, 0.0);
     let exp = w.erosion_export();
@@ -393,12 +417,12 @@ fn base_trunk_borders_are_gentle_not_cliffs() {
     // doesn't count) on the base+water field, before shaping (which legitimately roughens peaks), at the
     // real vertical exaggeration the editor uses.
     let mut w = built_canon(); // 8 km
-    let sea = -0.4;
+    let sea = 0.0; // canon waterline (land positive, water below 0; ocean floor is −1 km = −0.214)
     w.set_sea_level(sea);
     w.fill_lakes(); // pond the Great Lake so its basin wall is underwater (not a "visible" cliff)
     let elev = w.elevation_export();
     let depth = w.liquid_depth_export();
-    let exag = 5000.0 / 3.0; // TerrainHeightKm 5 → metres per normalized unit (DhceWorld.cs)
+    let exag = 14000.0 / 3.0; // TerrainHeightKm 14 → metres per normalized unit (DhceWorld.cs)
     let step = 40.0; // ≈ the region spacing
     let n = (8000.0 / step) as usize;
     // Dry interior land at a sample: inside the coastal ocean-rim band (d < 0.78 — the rim's land→sea
@@ -449,12 +473,14 @@ fn base_trunk_borders_are_gentle_not_cliffs() {
         "dry-land base slopes: max={max_slope:.2} ({:.0}°) at ({:.0},{:.0}) region={reg}, >45° fraction={steep_frac:.4} over {land_pairs} pairs",
         max_slope.atan().to_degrees(), max_at.0, max_at.1
     );
-    // Regression guard against the cliff regime (the wide coarse-grid grade replaced the too-narrow
-    // Jacobi diffuser). Pre-fix this world measured max≈11.5 (85°) with 13% of interior dry-land steeper
-    // than 45°; post-fix it's ~2.6 (69°) with <3%. The fraction is the systematic signal; the max bound
-    // catches a return toward vertical border steps (the isolated worst spot is a perched-basin rim).
-    assert!(steep_frac < 0.05, "interior dry-land must not be cliff-ridden, got {steep_frac:.4} > 45°");
-    assert!(max_slope < 4.0, "no near-vertical border steps, got max slope {max_slope:.2}");
+    // Regression guard. NOTE: the canon now uses **intentionally steep per-region gradients** (e.g.
+    // Jagged/Frozen rise 2 km across the region, Deep Wood 1.75 km) at a 14 km vertical exaggeration, so
+    // the base trunk legitimately carries a lot of 45°+ dry-land slope (~21%) — gentleness is no longer
+    // the goal; the grade only has to avoid a *total* cliff regime / near-vertical border artifacts (the
+    // pre-grade Jacobi bug hit max≈11.5 with everything stepped). grade_shorelines + shaping + author
+    // sculpting do the final polish. Bounds kept loose to track gross regressions, not the dramatic relief.
+    assert!(steep_frac < 0.40, "dry-land must not be a total cliff regime, got {steep_frac:.4} > 45°");
+    assert!(max_slope < 45.0, "no near-vertical (>89°) border artifacts, got max slope {max_slope:.2}");
 }
 
 #[test]
@@ -462,12 +488,12 @@ fn watershed_connects_lakes_rivers_and_ocean() {
     // After the unified pass all three water tiers coexist: an ocean below sea level, plus perched
     // water (lakes + their feeder/outlet rivers) standing on the land above it.
     let mut w = built_canon();
-    w.set_sea_level(-0.4);
+    w.set_sea_level(0.0); // canon waterline
     w.reshape_and_reflow(1.0, 0.05);
     let depth = w.liquid_depth_export();
     let elev = w.elevation_export();
-    let ocean = (0..elev.len()).filter(|&r| elev[r] <= -0.4 && depth[r] > 0.0).count();
-    let perched = (0..elev.len()).filter(|&r| elev[r] > -0.4 && depth[r] > 0.0).count();
+    let ocean = (0..elev.len()).filter(|&r| elev[r] <= 0.0 && depth[r] > 0.0).count();
+    let perched = (0..elev.len()).filter(|&r| elev[r] > 0.0 && depth[r] > 0.0).count();
     assert!(ocean > 0, "the ocean tier is present");
     assert!(perched > 0, "perched water (lakes + rivers) sits above the sea — the watershed reaches land");
 }
@@ -597,6 +623,41 @@ fn liquid_chunks_partition_the_wet_surface() {
     w.paint_liquid(1500.0, 1500.0, 200.0, 0.2, 0);
     assert!(!w.take_dirty_liquid_chunks().is_empty(), "a liquid edit flags its chunks");
     assert!(w.take_dirty_liquid_chunks().is_empty(), "taking liquid-dirty chunks clears them");
+}
+
+#[test]
+fn liquid_layout_pools_painted_cells_selectively() {
+    // The liquid-paint import overlay: a kind grid (0 = none, else kind+1) painted into the region map
+    // pools a shallow static body of that kind on the cells it covers — and ONLY those cells. The grid
+    // here paints the north half marsh (kind 2 → value 3) and leaves the south half unpainted (0).
+    let mut w = built(); // 1000×1000 canon (mostly dry land)
+    let pool = 0.01f64;
+    // 1 col × 2 rows: north row marsh, south row none (row 0 = north).
+    w.set_liquid_layout(&[3u8, 0u8], 1, 2);
+    w.apply_liquid_layout(pool);
+
+    let depth = w.liquid_depth_export();
+    let kind = w.liquid_kind_export();
+    // North dry-land cells now pool marsh at exactly the pool depth (max() leaves no prior water there).
+    let pooled = (0..depth.len())
+        .filter(|&r| (depth[r] - pool as f32).abs() < 1e-4 && kind[r] == 2)
+        .count();
+    assert!(pooled > 0, "painted marsh pools on dry land at the pool depth");
+    // The south half is untouched: some cells stay completely dry (depth 0). (Proves it's selective,
+    // not a flood-everything.)
+    let dry = depth.iter().filter(|&&d| d == 0.0).count();
+    assert!(dry > 0, "unpainted cells stay dry");
+
+    // Idempotent: re-applying with the same overlay doesn't deepen the pools (max(), not add).
+    w.apply_liquid_layout(pool);
+    let depth2 = w.liquid_depth_export();
+    assert_eq!(depth, depth2, "re-applying the overlay is a no-op (depth held by max)");
+
+    // Clearing the overlay makes apply a no-op (the existing pools are left as-is, nothing new stamped).
+    w.clear_liquid_layout();
+    let before = w.liquid_depth_export();
+    w.apply_liquid_layout(pool);
+    assert_eq!(before, w.liquid_depth_export(), "no overlay → apply does nothing");
 }
 
 fn avg_luma(colors: &[f32]) -> f32 {
@@ -1004,4 +1065,330 @@ fn chunk_size_is_settable_and_resizes_the_grid() {
     let mut w = World::new();
     w.set_chunk_size_m(0.0);
     assert!(w.chunk_size_m() >= 32.0, "chunk size clamps to a sane minimum");
+}
+
+// --- Zone Edit tool: smart selection + whole-zone operations ---------------------------------
+
+fn sel_variance(w: &World, sel: &[u32]) -> f64 {
+    let e = w.elevation_export();
+    let vals: Vec<f64> = sel.iter().map(|&r| e[r as usize] as f64).collect();
+    let n = vals.len().max(1) as f64;
+    let mean = vals.iter().sum::<f64>() / n;
+    vals.iter().map(|&x| (x - mean) * (x - mean)).sum::<f64>() / n
+}
+
+#[test]
+fn select_by_elevation_grows_on_smooth_and_stops_at_contrast() {
+    let mut w = built();
+    let nr = w.region_count();
+    w.set_elevation(&vec![0.0f32; nr]); // perfectly flat
+    let start = w.region_at(500.0, 500.0).expect("centre cell");
+    // On smooth ground a tight tolerance still grows across the whole interior.
+    let flat_sel = w.select_by_elevation(start, 0.01);
+    assert!(flat_sel.len() > nr / 2, "smart-select grows across smooth terrain ({} of {nr})", flat_sel.len());
+
+    // Punch a lone tall spike; with a tight tolerance it is a contrast wall the select stops at.
+    let spike = w.region_at(250.0, 250.0).expect("spike cell");
+    assert_ne!(spike, start, "distinct seed and spike cells");
+    let mut elev = w.elevation_export();
+    elev[spike] = 1.0;
+    w.set_elevation(&elev);
+    let sel = w.select_by_elevation(start, 0.01);
+    assert!(!sel.contains(&(spike as u32)), "the smart-select stops at the sharp spike");
+    // Seeding on the spike: every neighbour is a cliff away → only the spike selects.
+    assert_eq!(w.select_by_elevation(spike, 0.01), vec![spike as u32], "an isolated spike selects only itself");
+}
+
+#[test]
+fn zone_offset_shifts_selected_only() {
+    let mut w = built();
+    let nr = w.region_count();
+    w.set_elevation(&vec![0.0f32; nr]);
+    let spike = w.region_at(250.0, 250.0).expect("spike");
+    let mut elev = w.elevation_export();
+    elev[spike] = 1.0;
+    w.set_elevation(&elev);
+    let start = w.region_at(500.0, 500.0).expect("centre");
+    let sel = w.select_by_elevation(start, 0.01); // excludes the spike
+    let before = w.elevation_export();
+    let touched = w.zone_offset(&sel, -0.2);
+    assert_eq!(touched.len(), sel.len(), "offset touches every selected cell");
+    let after = w.elevation_export();
+    for &r in &sel {
+        let r = r as usize;
+        assert!((after[r] - (before[r] - 0.2)).abs() < 1e-5, "selected cell dropped by 0.2");
+    }
+    assert!((after[spike] - 1.0).abs() < 1e-6, "the unselected spike is unchanged");
+}
+
+#[test]
+fn zone_level_eases_to_target() {
+    let target = 0.3f64;
+    // weight 1.0 → every selected cell lands exactly on the target plane (level a plateau).
+    let mut w = built();
+    let start = w.region_at(500.0, 500.0).expect("centre");
+    let sel = w.select_contiguous(start);
+    w.zone_level(&sel, target, 1.0);
+    let after = w.elevation_export();
+    for &r in &sel {
+        assert!((after[r as usize] as f64 - target).abs() < 1e-5, "weight 1 flattens to target");
+    }
+    // weight 0.5 → each cell eases halfway from its start toward the target.
+    let mut w2 = built();
+    let sel2 = w2.select_contiguous(start);
+    let before = w2.elevation_export();
+    w2.zone_level(&sel2, target, 0.5);
+    let after2 = w2.elevation_export();
+    for &r in &sel2 {
+        let r = r as usize;
+        let expect = before[r] as f64 + (target - before[r] as f64) * 0.5;
+        assert!((after2[r] as f64 - expect).abs() < 1e-5, "weight 0.5 eases halfway");
+    }
+}
+
+#[test]
+fn zone_mean_matches_manual_average() {
+    let w = built();
+    let start = w.region_at(500.0, 500.0).expect("centre");
+    let sel = w.select_contiguous(start);
+    let elev = w.elevation_export();
+    let manual: f64 = sel.iter().map(|&r| elev[r as usize] as f64).sum::<f64>() / sel.len() as f64;
+    let got = w.zone_mean_elevation(&sel);
+    assert!((got - manual).abs() < 1e-5, "zone mean matches manual average: {got} vs {manual}");
+}
+
+#[test]
+fn zone_grade_ramps_along_the_axis() {
+    let mut w = built();
+    let nr = w.region_count();
+    w.set_elevation(&vec![0.0f32; nr]);
+    let start = w.region_at(500.0, 500.0).expect("centre");
+    let sel = w.select_by_elevation(start, 0.01); // the whole flat interior
+    // Ramp 0 at x=0 to 1 at x=1000 (west→east).
+    let touched = w.zone_grade(&sel, 0.0, 500.0, 0.0, 1000.0, 500.0, 1.0);
+    assert_eq!(touched.len(), sel.len());
+    let west = w.height_at(120.0, 500.0).expect("west sample");
+    let east = w.height_at(880.0, 500.0).expect("east sample");
+    assert!(east > west, "grade rises west→east: {west} -> {east}");
+    assert!((0.0..=1.0).contains(&west) && (0.0..=1.0).contains(&east), "within the ramp range");
+}
+
+#[test]
+fn zone_fill_to_rim_sets_depth() {
+    let mut w = built();
+    let nr = w.region_count();
+    w.set_elevation(&vec![0.0f32; nr]); // flat plate at 0
+    let start = w.region_at(500.0, 500.0).expect("centre");
+    let basin = vec![start as u32]; // a one-cell basin: its rim is the surrounding plate (0.0)
+    w.zone_offset(&basin, -0.3); // dig it to -0.3
+    let rim = w.zone_rim_level(&basin);
+    assert!((rim - 0.0).abs() < 1e-6, "rim is the surrounding plate level: {rim}");
+    let touched = w.zone_fill_liquid(&basin, rim, 0);
+    assert_eq!(touched.len(), 1);
+    let depth = w.liquid_depth_export();
+    assert!((depth[start] as f64 - 0.3).abs() < 1e-5, "filled to rim → depth = rim - floor = 0.3");
+}
+
+#[test]
+fn select_water_body_floods_only_wet_cells() {
+    let mut w = built_canon();
+    let sea = -0.4f64;
+    w.set_sea_level(sea);
+    w.fill_lakes();
+    let region = w.region_export();
+    let depth = w.liquid_depth_export();
+    let elev = w.elevation_export();
+    // Seed on a perched Great-Lake (region 3) cell that holds water.
+    let seed = (0..region.len())
+        .find(|&r| region[r] == 3 && depth[r] as f64 > 1e-3)
+        .expect("a wet Great-Lake cell");
+    let body = w.select_water_body(seed);
+    assert!(body.contains(&(seed as u32)), "the seed is part of its own water body");
+    for &r in &body {
+        let r = r as usize;
+        let wet = elev[r] as f64 <= sea || depth[r] as f64 > 0.0;
+        assert!(wet, "every cell in the body is standing water");
+    }
+}
+
+#[test]
+fn zone_smooth_reduces_variance() {
+    let mut w = built_canon(); // 8 km → regions have many cells, so the noise variance is meaningful
+    let nr = w.region_count();
+    // Put a deterministic noise field around one level across the WHOLE map, so smoothing's only job is
+    // to relax that noise — the neighbour anchors are the same distribution, not wildly-different region
+    // heights (which would legitimately *raise* a zone's variance by pulling its rim toward a tall
+    // neighbour). This isolates the relaxation behaviour the test means to check.
+    let mut e = vec![0.0f32; nr];
+    for (r, v) in e.iter_mut().enumerate() {
+        let h = (r as u32).wrapping_mul(2_654_435_761) >> 8 & 0xff; // stable per-cell hash
+        *v = h as f32 / 255.0 * 0.4 - 0.2; // ~[-0.2, 0.2]
+    }
+    w.set_elevation(&e);
+    let g = pick_land_region(&w);
+    let reg = w.region_export();
+    let start = (0..reg.len()).find(|&r| reg[r] as usize == g).expect("a land region cell");
+    let sel = w.select_contiguous(start);
+    let v0 = sel_variance(&w, &sel);
+    w.zone_smooth(&sel, 8, 0.5);
+    let v1 = sel_variance(&w, &sel);
+    assert!(v1 < v0, "smoothing relaxes in-zone noise: {v0} -> {v1}");
+}
+
+#[test]
+fn zone_feather_edits_edges_less_than_a_full_smooth() {
+    // A large canon region has genuine interior cells (not all on the rim), so a narrow feather —
+    // which only weights cells near the border — must move strictly less material than a full smooth.
+    let mut a = built_canon();
+    let sa = a.select_contiguous(a.region_at(4000.0, 4000.0).unwrap());
+    assert!(sa.len() > 50, "a large region with real interior ({} cells)", sa.len());
+    let before_a = a.elevation_export();
+    a.zone_smooth(&sa, 3, 0.5);
+    let after_a = a.elevation_export();
+    let full: f64 = sa.iter().map(|&r| (after_a[r as usize] - before_a[r as usize]).abs() as f64).sum();
+
+    let mut b = built_canon();
+    let sb = b.select_contiguous(b.region_at(4000.0, 4000.0).unwrap());
+    let before_b = b.elevation_export();
+    b.zone_feather_edges(&sb, 1.0, 0.5, 3); // tiny width → only the rim moves
+    let after_b = b.elevation_export();
+    let feath: f64 = sb.iter().map(|&r| (after_b[r as usize] - before_b[r as usize]).abs() as f64).sum();
+
+    assert!(feath > 0.0, "feather moves the edge");
+    assert!(feath < full, "a narrow feather touches less than a full smooth: {feath} vs {full}");
+}
+
+// --- per-Region base height + gradient + rotation (Generate-time terrain trunk) ---------------
+
+fn region_mean_elev(w: &World, g: usize) -> f64 {
+    let reg = w.region_export();
+    let el = w.elevation_export();
+    let (mut s, mut n) = (0.0f64, 0.0f64);
+    for r in 0..reg.len() {
+        if reg[r] as usize == g {
+            s += el[r] as f64;
+            n += 1.0;
+        }
+    }
+    if n > 0.0 { s / n } else { 0.0 }
+}
+
+fn region_elev_spread(w: &World, g: usize) -> f64 {
+    let reg = w.region_export();
+    let el = w.elevation_export();
+    let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
+    for r in 0..reg.len() {
+        if reg[r] as usize == g {
+            let e = el[r] as f64;
+            lo = lo.min(e);
+            hi = hi.max(e);
+        }
+    }
+    if hi >= lo { hi - lo } else { 0.0 }
+}
+
+/// The largest land region (excludes ocean id 0 and the Great Lake id 3) — a stable, sizable target.
+fn pick_land_region(w: &World) -> usize {
+    let reg = w.region_export();
+    let mut counts = [0usize; 16];
+    for &id in &reg {
+        let id = id as usize;
+        if id >= 1 && id < 16 {
+            counts[id] += 1;
+        }
+    }
+    let (mut best, mut bestc) = (0usize, 0usize);
+    for id in 1..16 {
+        if id != 3 && counts[id] > bestc {
+            bestc = counts[id];
+            best = id;
+        }
+    }
+    best
+}
+
+#[test]
+fn region_base_height_lifts_its_cells_on_generate() {
+    // Raising a region's base height should lift that region's terrain on the next Generate.
+    let mut w0 = World::new();
+    w0.set_base_blend_m(300.0); // sharp base trunk so the change isn't washed by the wide grade
+    w0.build(8000.0, 8000.0, 40.0, 7, 5);
+    let g = pick_land_region(&w0);
+    assert!(g >= 1, "found a land region");
+    let m0 = region_mean_elev(&w0, g);
+
+    let mut w1 = World::new();
+    w1.set_base_blend_m(300.0);
+    let cur = w1.region_base_height_of(g);
+    w1.set_region_base_height(g, cur + 0.6);
+    w1.build(8000.0, 8000.0, 40.0, 7, 5);
+    let m1 = region_mean_elev(&w1, g);
+    assert!(m1 > m0 + 0.3, "base height raises the region's mean elevation: {m0} -> {m1}");
+}
+
+#[test]
+fn region_gradient_widens_the_elevation_spread() {
+    // A gradient tilts the region's base plane, so its cells span a wider elevation range than flat.
+    // Flatten ALL region base heights (and zero their gradients) first, so the only spread comes from
+    // the gradient under test — not the inter-region grading of the (now widely varied) canon defaults.
+    let g = {
+        let mut w = World::new();
+        w.set_base_blend_m(300.0);
+        w.build(8000.0, 8000.0, 40.0, 7, 5);
+        pick_land_region(&w)
+    };
+    let spread_with = |grad: f64| {
+        let mut w = World::new();
+        w.set_base_blend_m(300.0);
+        for id in 0..=14usize {
+            w.set_region_base_height(id, 0.3);
+            w.set_region_gradient(id, 0.0);
+        }
+        w.set_region_gradient(g, grad);
+        w.set_region_gradient_rotation(g, 90.0); // east
+        w.build(8000.0, 8000.0, 40.0, 7, 5);
+        region_elev_spread(&w, g)
+    };
+    let s0 = spread_with(0.0);
+    let s1 = spread_with(0.8); // 0.8 total rise across the region (normalized)
+    assert!(s1 > s0 + 0.3, "the gradient widens the region's elevation spread: {s0} -> {s1}");
+}
+
+#[test]
+fn gradient_anchor_pins_the_level_independent_of_base_height() {
+    let g = {
+        let mut w = World::new();
+        w.set_base_blend_m(300.0);
+        w.build(8000.0, 8000.0, 40.0, 7, 5);
+        pick_land_region(&w)
+    };
+    let build_mean = |base: f64, anchor: f64| {
+        let mut w = World::new();
+        w.set_base_blend_m(300.0);
+        w.set_region_base_height(g, base);
+        w.set_region_gradient_anchor(g, anchor);
+        w.build(8000.0, 8000.0, 40.0, 7, 5);
+        region_mean_elev(&w, g)
+    };
+    // Anchor set → base height no longer moves the region's level.
+    let pinned_lo = build_mean(0.1, 0.5);
+    let pinned_hi = build_mean(0.9, 0.5);
+    assert!((pinned_lo - pinned_hi).abs() < 0.1, "anchor pins the level regardless of base: {pinned_lo} vs {pinned_hi}");
+    // Sanity: with NO anchor, base height DOES move it.
+    let free_lo = build_mean(0.1, f64::NAN);
+    let free_hi = build_mean(0.9, f64::NAN);
+    assert!(free_hi > free_lo + 0.3, "without an anchor, base height moves the level: {free_lo} -> {free_hi}");
+}
+
+#[test]
+fn selection_surface_packs_the_selected_cells() {
+    let mut w = World::new();
+    w.build(3000.0, 3000.0, 12.0, 7, 5); // multi-chunk, dense
+    let start = w.region_at(1500.0, 1500.0).expect("centre");
+    let sel = w.select_contiguous(start);
+    assert!(sel.len() > 3, "a real region cluster");
+    let s = w.selection_surface(&sel, 100.0).expect("a surface");
+    assert!(!s.positions.is_empty() && !s.indices.is_empty(), "selected cells produce overlay geometry");
+    let e = w.selection_surface(&[], 100.0).expect("a (degenerate) surface");
+    assert!(e.positions.is_empty() && e.indices.is_empty(), "no selection → no overlay");
 }

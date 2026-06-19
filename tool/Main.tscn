@@ -16,8 +16,10 @@ tonemap_mode = 2
 
 [node name="DhceWorld" type="Node3D" unique_id=1252092208]
 script = ExtResource("1_glv2v")
-WorldSizeKm = 8.0
-TerrainHeightKm = 5.1
+WorldSizeKm = 40.0
+WorldHeightKm = 30.0
+TerrainHeightKm = 14.0
+FlatBase = false
 metadata/_custom_type_script = "uid://dmnundkqt0175"
 
 [node name="Sun" type="DirectionalLight3D" parent="." unique_id=74196804]

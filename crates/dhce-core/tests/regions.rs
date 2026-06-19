@@ -110,10 +110,11 @@ fn lake_threshold_tracks_region_moisture() {
 #[test]
 fn region_liquid_and_pond_specials() {
     use dhce_core::regions::{default_liquid_kind, default_river_threshold, region_pond_cap};
-    // Volcanic Scape (11) ponds lava (kind 1); everything else water (kind 0).
+    // Per-region default liquid: 0 water, 1 lava, 2 murky marsh, 3 ice.
     assert_eq!(default_liquid_kind(11), 1, "Volcanic ponds lava");
     assert_eq!(default_liquid_kind(3), 0, "the Great Lake is water");
-    assert_eq!(default_liquid_kind(14), 0, "the marsh is water");
+    assert_eq!(default_liquid_kind(14), 2, "the Marsh Bog ponds murky water");
+    assert_eq!(default_liquid_kind(8), 3, "the Frozen Reaches pond ice");
     // Marsh & Bog (14) caps its pools shallow; other regions fill to the pour point (no cap).
     assert!(region_pond_cap(14).is_finite() && region_pond_cap(14) < 0.05, "marsh pools are shallow");
     assert!(region_pond_cap(5).is_infinite(), "the plains have no shallow cap");

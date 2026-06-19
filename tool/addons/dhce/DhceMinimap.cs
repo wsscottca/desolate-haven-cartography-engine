@@ -16,6 +16,7 @@ public partial class DhceMinimap : Control
     private GodotObject _engine;
     private float _widthM = 1f, _heightM = 1f;
     private ImageTexture _tex;
+    private int _texH = N; // minimap texture height (N × _texH); follows the world's aspect
     private Vector3 _focus;
     private float _zoom = 1f;
     private Vector2 _viewCenter = new(0.5f, 0.5f); // normalized
@@ -49,9 +50,12 @@ public partial class DhceMinimap : Control
     public void Refresh()
     {
         if (_engine == null) return;
+        int nh = (int)_engine.Call("minimap_height", N); // true aspect: N wide × nh tall (4:3 world)
+        if (nh < 1) nh = N;
         var bytes = _engine.Call("minimap", N, -0.7, -0.7).As<byte[]>(); // fixed NW light for shading
-        if (bytes.Length != N * N * 4) return;
-        var img = Image.CreateFromData(N, N, false, Image.Format.Rgba8, bytes);
+        if (bytes.Length != N * nh * 4) return;
+        var img = Image.CreateFromData(N, nh, false, Image.Format.Rgba8, bytes);
+        _texH = nh;
         _tex = ImageTexture.CreateFromImage(img);
         QueueRedraw();
     }
@@ -68,7 +72,7 @@ public partial class DhceMinimap : Control
 
         float ext = 1f / _zoom;
         Vector2 origin = _viewCenter - new Vector2(ext, ext) * 0.5f;
-        var src = new Rect2(origin.X * N, origin.Y * N, ext * N, ext * N);
+        var src = new Rect2(origin.X * N, origin.Y * _texH, ext * N, ext * _texH);
         DrawTextureRectRegion(_tex, new Rect2(Vector2.Zero, size), src);
 
         var norm = new Vector2(_focus.X / _widthM, _focus.Z / _heightM);

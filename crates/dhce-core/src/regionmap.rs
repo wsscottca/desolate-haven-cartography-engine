@@ -15,62 +15,68 @@
 use crate::mesh::Mesh;
 use crate::regions::REGION_COUNT;
 
-/// Uniform ocean margin (fraction of each side) the built-in layout forces to ocean, so the world is
-/// island-bound on all four edges regardless of which region anchor sits nearest. ~0.06 ≈ 1.8 km on
-/// a 30 km map. (The elevation pass's radial rim then rounds the coastline.)
-const OCEAN_MARGIN: f64 = 0.06;
-
 /// The 14 canon Region anchors as `(region_id, nx, ny)` in a **north-up, normalized** frame
 /// (`nx,ny ∈ [0,1]`, **north = small y** — matches the mesh frame and the minimap's row 0 = north).
 /// Translated from the guide's verbal geography (`lore/geography.md`); approximate starting points,
 /// overridable by an imported PNG. The Great Lake sits just **northeast of center** per the design.
 pub fn canon_anchors() -> [(u8, f64, f64); REGION_COUNT] {
+    // Positioned to the canon base map (`assets/canon-map-base.jpg`): icy peaks NW, gray peaks N,
+    // conifer forests W-of-center (Deep Wood W / Temperate E), the elven valley + small lake at
+    // center, the human grass-plains belt across the whole east, marsh in the NE corner, the tan
+    // savanna south-center, and the lava volcano at south-center with the blight/thorn lands SW.
     [
-        (1, 0.50, 0.22),  // Jagged Mountains — north, upriver of the inflow
-        (2, 0.36, 0.46),  // Sacred Woods & Plateau — west, lakeside
-        (3, 0.55, 0.45),  // Great Lake — center, ~1–2 km northeast
-        (4, 0.66, 0.42),  // Temperate Forest — east band, arcing NE→SW
-        (5, 0.68, 0.74),  // Open Plains — southeast, the Human Castle belt
-        (6, 0.52, 0.70),  // Underdeep — south of the lake
-        (7, 0.20, 0.44),  // Deep Wood — west, beyond Sacred Woods
-        (8, 0.10, 0.40),  // Frozen Reaches — farther west, past the Deep Wood
-        (9, 0.07, 0.47),  // Lost Isles — far-west coast (past the Frozen Reaches)
-        (10, 0.22, 0.78), // Blisterwood — far southwest
-        (11, 0.40, 0.76), // Volcanic Scape — southwest, between Blisterwood & the plains
-        (12, 0.12, 0.62), // Blight Ruins — southwest, among Blister/Frozen/Lost
-        (13, 0.86, 0.80), // Scattered Isles — southeast of the castle (port)
-        (14, 0.82, 0.58), // Marsh & Bog — east, NE of the castle / N of the Scattered Isles
+        (1, 0.46, 0.09),  // Jagged Mountains — gray rocky peaks, north-center
+        (2, 0.49, 0.36),  // Sacred Woods & Plateau — central green valley + settlement
+        (3, 0.40, 0.30),  // Great Lake — small lake just NW of the valley (river headwaters)
+        (4, 0.34, 0.40),  // Temperate Forest — east half of the conifer band
+        (5, 0.74, 0.46),  // Open Plains — the big eastern grass-hills (Human Castle belt)
+        (6, 0.40, 0.56),  // Underdeep — tan southern savanna, south-center
+        (7, 0.25, 0.33),  // Deep Wood — dense conifer forest, west half of the band
+        (8, 0.18, 0.10),  // Frozen Reaches — snowy ice-peaks NW + west-coast glaciers
+        (9, 0.06, 0.26),  // Lost Isles — far-NW coast / floating isles
+        (10, 0.34, 0.74), // Blisterwood — red thorn strip hugging the volcano's west flank
+        (11, 0.45, 0.82), // Volcanic Scape — the lava volcano, south-center
+        (12, 0.17, 0.63), // Blight Ruins — blighted gray covering the SW coast
+        (13, 0.87, 0.74), // Scattered Isles — SE port isles
+        (14, 0.80, 0.15), // Marsh & Bog — mottled wetland, NE corner
     ]
 }
 
-/// Built-in canon layout: each non-boundary cell takes the **nearest** anchor (squared distance,
-/// lowest id wins ties → total order → deterministic). Boundary-frame cells are ocean (`0`), so the
-/// rectangle's rim reads as open water; the elevation pass's banded rim then drowns the outer band.
+/// The canon base map (`assets/canon-map-base.jpg`) classified into a region raster, baked at build
+/// time. `crates/dhce-core/canon/classify_canon.py` flood-fills the ocean for the real organic
+/// coastline and assigns each land pixel to a region by colour-class + nearest-centroid, then bakes
+/// the artist's 4:3 map straight through (no letterbox/crop) into this `CANON_W × CANON_H` grid
+/// (row 0 = north), matching the canon's aspect and the 4:3 world. Regenerate by re-running that
+/// script. The grid is sampled by normalized `(u, v)`, so it is decoupled from the world's metres.
+const CANON_W: usize = 1536;
+const CANON_H: usize = 1152;
+static CANON_MAP: &[u8] = include_bytes!("canon_region_map.bin");
+
+/// Region id at a world point's normalized `(u, v)` (`u` west→east, `v` north→south, row 0 = north):
+/// a direct sample of the baked canon raster ([`CANON_MAP`]). `0` = ocean, `1..=14` = a canon place.
+/// This *is* the territory partition — the elevation + climate passes derive everything else from it,
+/// so the generated world reproduces the canon silhouette + region placement, organic edges and all.
+pub fn canon_region_at(u: f64, v: f64) -> u8 {
+    if CANON_MAP.len() < CANON_W * CANON_H {
+        return 0;
+    }
+    let gx = ((u.clamp(0.0, 1.0) * CANON_W as f64) as usize).min(CANON_W - 1);
+    let gy = ((v.clamp(0.0, 1.0) * CANON_H as f64) as usize).min(CANON_H - 1);
+    let id = CANON_MAP[gy * CANON_W + gx];
+    if id as usize <= REGION_COUNT { id } else { 0 }
+}
+
+/// Built-in canon layout: each non-boundary cell reads its region straight from the traced canon map
+/// ([`canon_region_at`]). Boundary-frame cells are forced ocean (`0`). This replaced the earlier
+/// nearest-anchor Voronoi layout (which could only make convex blobs, never the canon's irregular
+/// coastline + diagonal forest spit); [`canon_anchors`] is kept only as a coordinate reference.
 pub fn layout_from_anchors(mesh: &Mesh, width: f64, height: f64) -> Vec<u8> {
-    let anchors = canon_anchors();
     crate::util::par_map(mesh.num_regions(), |r| {
         if mesh.is_boundary_r(r) {
             return 0u8;
         }
         let p = mesh.pos_of_r(r);
-        let (u, v) = (p[0] / width, p[1] / height);
-        // Uniform ocean margin on every side → the world is island-bound.
-        if u < OCEAN_MARGIN || u > 1.0 - OCEAN_MARGIN || v < OCEAN_MARGIN || v > 1.0 - OCEAN_MARGIN {
-            return 0u8;
-        }
-        let mut best_id = 0u8;
-        let mut best_d2 = f64::INFINITY;
-        for &(id, ax, ay) in anchors.iter() {
-            let dx = u - ax;
-            let dy = v - ay;
-            let d2 = dx * dx + dy * dy;
-            // Strictly-less keeps the first (lowest-id) anchor on a tie → deterministic.
-            if d2 < best_d2 {
-                best_d2 = d2;
-                best_id = id;
-            }
-        }
-        best_id
+        canon_region_at(p[0] / width, p[1] / height)
     })
 }
 
@@ -100,8 +106,9 @@ mod tests {
     use super::*;
 
     fn mesh() -> Mesh {
-        // A coarse but dense-enough mesh to land cells near every anchor.
-        Mesh::new(1000.0, 1000.0, 25.0, 7)
+        // Dense enough to land a cell inside even the small canon regions (Great Lake / Lost Isles /
+        // Blisterwood are well under 1% of the raster).
+        Mesh::new(1000.0, 1000.0, 10.0, 7)
     }
 
     #[test]
@@ -140,30 +147,36 @@ mod tests {
     }
 
     #[test]
-    fn great_lake_anchor_is_northeast_of_center() {
+    fn great_lake_anchor_is_north_central() {
         let (id, nx, ny) = canon_anchors()[2]; // index 2 → region id 3
         assert_eq!(id, 3, "the third anchor is the Great Lake");
-        assert!(nx > 0.5, "the lake is east of center (nx={nx})");
+        // Canon map: the lake sits just NW of the central valley (river headwaters) — north of
+        // center, roughly central horizontally.
         assert!(ny < 0.5, "the lake is north of center (north = small y; ny={ny})");
+        assert!((0.25..=0.55).contains(&nx), "the lake is near the horizontal center (nx={nx})");
     }
 
     #[test]
-    fn outer_margin_is_ocean() {
+    fn corners_are_ocean() {
+        // The canon map is open sea in all four corners (the continent fills the 4:3 frame and now
+        // reaches the N/S edges — the full-frame bake no longer letterboxes — but the corners stay
+        // ocean), so the corner cells of the baked raster read as ocean. Edge *midpoints* may be land,
+        // so only the corners are asserted here.
         let m = mesh();
         let lay = layout_from_anchors(&m, 1000.0, 1000.0);
-        let mut checked = false;
+        let mut checked = 0;
         for r in 0..m.num_regions() {
             if m.is_boundary_r(r) {
                 continue;
             }
             let p = m.pos_of_r(r);
             let (u, v) = (p[0] / 1000.0, p[1] / 1000.0);
-            if u < 0.04 || u > 0.96 || v < 0.04 || v > 0.96 {
-                assert_eq!(lay[r], 0, "an outer-margin cell reads as ocean");
-                checked = true;
+            if (u < 0.04 || u > 0.96) && (v < 0.04 || v > 0.96) {
+                assert_eq!(lay[r], 0, "a corner cell reads as ocean (u={u}, v={v})");
+                checked += 1;
             }
         }
-        assert!(checked, "the coarse mesh has some margin cells to check");
+        assert!(checked > 0, "the coarse mesh has some corner cells to check");
     }
 
     #[test]

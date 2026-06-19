@@ -109,21 +109,23 @@ pub fn base_palettes() -> [BasePalette; fam::COUNT as usize] {
     let bp = |wd, ws, lo, rk, cw, cc| BasePalette {
         water_deep: c(wd), water_shallow: c(ws), low: c(lo), rock: c(rk), cap_warm: c(cw), cap_cold: c(cc),
     };
+    // Water stops are a shared **teal** (canon map's ocean reads teal, not navy): deep 0x153E45,
+    // shallow 0x3F858C. Ashen keeps its own molten ramp.
     [
         // Verdant — greens (temperate / forest lowlands)
-        bp(0x0C1C36, 0x32708C, 0x6E9256, 0x8C8174, 0x84807E, 0xF2F6FC),
+        bp(0x153E45, 0x3F858C, 0x6E9256, 0x8C8174, 0x84807E, 0xF2F6FC),
         // Arid — golds / tans (plains, dry)
-        bp(0x1E486E, 0x2C688A, 0xB6AA6C, 0x8C8174, 0x84807E, 0xF2F6FC),
+        bp(0x1B4A50, 0x3F858C, 0xB6AA6C, 0x8C8174, 0x84807E, 0xF2F6FC),
         // Stone — cool greys (mountains, rock)
-        bp(0x0C1C36, 0x32708C, 0x6F665A, 0x84807E, 0x8C8174, 0xF2F6FC),
+        bp(0x153E45, 0x3F858C, 0x6F665A, 0x84807E, 0x8C8174, 0xF2F6FC),
         // Ashen — volcanic reds / charcoals
         bp(0x7A2A1C, 0xD2542A, 0x3A3338, 0xC2462A, 0x565250, 0x84807E),
         // Frost — pale blue-whites
-        bp(0x0C1C36, 0x32708C, 0x8FB9C6, 0x84807E, 0xBFE3EA, 0xF2F6FC),
+        bp(0x153E45, 0x3F858C, 0x8FB9C6, 0x84807E, 0xBFE3EA, 0xF2F6FC),
         // Wetland — muddy greens / browns
-        bp(0x0C1C36, 0x32708C, 0x4F5B38, 0x6E7A4B, 0x6F665A, 0xF2F6FC),
+        bp(0x153E45, 0x3F858C, 0x4F5B38, 0x6E7A4B, 0x6F665A, 0xF2F6FC),
         // Exotic — fey / otherworldly (deep wood, sacred)
-        bp(0x0C1C36, 0x32708C, 0x494337, 0x6F665A, 0x84807E, 0xF2F6FC),
+        bp(0x153E45, 0x3F858C, 0x494337, 0x6F665A, 0x84807E, 0xF2F6FC),
     ]
 }
 
@@ -269,19 +271,21 @@ pub fn region_presets() -> [RegionDef; REGION_COUNT] {
         // Jagged peaks above a broad green hill ring (high jaggedness + wide foothill skirt, crisp/low erosion).
         RegionDef { label: "Jagged Mountains",     accent: c(MK_GOLD),      traits: t(0.92, 0.68, 0.75, 0.28, 0.28, 0.42, veg::EVERGREEN, fam::STONE),   water: w(1.0, 1.3, 0.4, 0.30, 1.4) },
         // A flat-topped elevated plateau (low jaggedness, very wide skirt → table-land, not peaks).
-        RegionDef { label: "Sacred Woods Plateau", accent: c(MK_BLUE),      traits: t(0.18, 0.42, 0.82, 0.35, 0.50, 0.62, veg::FOREST,    fam::VERDANT), water: w(1.1, 0.9, 0.5, 0.25, 1.2) },
+        RegionDef { label: "Sacred Forest",         accent: c(MK_BLUE),      traits: t(0.18, 0.42, 0.82, 0.35, 0.50, 0.62, veg::FOREST,    fam::VERDANT), water: w(1.1, 0.9, 0.5, 0.25, 1.2) },
         // Relief 0.40 so the lakebed undulates (with the below-waterline relief gate) — not a flat box.
         RegionDef { label: "Great Lake",           accent: c(MK_BLUE),      traits: t(0.10, 0.40, 0.55, 0.20, 0.50, 0.90, veg::GRASS,     fam::VERDANT), water: w(1.2, 0.7, 0.8, 0.4, 1.8) },
         // Rolling forested hills.
         RegionDef { label: "Temperate Forest",     accent: c(MK_WHITE),     traits: t(0.35, 0.55, 0.60, 0.30, 0.55, 0.62, veg::FOREST,    fam::VERDANT), water: w(1.1, 0.9, 0.6, 0.3, 1.2) },
         // Big-sky flatland (very low relief, very wide skirt) — the foothill apron mountains taper into.
-        RegionDef { label: "Open Plains",          accent: c(MK_WHITE),     traits: t(0.06, 0.20, 0.85, 0.35, 0.62, 0.38, veg::GRASS,     fam::ARID),    water: w(0.9, 1.0, 0.7, 0.2, 1.0) },
-        // Rolling-hill surface over the cavern/mine network (low jaggedness, moderate relief = rolling, per canon).
-        RegionDef { label: "Underdeep",            accent: c(MK_SILVER),    traits: t(0.22, 0.55, 0.55, 0.50, 0.45, 0.42, veg::SCRUB,     fam::STONE),   water: w(0.6, 1.2, 0.3, 0.2, 1.6) },
+        // Canon map: the eastern grass-hills read green (VERDANT), not gold — moister than a dry plain.
+        RegionDef { label: "Rolling Plains",        accent: c(MK_WHITE),     traits: t(0.06, 0.22, 0.85, 0.35, 0.60, 0.52, veg::GRASS,     fam::VERDANT), water: w(0.9, 1.0, 0.7, 0.2, 1.0) },
+        // Tan southern savanna over the cavern/mine network (low jaggedness, rolling, dry tan ground —
+        // ARID family, per the canon map's south-central plain).
+        RegionDef { label: "Underdeep",            accent: c(MK_SILVER),    traits: t(0.20, 0.40, 0.60, 0.45, 0.55, 0.40, veg::SCRUB,     fam::ARID),    water: w(0.6, 1.2, 0.3, 0.2, 1.6) },
         // Dense old-growth on rolling ground.
         RegionDef { label: "Deep Wood",            accent: c(MK_PURPLE),    traits: t(0.30, 0.55, 0.55, 0.30, 0.48, 0.72, veg::EVERGREEN, fam::EXOTIC),  water: w(1.2, 0.8, 0.5, 0.3, 1.2) },
         // Frozen buttes.
-        RegionDef { label: "Frozen Reaches",       accent: c(MK_LIGHTBLUE), traits: t(0.55, 0.45, 0.50, 0.40, 0.05, 0.50, veg::BARREN,    fam::FROST),   water: w(0.8, 1.1, 0.2, 0.2, 1.4) },
+        RegionDef { label: "Frozen Reaches",       accent: c(MK_LIGHTBLUE), traits: t(0.60, 0.62, 0.45, 0.35, 0.05, 0.50, veg::BARREN,    fam::FROST),   water: w(0.8, 1.1, 0.2, 0.2, 1.4) },
         // Tall ROUNDED rock knobs rising from the sea (high relief = tall, very low jaggedness + high erosion =
         // smooth/rounded, narrow skirt → distinct isles). Deliberately distinct from the sharp Jagged Mountains
         // (per the user's steer — guide canon updated to match: rounded Pandora-style rock, not jagged spires).
@@ -310,32 +314,77 @@ pub fn default_traits_for(region_id: u8) -> CellTraits {
     }
 }
 
-/// Per-Region **base elevation target** (normalized, the macro relief trunk the canon generator
-/// diffuses + rides low-frequency noise on). Mountains sit high, the Great Lake + ocean sit below
-/// sea level so [`crate::fluid::sea_fill`] floods them, coastal isles sit just under. Id `0` = ocean.
-/// Starting values — tuned live in the editor. Order matches [`region_presets`] (id = index + 1).
+/// Per-Region **base height** = the centre/pivot elevation of the region (normalized; the macro relief
+/// trunk the canon generator diffuses + rides low-frequency noise on, then [`default_gradient`] tilts).
+/// Authored values (the canon defaults), in metres at the 14 km terrain scale (`TerrainHeightKm = 14` ⇒
+/// 1.0 normalized ≈ 4667 m; ±1.5 ≈ ±7 km — land peaks to +7 km via shaping, water to −1 km). Each
+/// region's range is `base ± gradient/2` along its [`default_gradient_rotation`]; base heights stay well
+/// under the 7 km ceiling (shaping/relief builds the peaks). Id `0` = ocean. Tuned live (REGION LANDFORM).
 pub fn base_elevation_for(region_id: u8) -> f64 {
-    // Compressed land trunk: the highlands are pulled toward the lowland band (each value > 0.20
-    // mapped `0.20 + (old − 0.20)·0.55`) so regions keep their order/identity but read as mountains &
-    // hills rising from gentler ground rather than tall stepped plateaus — the within-region landform
-    // relief baked by `shape_terrain` now dominates the base steps. Lowlands/coast (≤ 0.20) and the
-    // water basins (Great Lake, ocean) are left below so `sea_fill` still floods them. Tuned live.
+    // base = midpoint of the authored range; gradient = its span (see default_gradient). Normalized as
+    // metres / (14000/3). The Great Lake's base is its *shore rim* — its centre is open water (a bowl,
+    // see `elevation.rs`); the ocean is the flooded basin at the −1 km max depth.
     match region_id {
-        1 => 0.53,  // Jagged Mountains — jagged peaks ringed by rolling hills (was 0.80)
-        2 => 0.34,  // Sacred Woods & Plateau — an elevated plateau (was 0.46)
-        3 => -0.10, // Great Lake (perched basin — floor above the ocean, filled to its pour point)
-        4 => 0.30,  // Temperate Forest — mountainous forest band (was 0.38)
-        5 => 0.08,  // Open Plains
-        6 => 0.22,  // Underdeep — rolling-hill surface (was 0.24)
-        7 => 0.24,  // Deep Wood — old-growth lowland forest (was 0.28)
-        8 => 0.33,  // Frozen Reaches — frozen buttes (was 0.44)
-        9 => 0.05,  // Lost Isles (low island land — rim drowns the coast into spires)
-        10 => 0.26, // Blisterwood (was 0.30)
-        11 => 0.43, // Volcanic Scape — active volcanic mountains (was 0.62)
-        12 => 0.20, // Blight Ruins
-        13 => 0.02, // Scattered Isles (archipelago — noise + rim break it into isles)
-        14 => 0.02, // Marsh & Bog (wet lowland)
-        _ => -1.00, // 0 / unknown → open ocean
+        1 => 0.6429,  // Jagged Mountains  — 3000 m (2–4 k, N)
+        2 => 0.2679,  // Sacred Forest     — 1250 m (1–1.5 k, NE)
+        3 => 0.1875,  // Great Lake        —  875 m shore rim (0.75–1 k, NE; centre is open water)
+        4 => 0.1607,  // Temperate Forest  —  750 m (0.5–1 k, NE)
+        5 => 0.0536,  // Rolling Plains    —  250 m (0.5–0, W)
+        6 => 0.2946,  // Underdeep         — 1375 m (0.75–2 k, S)
+        7 => 0.2411,  // Deep Wood         — 1125 m (0.25–2 k, NW)
+        8 => 0.6429,  // Frozen Reaches    — 3000 m (2–4 k, N)
+        9 => 0.3750,  // Lost Isles        — 1750 m (1.5–2 k, W)
+        10 => 0.4821, // Blisterwood       — 2250 m (2–2.5 k, SW)
+        11 => 0.5357, // Volcanic Scape    — 2500 m (2–3 k, S)
+        12 => 0.4821, // Blight Ruins      — 2250 m (2–2.5 k, W)
+        13 => 0.0000, // Scattered Isles   —    0 m (waterline isles)
+        14 => 0.0536, // Marsh Bog         —  250 m (0–0.5 k, W)
+        _ => -0.2143, // 0 / unknown → open ocean (−1 km, the max water depth)
+    }
+}
+
+/// Per-Region **gradient** = the total rise across the region (normalized, metres / (14000/3)), low edge
+/// → high edge along [`default_gradient_rotation`]. The canon defaults (the spans of the authored
+/// ranges). `0` = flat. Tuned live in the editor.
+pub fn default_gradient(region_id: u8) -> f64 {
+    match region_id {
+        1 => 0.4286,  // 2000 m
+        2 => 0.1071,  //  500 m
+        3 => 0.0536,  //  250 m
+        4 => 0.1071,  //  500 m
+        5 => 0.1071,  //  500 m
+        6 => 0.2679,  // 1250 m
+        7 => 0.3750,  // 1750 m
+        8 => 0.4286,  // 2000 m
+        9 => 0.1071,  //  500 m
+        10 => 0.1071, //  500 m
+        11 => 0.2143, // 1000 m
+        12 => 0.1071, //  500 m
+        13 => 0.0000, //    0 m
+        14 => 0.1071, //  500 m
+        _ => 0.0,
+    }
+}
+
+/// Per-Region **gradient rotation** = the compass direction the gradient rises toward (degrees, 0° =
+/// North, clockwise). The canon defaults (the direction of each authored range's high side).
+pub fn default_gradient_rotation(region_id: u8) -> f64 {
+    match region_id {
+        1 => 0.0,    // N
+        2 => 45.0,   // NE
+        3 => 45.0,   // NE
+        4 => 45.0,   // NE
+        5 => 270.0,  // W
+        6 => 180.0,  // S
+        7 => 315.0,  // NW
+        8 => 0.0,    // N
+        9 => 270.0,  // W
+        10 => 225.0, // SW
+        11 => 180.0, // S
+        12 => 270.0, // W
+        13 => 0.0,   // (flat)
+        14 => 270.0, // W
+        _ => 0.0,
     }
 }
 
@@ -358,11 +407,14 @@ pub fn default_lake_min_depth(region_id: u8) -> f64 {
 }
 
 /// The liquid a Region's ponded basins fill with (see [`crate::liquids::LiquidType`], stored as `u8`):
-/// the **Volcanic Scape** fills with lava/magma, every other Region with water. Read by
-/// [`crate::world::World::fill_lakes`] so a fresh map shows molten calderas in the volcanic land.
+/// **Volcanic Scape** → lava, **Marsh Bog** → murky marsh water, **Frozen Reaches** → ice, every other
+/// Region → water. Read by [`crate::world::World::fill_lakes`] so a fresh map shows molten calderas,
+/// murky bog pools, and frozen lakes in the right places.
 pub fn default_liquid_kind(region_id: u8) -> u8 {
     match region_id {
-        11 => crate::liquids::LiquidType::Lava as u8, // Volcanic Scape
+        11 => crate::liquids::LiquidType::Lava as u8,  // Volcanic Scape
+        14 => crate::liquids::LiquidType::Marsh as u8, // Marsh Bog — murky pools
+        8 => crate::liquids::LiquidType::Ice as u8,    // Frozen Reaches — frozen water / ice
         _ => crate::liquids::LiquidType::Water as u8,
     }
 }
@@ -390,8 +442,14 @@ pub fn region_pond_cap(region_id: u8) -> f64 {
 /// incises valleys along the drainage on top of the global `RiverDepthGain`. Default 1.0 everywhere;
 /// tune per region in the editor (raise for dramatic mountain canyons, lower for flat plains/marsh).
 /// Id `0` (ocean) is unused.
-pub fn default_erosion(_region_id: u8) -> f64 {
-    1.0
+pub fn default_erosion(region_id: u8) -> f64 {
+    match region_id {
+        // Mountains incise dramatic canyons along their drainage (deeper valleys = legible relief)…
+        1 | 8 | 11 => 1.3, // Jagged Mountains / Frozen Reaches / Volcanic Scape
+        // …and the Great Lake carves its inflow + outlet channels harder so rivers read as wet, not dry.
+        3 => 1.5,
+        _ => 1.0,
+    }
 }
 
 pub fn default_river_threshold(region_id: u8) -> f64 {

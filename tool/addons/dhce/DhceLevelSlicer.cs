@@ -14,13 +14,24 @@ public static class DhceLevelSlicer
     // The 14 canon places (Region ids 1..14), matching the core roster + the dock picker.
     private static readonly string[] RegionNames =
     {
-        "Jagged Mountains", "Sacred Woods Plateau", "Great Lake", "Temperate Forest",
-        "Open Plains", "Underdeep", "Deep Wood", "Frozen Reaches", "Lost Isles",
+        "Jagged Mountains", "Sacred Forest", "Great Lake", "Temperate Forest",
+        "Rolling Plains", "Underdeep", "Deep Wood", "Frozen Reaches", "Lost Isles",
         "Blisterwood", "Volcanic Scape", "Blight Ruins", "Scattered Isles", "Marsh & Bog",
     };
 
-    private static readonly Color WaterColor = new(0.20f, 0.45f, 0.75f, 0.6f);
+    private static readonly Color WaterColor = new(0.22f, 0.52f, 0.55f, 0.6f); // teal, matches canon ocean
     private static readonly Color LavaColor = new(0.95f, 0.35f, 0.10f, 0.9f);
+    private static readonly Color MarshColor = new(0.239f, 0.302f, 0.180f, 0.8f); // murky bog water (#3D4D2E)
+    private static readonly Color IceColor = new(0.776f, 0.886f, 0.933f, 0.9f);   // frozen water / ice (#C6E2EE)
+
+    /// Liquid-kind id (0 water, 1 lava, 2 marsh, 3 ice) → baked water-surface colour.
+    private static Color LiquidColor(float kind) => Mathf.RoundToInt(kind) switch
+    {
+        1 => LavaColor,
+        2 => MarshColor,
+        3 => IceColor,
+        _ => WaterColor,
+    };
     private static readonly Color TreeColor = new(0.25f, 0.45f, 0.18f);
     private static readonly Color RockColor = new(0.55f, 0.52f, 0.48f);
 
@@ -92,7 +103,7 @@ public static class DhceLevelSlicer
         {
             var types = engine.Call("region_liquid_types").As<float[]>();
             var wcol = new Color[wpos.Length];
-            for (int k = 0; k < wpos.Length; k++) wcol[k] = (k < types.Length && types[k] > 0.5f) ? LavaColor : WaterColor;
+            for (int k = 0; k < wpos.Length; k++) wcol[k] = k < types.Length ? LiquidColor(types[k]) : WaterColor;
             var wmesh = BuildMesh(wpos, engine.Call("region_liquid_normals").As<Vector3[]>(), wcol, engine.Call("region_liquid_indices").As<int[]>());
             Adopt(root, new MeshInstance3D { Name = "Water", Mesh = wmesh, MaterialOverride = WaterMat() });
         }

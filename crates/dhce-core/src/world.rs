@@ -43,7 +43,7 @@ const SHORE_GRADE_M: f64 = 1000.0;
 const COURSE_WATER_GAIN: f64 = 3.0;
 /// Per-region color smoothing: passes + blend toward the neighbour mean (softens hard
 /// biome-block seams) and a subtle deterministic brightness jitter to break up flatness.
-const COLOR_SMOOTH_ITERS: usize = 2;
+const COLOR_SMOOTH_ITERS: usize = 1; // one light pass — keep region colours distinct (was 2 = mushy)
 const COLOR_SMOOTH_W: f32 = 0.4;
 const COLOR_VAR: f32 = 0.04;
 /// Trait-border blend (the transition buffer): neighbour-average weight per pass, and the
@@ -65,10 +65,11 @@ pub const VIEW_REGION: u8 = 5;
 /// normalized elevation at dial = 1, and erosion smoothing of the added detail. All deterministic
 /// (fbm2 + lerp / averaging). See [`World::shape_terrain`].
 const SHAPE_JAG_FREQ: f64 = 22.0;
-const SHAPE_JAG_AMP: f64 = 0.30;
+const SHAPE_JAG_AMP: f64 = 0.34; // peak roughness (craggy texture) — kept modest so the map isn't
+                                 // cliff-ridden; mountain HEIGHT comes from `base_elevation_for`, not this
 const SHAPE_RELIEF_FREQ: f64 = 7.0;
-const SHAPE_RELIEF_AMP: f64 = 0.26; // mid-freq rolling hills — raised so relief reads over the
-                                    // (now-compressed) per-region base steps; rides `ShapeStrength`
+const SHAPE_RELIEF_AMP: f64 = 0.40; // mid-freq relief — this is where mountain HEIGHT comes from now
+                                    // (per-cell, ungraded); plains stay flat (amp × their low relief trait)
 const SHAPE_EROSION_PASSES: usize = 3;
 const SHAPE_EROSION_W: f64 = 0.5;
 const SHAPE_JAG_SALT: u64 = 0x9E37_79B9_7F4A_7C15;
@@ -125,6 +126,12 @@ pub struct World {
     /// Optional imported region-map override `(ids, cols, rows)` — a PNG the front-end resolved to a
     /// region-id grid. When `Some`, [`build`] samples it instead of the built-in canon anchors.
     region_layout_override: Option<(Vec<u8>, usize, usize)>,
+    /// Optional imported **liquid-paint** overlay `(kinds, cols, rows)` — the same PNG resolved to a
+    /// liquid-kind grid (`0` = no liquid, else `kind + 1`: 1 water, 2 lava, 3 marsh, 4 ice). Decoupled
+    /// from the region partition: a painted liquid cell keeps its underlying region/terrain and just
+    /// pools a shallow body of that kind on top. Stamped by [`apply_liquid_layout`] as the *last* step
+    /// of generation (after reshape/reflow), so the pools survive the hydrology passes.
+    liquid_layout_override: Option<(Vec<u8>, usize, usize)>,
     /// Representative swatch colour per Region preset (its `--mk-*` accent); for `biome_color_of`.
     biome_color: Vec<[f32; 3]>,
     /// The 7 shared base palettes (editable in the colour editor), indexed by `regions::fam::*`.
@@ -165,6 +172,22 @@ pub struct World {
     /// hydraulic river erosion's incision per region (on top of the global `depth_gain`/RiverDepthGain).
     /// Seeded from [`regions::default_erosion`]; read by [`generate_rivers`](World::generate_rivers).
     region_erosion: Vec<f64>,
+    /// Per-Region **base height** (normalized elevation), id `0..=REGION_COUNT` — the macro relief trunk
+    /// the canon generator diffuses + rides noise on (the editable replacement for the hard-coded
+    /// [`regions::base_elevation_for`], which seeds it). The front-end edits it in metres. Read at
+    /// [`build`] by [`elevation::assign_region_elevation_canon`]; **takes effect on Generate**.
+    region_base_height: Vec<f64>,
+    /// Per-Region **gradient** — total rise (normalized) across the region from its low edge to its high
+    /// edge along [`region_gradient_rot`]. Tilts the region's base plane; pivots about the region centroid
+    /// (which sits at the base height) so raising the base lifts the whole ramp. `0` = flat. On Generate.
+    region_gradient: Vec<f64>,
+    /// Per-Region **gradient rotation** in degrees — the compass direction the gradient rises toward
+    /// (`0°` = North/map-up, clockwise). Paired with [`region_gradient`]. On Generate.
+    region_gradient_rot: Vec<f64>,
+    /// Per-Region optional **gradient anchor** (normalized height): when finite, the gradient pivots about
+    /// this fixed height instead of the base height (decouples the ramp from the base — the "set
+    /// separately" override). `NaN` = follow the base height (the default). On Generate.
+    region_gradient_anchor: Vec<f64>,
     /// True where the user manually set a region's biome — protected from auto-reclassify.
     biome_locked: Vec<bool>,
     /// True where the user painted a Course (main-river) stroke — the stream seed mask.
@@ -197,6 +220,11 @@ pub struct World {
     /// [`build`] — i.e. how soft the macro relief steps between regions are. Set before [`build`] (see
     /// [`set_base_blend_m`]); defaults to [`DEFAULT_BASE_BLEND_M`]. Wider ⇒ gentler transitions.
     base_blend_m: f64,
+    /// Flat authoring base: when set before [`build`], every cell starts at one level (`0.0`) instead
+    /// of the canon region-guided relief — a flat plate draped with the canon art that the author
+    /// sculpts. Set the sea level equal to that level (`min_elevation()`) so the plate reads as dry
+    /// land at the waterline; indenting a cell makes water. See [`set_flat_base`].
+    flat_base: bool,
     /// Dimensions of the (square) chunk grid; `chunk id = gy * chunk_cols + gx`. Both 0
     /// until [`build`] partitions the mesh. Stored so the front-end can map the camera to
     /// visible tiles (render-distance streaming) without re-deriving the layout.
@@ -263,6 +291,17 @@ impl World {
         for (i, slot) in region_erosion.iter_mut().enumerate() {
             *slot = regions::default_erosion(i as u8);
         }
+        // Per-region base height seeds from the canon defaults (so the look is unchanged until the author
+        // edits it); gradient/rotation default to flat, and the gradient anchor to NaN = "follow base".
+        let mut region_base_height = vec![0.0f64; regions::REGION_COUNT + 1];
+        let mut region_gradient = vec![0.0f64; regions::REGION_COUNT + 1];
+        let mut region_gradient_rot = vec![0.0f64; regions::REGION_COUNT + 1];
+        for i in 0..=regions::REGION_COUNT {
+            region_base_height[i] = regions::base_elevation_for(i as u8);
+            region_gradient[i] = regions::default_gradient(i as u8);
+            region_gradient_rot[i] = regions::default_gradient_rotation(i as u8);
+        }
+        let region_gradient_anchor = vec![f64::NAN; regions::REGION_COUNT + 1];
         World {
             width: 0.0,
             height: 0.0,
@@ -278,6 +317,7 @@ impl World {
             wind: rainfall::WIND,
             region_r: Vec::new(),
             region_layout_override: None,
+            liquid_layout_override: None,
             biome_color,
             base_palettes: regions::base_palettes().to_vec(),
             jaggedness_r: Vec::new(),
@@ -298,6 +338,10 @@ impl World {
             region_lake_depth,
             region_river_threshold,
             region_erosion,
+            region_base_height,
+            region_gradient,
+            region_gradient_rot,
+            region_gradient_anchor,
             biome_locked: Vec::new(),
             course_mask: Vec::new(),
             stream_carve: Vec::new(),
@@ -312,6 +356,7 @@ impl World {
             chunk_dirty: Vec::new(),
             chunk_size_m: DEFAULT_CHUNK_SIZE_M,
             base_blend_m: DEFAULT_BASE_BLEND_M,
+            flat_base: false,
             chunk_cols: 0,
             chunk_rows: 0,
             color_cache: Vec::new(),
@@ -356,11 +401,19 @@ impl World {
         // reclassify them away (`reclassify` then no-ops across the canon map).
         self.biome_locked = vec![true; nr];
 
-        // Pass 2 — region-guided elevation: a diffused per-region base trunk + low-freq noise +
-        // a banded ocean rim. Then flood the ocean + the Great Lake basin to the stored sea level.
-        self.elevation_r = elevation::assign_region_elevation_canon(
-            &mesh, width, height, seed, octaves, &region_ids, &self.neighbors, self.base_blend_m,
-        );
+        // Pass 2 — elevation. Flat authoring base: lay every cell at one level (0.0) — a flat plate
+        // for the author to sculpt — instead of the canon region-guided relief. Otherwise the canon
+        // pass: a diffused per-region base trunk + low-freq noise + a banded ocean rim. Either way the
+        // ocean (and any basin) below the stored sea level is then flooded.
+        self.elevation_r = if self.flat_base {
+            vec![0.0; nr]
+        } else {
+            elevation::assign_region_elevation_canon(
+                &mesh, width, height, seed, octaves, &region_ids, self.base_blend_m,
+                &self.region_base_height, &self.region_gradient, &self.region_gradient_rot,
+                &self.region_gradient_anchor,
+            )
+        };
         fluid::sea_fill(&mut self.field, &self.elevation_r, self.sea_level);
 
         // Pass 3 — biome pass (Region → Traits): seed each cell's trait primitives from its region
@@ -449,6 +502,54 @@ impl World {
         match &self.region_layout_override {
             Some((ids, cols, rows)) => regionmap::layout_from_grid(mesh, width, height, ids, *cols, *rows),
             None => regionmap::layout_from_anchors(mesh, width, height),
+        }
+    }
+
+    /// Inject a liquid-paint overlay: a front-end-resolved kind grid (`0` = no liquid, else `kind + 1`:
+    /// 1 water, 2 lava, 3 marsh, 4 ice; row 0 = north) painted into the region map. Unlike the region
+    /// override this does **not** repartition territory — [`apply_liquid_layout`] just stamps a shallow
+    /// pool of the painted kind onto whatever terrain a cell sits on. An empty/ill-sized grid clears it.
+    pub fn set_liquid_layout(&mut self, kinds: &[u8], cols: usize, rows: usize) {
+        if cols == 0 || rows == 0 || kinds.len() < cols * rows {
+            self.liquid_layout_override = None;
+        } else {
+            self.liquid_layout_override = Some((kinds.to_vec(), cols, rows));
+        }
+    }
+
+    /// Drop any imported liquid-paint overlay.
+    pub fn clear_liquid_layout(&mut self) {
+        self.liquid_layout_override = None;
+    }
+
+    /// Stamp the imported liquid-paint overlay (if any) onto the built world: every painted cell pools a
+    /// static body of its kind at `pool_depth` (normalized; the front-end passes ~10 m / exaggeration so
+    /// it reads as a shallow "pooled" body). Perched on the local terrain — not carved — so it blends
+    /// with the surface. Idempotent and re-run-safe (it only raises depth via `max`); leaves the sim
+    /// asleep like the sea/lake fills. Must run *after* `reshape_and_reflow`/`fill_lakes` so the
+    /// hydrology passes don't wipe the painted pools. No-op when nothing is painted.
+    pub fn apply_liquid_layout(&mut self, pool_depth: f64) {
+        let (grid, cols, rows) = match &self.liquid_layout_override {
+            Some((g, c, r)) => (g.clone(), *c, *r),
+            None => return,
+        };
+        let per_cell = match &self.mesh {
+            Some(mesh) => regionmap::layout_from_grid(mesh, self.width, self.height, &grid, cols, rows),
+            None => return,
+        };
+        let depth = pool_depth.max(0.0);
+        for r in 0..per_cell.len().min(self.field.depth.len()) {
+            let v = per_cell[r];
+            if v == 0 {
+                continue; // unpainted (or boundary, forced 0 by layout_from_grid)
+            }
+            self.field.depth[r] = depth.max(self.field.depth[r]);
+            self.field.kind[r] = v - 1; // grid stores kind + 1
+        }
+        // Render the painted water, but leave the sim asleep (a static fill, like the sea/lakes).
+        self.liquid_cache_dirty = true;
+        for d in self.liquid_chunk_dirty.iter_mut() {
+            *d = true;
         }
     }
 
@@ -881,6 +982,92 @@ impl World {
     /// Restore the per-Region erosion table.
     pub fn set_erosion_table(&mut self, vals: &[f32]) {
         for (i, v) in self.region_erosion.iter_mut().enumerate() {
+            if i < vals.len() {
+                *v = vals[i] as f64;
+            }
+        }
+    }
+
+    // --- per-Region base height + gradient (Generate-time terrain trunk) ---
+
+    /// Region `id`'s base height (normalized); `0` if out of range.
+    pub fn region_base_height_of(&self, id: usize) -> f64 {
+        self.region_base_height.get(id).copied().unwrap_or(0.0)
+    }
+    /// Set region `id`'s base height (normalized, clamped to the elevation span). Regenerate to apply.
+    pub fn set_region_base_height(&mut self, id: usize, value: f64) {
+        if let Some(v) = self.region_base_height.get_mut(id) {
+            *v = value.clamp(ELEV_MIN, ELEV_MAX);
+        }
+    }
+    pub fn region_base_height_export(&self) -> Vec<f32> {
+        self.region_base_height.iter().map(|&v| v as f32).collect()
+    }
+    pub fn set_region_base_height_table(&mut self, vals: &[f32]) {
+        for (i, v) in self.region_base_height.iter_mut().enumerate() {
+            if i < vals.len() {
+                *v = vals[i] as f64;
+            }
+        }
+    }
+
+    /// Region `id`'s gradient (normalized total rise across the region); `0` if out of range.
+    pub fn region_gradient_of(&self, id: usize) -> f64 {
+        self.region_gradient.get(id).copied().unwrap_or(0.0)
+    }
+    /// Set region `id`'s gradient (normalized total rise, low→high edge). Regenerate to apply.
+    pub fn set_region_gradient(&mut self, id: usize, value: f64) {
+        if let Some(v) = self.region_gradient.get_mut(id) {
+            *v = value;
+        }
+    }
+    pub fn region_gradient_export(&self) -> Vec<f32> {
+        self.region_gradient.iter().map(|&v| v as f32).collect()
+    }
+    pub fn set_region_gradient_table(&mut self, vals: &[f32]) {
+        for (i, v) in self.region_gradient.iter_mut().enumerate() {
+            if i < vals.len() {
+                *v = vals[i] as f64;
+            }
+        }
+    }
+
+    /// Region `id`'s gradient rotation (degrees, 0° = North, clockwise); `0` if out of range.
+    pub fn region_gradient_rotation_of(&self, id: usize) -> f64 {
+        self.region_gradient_rot.get(id).copied().unwrap_or(0.0)
+    }
+    /// Set region `id`'s gradient rotation (degrees). Regenerate to apply.
+    pub fn set_region_gradient_rotation(&mut self, id: usize, deg: f64) {
+        if let Some(v) = self.region_gradient_rot.get_mut(id) {
+            *v = deg;
+        }
+    }
+    pub fn region_gradient_rotation_export(&self) -> Vec<f32> {
+        self.region_gradient_rot.iter().map(|&v| v as f32).collect()
+    }
+    pub fn set_region_gradient_rotation_table(&mut self, vals: &[f32]) {
+        for (i, v) in self.region_gradient_rot.iter_mut().enumerate() {
+            if i < vals.len() {
+                *v = vals[i] as f64;
+            }
+        }
+    }
+
+    /// Region `id`'s gradient anchor (normalized pivot height); `NaN` = follow the base height.
+    pub fn region_gradient_anchor_of(&self, id: usize) -> f64 {
+        self.region_gradient_anchor.get(id).copied().unwrap_or(f64::NAN)
+    }
+    /// Set region `id`'s gradient anchor (normalized). Pass `NaN` to clear (follow the base height again).
+    pub fn set_region_gradient_anchor(&mut self, id: usize, value: f64) {
+        if let Some(v) = self.region_gradient_anchor.get_mut(id) {
+            *v = value;
+        }
+    }
+    pub fn region_gradient_anchor_export(&self) -> Vec<f32> {
+        self.region_gradient_anchor.iter().map(|&v| v as f32).collect()
+    }
+    pub fn set_region_gradient_anchor_table(&mut self, vals: &[f32]) {
+        for (i, v) in self.region_gradient_anchor.iter_mut().enumerate() {
             if i < vals.len() {
                 *v = vals[i] as f64;
             }
@@ -2240,20 +2427,34 @@ impl World {
         None
     }
 
-    /// Render a top-down minimap as an `n×n` RGBA image (row-major; row 0 = north, y = 0):
-    /// smoothed biome colour, NW hill-shading, elevation contour lines, and any painted liquid
+    /// Pixel height of [`minimap`] for a width of `n` — the world's aspect applied
+    /// (`round(n·height/width)`, ≥ 1). A front-end building a texture from the minimap bytes sizes it
+    /// `n × minimap_height(n)`; falls back to `n` (square) before a world is built.
+    pub fn minimap_height(&self, n: usize) -> usize {
+        if self.width <= 0.0 || self.height <= 0.0 || n == 0 {
+            return n.max(1);
+        }
+        ((n as f64) * self.height / self.width).round().max(1.0) as usize
+    }
+
+    /// Render a top-down minimap as an `n × minimap_height(n)` RGBA image (row-major; row 0 = north,
+    /// y = 0): smoothed biome colour, NW hill-shading, elevation contour lines, and any painted liquid
     /// (blue water / orange lava) overlaid. Drives the overview map panel. Empty until built.
     pub fn minimap(&self, n: usize, light_x: f64, light_y: f64) -> Vec<u8> {
-        let mut out = vec![0u8; n * n * 4];
+        // Render at the world's true aspect: `n` px wide, `nh = round(n·height/width)` tall, so a
+        // non-square (4:3 canon) world isn't squashed into a square. The row stride stays `n` (width);
+        // a front-end building a texture from these bytes sizes it `n × minimap_height(n)`.
+        let nh = self.minimap_height(n);
+        let mut out = vec![0u8; n * nh * 4];
         if self.mesh.is_none() || n == 0 {
             return out;
         }
 
         // Pass 1: nearest region + its elevation per cell (NaN where off-map).
-        let mut elev = vec![f64::NAN; n * n];
-        let mut reg = vec![u32::MAX; n * n];
-        for gy in 0..n {
-            let y = (gy as f64 + 0.5) / n as f64 * self.height;
+        let mut elev = vec![f64::NAN; n * nh];
+        let mut reg = vec![u32::MAX; n * nh];
+        for gy in 0..nh {
+            let y = (gy as f64 + 0.5) / nh as f64 * self.height;
             for gx in 0..n {
                 let x = (gx as f64 + 0.5) / n as f64 * self.width;
                 if let Some(r) = self.region_at(x, y) {
@@ -2265,7 +2466,7 @@ impl World {
 
         const INTERVAL: f64 = 0.12; // contour spacing in normalized elevation
         let band = |e: f64| (e / INTERVAL).floor() as i64;
-        for gy in 0..n {
+        for gy in 0..nh {
             for gx in 0..n {
                 let i = gy * n + gx;
                 let r = reg[i];
@@ -2286,7 +2487,7 @@ impl World {
                 let xl = if gx > 0 { at(gx - 1, gy) } else { e };
                 let xr = if gx + 1 < n { at(gx + 1, gy) } else { e };
                 let yu = if gy > 0 { at(gx, gy - 1) } else { e };
-                let yd = if gy + 1 < n { at(gx, gy + 1) } else { e };
+                let yd = if gy + 1 < nh { at(gx, gy + 1) } else { e };
                 let dzdx = if xr.is_nan() || xl.is_nan() { 0.0 } else { xr - xl };
                 let dzdy = if yd.is_nan() || yu.is_nan() { 0.0 } else { yd - yu };
                 let shade = (0.62 + (dzdx * light_x + dzdy * light_y) * 7.0).clamp(0.4, 1.3);
@@ -2315,12 +2516,20 @@ impl World {
                 }
 
                 // Painted-liquid overlay (Natural view only — blue water would clash with the
-                // heat/moisture ramps in a data view).
-                if self.view_mode == VIEW_NATURAL && r < self.field.depth.len() && self.field.depth[r] > 0.02 {
-                    let (wr, wg, wb) = if self.field.kind[r] == 1 { (0.95, 0.35, 0.10) } else { (0.20, 0.45, 0.78) };
-                    cr = cr * 0.4 + wr * 0.6;
-                    cg = cg * 0.4 + wg * 0.6;
-                    cb = cb * 0.4 + wb * 0.6;
+                // heat/moisture ramps in a data view). Threshold matches the 3D surface's wet mask
+                // ([`fluid::MIN_RENDER_DEPTH`]) so the minimap shows exactly the water the 3D view does —
+                // including the shallow (~10 m) bodies painted via the liquid-paint overlay.
+                if self.view_mode == VIEW_NATURAL && r < self.field.depth.len() && self.field.depth[r] > fluid::MIN_RENDER_DEPTH {
+                    // Liquid overlay: per-kind colour + opacity (matches the 3D surface + DhceWorld colours).
+                    let (wr, wg, wb, a) = match self.field.kind[r] {
+                        1 => (0.95, 0.35, 0.10, 0.90), // lava
+                        2 => (0.239, 0.302, 0.180, 0.80), // murky marsh
+                        3 => (0.776, 0.886, 0.933, 0.90), // ice
+                        _ => (0.22, 0.52, 0.55, 0.60),  // water
+                    };
+                    cr = cr * (1.0 - a) + wr * a;
+                    cg = cg * (1.0 - a) + wg * a;
+                    cb = cb * (1.0 - a) + wb * a;
                 }
 
                 let px = i * 4;
@@ -2374,6 +2583,18 @@ impl World {
         match self.region_at(x, y) {
             Some(c) => self.region_r.get(c).copied().unwrap_or(0) as i64,
             None => -1,
+        }
+    }
+
+    /// Composed natural ground colour (the smoothed per-vertex RGB the 3D terrain renders with) at a
+    /// world point, or `None` off-map. The *flat* companion to [`minimap`] — no hill-shade, contours,
+    /// or liquid overlay — so a top-down raster of this reads the true terrain albedo.
+    pub fn albedo_at(&self, x: f64, y: f64) -> Option<[f32; 3]> {
+        let r = self.region_at(x, y)?;
+        if 3 * r + 2 < self.color_cache.len() {
+            Some([self.color_cache[3 * r], self.color_cache[3 * r + 1], self.color_cache[3 * r + 2]])
+        } else {
+            None
         }
     }
 
@@ -2458,6 +2679,463 @@ impl World {
             }
         }
         out
+    }
+
+    // --- zone tools: pick a whole zone, then edit it as one (the Zone Edit tool) ----------------
+    //
+    // Selection is held by the front-end (a cell-id list), so these ops are stateless: each takes the
+    // cells to act on. The smart selectors below trace a zone by terrain — far more exactly than
+    // hand-placed polygon vertices — and the `zone_*` ops shape the whole set in one shot.
+
+    /// Smart "magic-wand" select from `start_cell`: BFS that crosses into a neighbour only when the
+    /// elevation **step** across that edge is within `edge_tolerance` (normalized). So it grows across
+    /// smooth terrain and **stops at sharp contrast** — cliffs, shorelines, basin rims — letting the
+    /// author trace a natural zone (a lake basin, a plateau) exactly. Excludes the boundary frame.
+    pub fn select_by_elevation(&self, start_cell: usize, edge_tolerance: f64) -> Vec<u32> {
+        let n = self.region_r.len();
+        if start_cell >= n || self.neighbors.len() != n {
+            return Vec::new();
+        }
+        if let Some(m) = &self.mesh {
+            if m.is_boundary_r(start_cell) {
+                return Vec::new();
+            }
+        }
+        let tol = edge_tolerance.max(0.0);
+        let mut seen = vec![false; n];
+        let mut stack = vec![start_cell];
+        seen[start_cell] = true;
+        let mut out = Vec::new();
+        while let Some(r) = stack.pop() {
+            out.push(r as u32);
+            let er = self.elevation_r[r];
+            for &nb in &self.neighbors[r] {
+                let nb = nb as usize;
+                if seen[nb] {
+                    continue;
+                }
+                if let Some(m) = &self.mesh {
+                    if m.is_boundary_r(nb) {
+                        continue;
+                    }
+                }
+                if (self.elevation_r[nb] - er).abs() <= tol {
+                    seen[nb] = true;
+                    stack.push(nb);
+                }
+            }
+        }
+        out
+    }
+
+    /// Select a connected body of standing water from `start_cell`: ocean (`elev ≤ sea_level`),
+    /// perched lakes (`lake_mask`), or any cell holding liquid (`depth > 0`). BFS over wet cells,
+    /// stopping at dry land — one click selects a whole lake. Empty if the start is dry.
+    pub fn select_water_body(&self, start_cell: usize) -> Vec<u32> {
+        let n = self.region_r.len();
+        if start_cell >= n || self.neighbors.len() != n {
+            return Vec::new();
+        }
+        let wet = |r: usize| {
+            self.elevation_r[r] <= self.sea_level
+                || self.lake_mask.get(r).copied().unwrap_or(false)
+                || self.field.depth.get(r).copied().unwrap_or(0.0) > 0.0
+        };
+        if !wet(start_cell) {
+            return Vec::new();
+        }
+        let mut seen = vec![false; n];
+        let mut stack = vec![start_cell];
+        seen[start_cell] = true;
+        let mut out = Vec::new();
+        while let Some(r) = stack.pop() {
+            out.push(r as u32);
+            for &nb in &self.neighbors[r] {
+                let nb = nb as usize;
+                if seen[nb] || !wet(nb) {
+                    continue;
+                }
+                if let Some(m) = &self.mesh {
+                    if m.is_boundary_r(nb) {
+                        continue;
+                    }
+                }
+                seen[nb] = true;
+                stack.push(nb);
+            }
+        }
+        out
+    }
+
+    /// Mean normalized elevation across `cells` (`0.0` if empty) — the target a "Level to mean" uses
+    /// to flatten a plateau without the author guessing a height.
+    pub fn zone_mean_elevation(&self, cells: &[u32]) -> f64 {
+        let n = self.elevation_r.len();
+        let mut sum = 0.0;
+        let mut cnt = 0.0;
+        for &rid in cells {
+            let ri = rid as usize;
+            if ri < n {
+                sum += self.elevation_r[ri];
+                cnt += 1.0;
+            }
+        }
+        if cnt > 0.0 {
+            sum / cnt
+        } else {
+            0.0
+        }
+    }
+
+    /// Shed water displaced when a cell rises (mirrors the brush ops): keeps a raised lakebed from
+    /// carrying its old depth up out of the water.
+    fn shed_water_on_rise(&mut self, ri: usize, before: f64, after: f64) {
+        if after > before && self.field.depth[ri] > 0.0 {
+            self.field.depth[ri] = (self.field.depth[ri] - (after - before)).max(0.0);
+        }
+    }
+
+    /// Offset every cell in `cells` by `delta` (normalized) — drop or raise the whole zone as a unit.
+    pub fn zone_offset(&mut self, cells: &[u32], delta: f64) -> Vec<u32> {
+        let n = self.elevation_r.len();
+        if self.mesh.is_none() || delta == 0.0 {
+            return Vec::new();
+        }
+        let mut touched = Vec::with_capacity(cells.len());
+        for &rid in cells {
+            let ri = rid as usize;
+            if ri >= n {
+                continue;
+            }
+            let cur = self.elevation_r[ri];
+            let after = (cur + delta).clamp(ELEV_MIN, ELEV_MAX);
+            self.elevation_r[ri] = after;
+            self.shed_water_on_rise(ri, cur, after);
+            touched.push(ri as u32);
+        }
+        self.finish_sculpt(&touched);
+        touched
+    }
+
+    /// Ease every cell in `cells` toward `target` height by `weight` (0..1) — at 1.0 the zone becomes
+    /// a flat table at `target`; pair with [`zone_mean_elevation`] to level a plateau to itself.
+    pub fn zone_level(&mut self, cells: &[u32], target: f64, weight: f64) -> Vec<u32> {
+        let n = self.elevation_r.len();
+        if self.mesh.is_none() {
+            return Vec::new();
+        }
+        let w = weight.clamp(0.0, 1.0);
+        let mut touched = Vec::with_capacity(cells.len());
+        for &rid in cells {
+            let ri = rid as usize;
+            if ri >= n {
+                continue;
+            }
+            let cur = self.elevation_r[ri];
+            let after = (cur + (target - cur) * w).clamp(ELEV_MIN, ELEV_MAX);
+            self.elevation_r[ri] = after;
+            self.shed_water_on_rise(ri, cur, after);
+            touched.push(ri as u32);
+        }
+        self.finish_sculpt(&touched);
+        touched
+    }
+
+    /// Relax `cells` toward their neighbour-mean elevation for `iterations` Jacobi passes at `weight`
+    /// (0..1). Neighbours outside the selection act as fixed anchors (like [`diffuse_subset`]), so the
+    /// zone settles toward its surroundings instead of stepping at the border.
+    pub fn zone_smooth(&mut self, cells: &[u32], iterations: i64, weight: f64) -> Vec<u32> {
+        let n = self.elevation_r.len();
+        if self.mesh.is_none() || self.neighbors.len() != n {
+            return Vec::new();
+        }
+        let iters = iterations.max(0) as usize;
+        let w = weight.clamp(0.0, 1.0);
+        let mut subset: Vec<usize> = Vec::with_capacity(cells.len());
+        for &rid in cells {
+            let ri = rid as usize;
+            if ri < n {
+                subset.push(ri);
+            }
+        }
+        let before: Vec<f64> = subset.iter().map(|&r| self.elevation_r[r]).collect();
+        let mut newv = vec![0.0f64; subset.len()];
+        for _ in 0..iters {
+            for (k, &r) in subset.iter().enumerate() {
+                let nb = &self.neighbors[r];
+                if nb.is_empty() {
+                    newv[k] = self.elevation_r[r];
+                    continue;
+                }
+                let mut sum = 0.0;
+                for &j in nb {
+                    sum += self.elevation_r[j as usize];
+                }
+                let mean = sum / nb.len() as f64;
+                let cur = self.elevation_r[r];
+                newv[k] = (cur + (mean - cur) * w).clamp(ELEV_MIN, ELEV_MAX);
+            }
+            for (k, &r) in subset.iter().enumerate() {
+                self.elevation_r[r] = newv[k];
+            }
+        }
+        let mut touched = Vec::with_capacity(subset.len());
+        for (k, &r) in subset.iter().enumerate() {
+            self.shed_water_on_rise(r, before[k], self.elevation_r[r]);
+            touched.push(r as u32);
+        }
+        self.finish_sculpt(&touched);
+        touched
+    }
+
+    /// Feather just the **edges** of the selection: relax cells weighted by their ring-distance from
+    /// the zone border (full at the rim, fading to none `width_m` inward), for `iterations` passes at
+    /// `weight`. Softens a hard selection boundary into the surrounding terrain.
+    pub fn zone_feather_edges(&mut self, cells: &[u32], width_m: f64, weight: f64, iterations: i64) -> Vec<u32> {
+        let n = self.elevation_r.len();
+        if self.mesh.is_none() || self.neighbors.len() != n {
+            return Vec::new();
+        }
+        let iters = iterations.max(1) as usize;
+        let w = weight.clamp(0.0, 1.0);
+        let mut sel = vec![false; n];
+        let mut subset: Vec<usize> = Vec::with_capacity(cells.len());
+        for &rid in cells {
+            let ri = rid as usize;
+            if ri < n && !sel[ri] {
+                sel[ri] = true;
+                subset.push(ri);
+            }
+        }
+        if subset.is_empty() {
+            return Vec::new();
+        }
+        // Ring distance from the zone border (multi-source BFS): border cells (a selected cell with a
+        // non-selected/frame neighbour) are ring 0; each step inward is +1.
+        let mut ring = vec![u32::MAX; n];
+        let mut queue: std::collections::VecDeque<usize> = std::collections::VecDeque::new();
+        for &r in &subset {
+            let mut border = false;
+            for &nb in &self.neighbors[r] {
+                if !sel[nb as usize] {
+                    border = true;
+                    break;
+                }
+            }
+            if let Some(m) = &self.mesh {
+                if m.is_boundary_r(r) {
+                    border = true;
+                }
+            }
+            if border {
+                ring[r] = 0;
+                queue.push_back(r);
+            }
+        }
+        while let Some(r) = queue.pop_front() {
+            let d = ring[r];
+            for &nb in &self.neighbors[r] {
+                let nb = nb as usize;
+                if sel[nb] && ring[nb] == u32::MAX {
+                    ring[nb] = d + 1;
+                    queue.push_back(nb);
+                }
+            }
+        }
+        let pitch = ((self.width * self.height) / n as f64).sqrt().max(1.0);
+        let max_rings = (width_m / pitch).round().max(1.0);
+        let before: Vec<f64> = subset.iter().map(|&r| self.elevation_r[r]).collect();
+        let mut newv = vec![0.0f64; subset.len()];
+        for _ in 0..iters {
+            for (k, &r) in subset.iter().enumerate() {
+                let ew = if ring[r] == u32::MAX {
+                    0.0
+                } else {
+                    (1.0 - ring[r] as f64 / max_rings).clamp(0.0, 1.0)
+                };
+                let nb = &self.neighbors[r];
+                if ew <= 0.0 || nb.is_empty() {
+                    newv[k] = self.elevation_r[r];
+                    continue;
+                }
+                let mut sum = 0.0;
+                for &j in nb {
+                    sum += self.elevation_r[j as usize];
+                }
+                let mean = sum / nb.len() as f64;
+                let cur = self.elevation_r[r];
+                newv[k] = (cur + (mean - cur) * (w * ew)).clamp(ELEV_MIN, ELEV_MAX);
+            }
+            for (k, &r) in subset.iter().enumerate() {
+                self.elevation_r[r] = newv[k];
+            }
+        }
+        let mut touched = Vec::with_capacity(subset.len());
+        for (k, &r) in subset.iter().enumerate() {
+            self.shed_water_on_rise(r, before[k], self.elevation_r[r]);
+            touched.push(r as u32);
+        }
+        self.finish_sculpt(&touched);
+        touched
+    }
+
+    /// Apply a linear elevation ramp across `cells` from the low point `(lx, ly)` at height `lh` to the
+    /// high point `(hx, hy)` at `hh` (heights normalized): each cell's new height is `lh..hh`
+    /// interpolated by its projection onto the low→high axis (clamped 0..1). "Add a grade."
+    pub fn zone_grade(&mut self, cells: &[u32], lx: f64, ly: f64, lh: f64, hx: f64, hy: f64, hh: f64) -> Vec<u32> {
+        let n = self.elevation_r.len();
+        let ax = hx - lx;
+        let ay = hy - ly;
+        let len2 = ax * ax + ay * ay;
+        if len2 < 1e-9 {
+            return Vec::new();
+        }
+        // Collect (cell, target) while the mesh is borrowed, then mutate — avoids aliasing the borrow.
+        let targets: Vec<(usize, f64)> = match self.mesh.as_ref() {
+            Some(mesh) => cells
+                .iter()
+                .filter_map(|&rid| {
+                    let ri = rid as usize;
+                    if ri >= n {
+                        return None;
+                    }
+                    let p = mesh.pos_of_r(ri);
+                    let t = (((p[0] - lx) * ax + (p[1] - ly) * ay) / len2).clamp(0.0, 1.0);
+                    Some((ri, (lh + (hh - lh) * t).clamp(ELEV_MIN, ELEV_MAX)))
+                })
+                .collect(),
+            None => return Vec::new(),
+        };
+        let mut touched = Vec::with_capacity(targets.len());
+        for (ri, after) in targets {
+            let cur = self.elevation_r[ri];
+            self.elevation_r[ri] = after;
+            self.shed_water_on_rise(ri, cur, after);
+            touched.push(ri as u32);
+        }
+        self.finish_sculpt(&touched);
+        touched
+    }
+
+    /// The spill level of the selection: the lowest elevation among cells just **outside** the zone
+    /// that border it (the lip it would overflow). `NaN` if the zone has no exterior border. Pair with
+    /// [`zone_fill_liquid`] to fill a basin to its rim.
+    pub fn zone_rim_level(&self, cells: &[u32]) -> f64 {
+        let n = self.elevation_r.len();
+        if self.neighbors.len() != n {
+            return f64::NAN;
+        }
+        let mut sel = vec![false; n];
+        for &rid in cells {
+            let ri = rid as usize;
+            if ri < n {
+                sel[ri] = true;
+            }
+        }
+        let mut rim = f64::INFINITY;
+        for &rid in cells {
+            let ri = rid as usize;
+            if ri >= n {
+                continue;
+            }
+            for &nb in &self.neighbors[ri] {
+                let nb = nb as usize;
+                if sel[nb] {
+                    continue;
+                }
+                if let Some(m) = &self.mesh {
+                    if m.is_boundary_r(nb) {
+                        continue;
+                    }
+                }
+                if self.elevation_r[nb] < rim {
+                    rim = self.elevation_r[nb];
+                }
+            }
+        }
+        if rim.is_finite() {
+            rim
+        } else {
+            f64::NAN
+        }
+    }
+
+    /// Fill `cells` with standing liquid up to `target_surface` (normalized): each cell's depth is set
+    /// so its surface reaches the target (cells already above get 0), of `kind` (0 water, 1 lava). A
+    /// **static** fill like the sea — renders without waking the sim (which would drain it over the
+    /// spill). Pair with [`zone_rim_level`] to fill a dropped basin into a lake.
+    pub fn zone_fill_liquid(&mut self, cells: &[u32], target_surface: f64, kind: u8) -> Vec<u32> {
+        let n = self.elevation_r.len();
+        if self.field.depth.len() != n {
+            return Vec::new();
+        }
+        let mut touched = Vec::with_capacity(cells.len());
+        for &rid in cells {
+            let ri = rid as usize;
+            if ri >= n {
+                continue;
+            }
+            let depth = (target_surface - self.elevation_r[ri]).max(0.0);
+            self.field.depth[ri] = depth;
+            self.field.kind[ri] = kind;
+            if ri < self.lake_mask.len() {
+                self.lake_mask[ri] = depth > 0.0;
+            }
+            touched.push(ri as u32);
+        }
+        // Render the new water but leave the sim asleep (mirror `fill_lakes`' tail): flag the touched
+        // cells' liquid chunks dirty so the front-end re-tessellates just those.
+        self.liquid_cache_dirty = true;
+        for &rid in &touched {
+            if let Some(chunks) = self.region_chunks.get(rid as usize) {
+                for &c in chunks {
+                    if let Some(d) = self.liquid_chunk_dirty.get_mut(c as usize) {
+                        *d = true;
+                    }
+                }
+            }
+        }
+        touched
+    }
+
+    /// Compact render surface for just the selected `cells` (triangles whose three corners are all
+    /// selected), for the zone-selection highlight overlay. Scans only the chunks the selection
+    /// touches, so it stays cheap on a dense mesh. `None` until built.
+    pub fn selection_surface(&self, cells: &[u32], exaggeration: f64) -> Option<geometry::Surface> {
+        let mesh = self.mesh.as_ref()?;
+        let nr = mesh.num_regions();
+        let mut sel = vec![false; nr];
+        let mut chunk_seen = vec![false; self.chunk_tris.len()];
+        for &rid in cells {
+            let ri = rid as usize;
+            if ri >= nr {
+                continue;
+            }
+            sel[ri] = true;
+            if let Some(chunks) = self.region_chunks.get(ri) {
+                for &c in chunks {
+                    if (c as usize) < chunk_seen.len() {
+                        chunk_seen[c as usize] = true;
+                    }
+                }
+            }
+        }
+        let mut tris: Vec<u32> = Vec::new();
+        for (ci, &seen) in chunk_seen.iter().enumerate() {
+            if !seen {
+                continue;
+            }
+            for &t in &self.chunk_tris[ci] {
+                let tu = t as usize;
+                let a = mesh.r_begin_s(3 * tu);
+                let b = mesh.r_begin_s(3 * tu + 1);
+                let c = mesh.r_begin_s(3 * tu + 2);
+                if sel[a] && sel[b] && sel[c] {
+                    tris.push(t);
+                }
+            }
+        }
+        Some(self.surface_from_tris(mesh, &tris, exaggeration))
     }
 
     // --- save / load (authored state) ---
@@ -2688,6 +3366,19 @@ impl World {
             }
             _ => {}
         }
+        // Natural view: drape the baked canon art (pixel-for-pixel albedo) on cells the author hasn't
+        // painted a biome onto, so a fresh Generate shows the canon map as a paintable base. Painting
+        // a biome locks the region (`biome_locked`) and it switches to its biome palette colour below
+        // — i.e. the author paints over the canon reference. Falls back to the palette when the raster
+        // or mesh is absent.
+        if !self.biome_locked.get(r).copied().unwrap_or(false) {
+            if let Some(mesh) = self.mesh.as_ref() {
+                let p = mesh.pos_of_r(r);
+                if let Some(c) = crate::canon_color::canon_color_at(p[0] / self.width, p[1] / self.height) {
+                    return c;
+                }
+            }
+        }
         let fam = self.palette_family_r.get(r).copied().unwrap_or(0) as usize;
         let base = if fam < self.base_palettes.len() {
             self.base_palettes[fam]
@@ -2740,14 +3431,17 @@ impl World {
                     cols = next;
                 }
             }
-            // Subtle per-region brightness variation (deterministic hash of the index).
-            let jittered: Vec<[f32; 3]> = crate::util::par_map(nr, |r| {
-                let h = hash_u32(r as u32);
-                let f = 1.0 + ((h & 0xffff) as f32 / 65535.0 - 0.5) * 2.0 * COLOR_VAR; // [-VAR, VAR]
-                let cr = cols[r];
-                [(cr[0] * f).clamp(0.0, 1.0), (cr[1] * f).clamp(0.0, 1.0), (cr[2] * f).clamp(0.0, 1.0)]
-            });
-            cols = jittered;
+            // Subtle per-region brightness variation (deterministic hash of the index) — skipped when
+            // the canon art is draped, where a per-cell multiplier would read as noise over the map.
+            if !crate::canon_color::has_canon_color() {
+                let jittered: Vec<[f32; 3]> = crate::util::par_map(nr, |r| {
+                    let h = hash_u32(r as u32);
+                    let f = 1.0 + ((h & 0xffff) as f32 / 65535.0 - 0.5) * 2.0 * COLOR_VAR; // [-VAR, VAR]
+                    let cr = cols[r];
+                    [(cr[0] * f).clamp(0.0, 1.0), (cr[1] * f).clamp(0.0, 1.0), (cr[2] * f).clamp(0.0, 1.0)]
+                });
+                cols = jittered;
+            }
         }
 
         let mut c = vec![0.0f32; nr * 3];
@@ -2871,6 +3565,13 @@ impl World {
     /// [`build`] — the base trunk is graded during build. Wider ⇒ gentler relief steps between regions.
     pub fn set_base_blend_m(&mut self, m: f64) {
         self.base_blend_m = m.max(0.0);
+    }
+    /// Toggle the flat authoring base (set before [`build`]). When on, the build skips the canon
+    /// region-guided relief and lays every cell at one level — a flat plate draped with the canon art
+    /// for the author to sculpt. Pair with `set_sea_level(min_elevation())` so the plate is dry land at
+    /// the waterline (indent → water, raise → relief).
+    pub fn set_flat_base(&mut self, flat: bool) {
+        self.flat_base = flat;
     }
     /// Current per-region base-elevation blend width, in world metres.
     pub fn base_blend_m(&self) -> f64 {

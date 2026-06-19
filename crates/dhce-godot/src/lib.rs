@@ -31,6 +31,7 @@ struct DhceEngine {
     world: World,
     surface: Option<Surface>,
     chunk_cache: Option<Surface>,
+    selection_cache: Option<Surface>,
     region_cache: Option<Surface>,
     region_liquid_cache: Option<LiquidSurface>,
     cave_cache: Option<VolumeMesh>,
@@ -48,6 +49,7 @@ impl IRefCounted for DhceEngine {
             world: World::new(),
             surface: None,
             chunk_cache: None,
+            selection_cache: None,
             region_cache: None,
             region_liquid_cache: None,
             cave_cache: None,
@@ -133,6 +135,12 @@ impl DhceEngine {
     #[func]
     fn set_base_blend_m(&mut self, m: f64) {
         self.world.set_base_blend_m(m);
+    }
+    /// Toggle the flat authoring base (set before `build`): every cell starts at one level (a flat
+    /// plate draped with the canon art) for the author to sculpt, instead of the canon relief.
+    #[func]
+    fn set_flat_base(&mut self, flat: bool) {
+        self.world.set_flat_base(flat);
     }
     /// Current per-region base-elevation blend width, in world metres.
     #[func]
@@ -368,6 +376,82 @@ impl DhceEngine {
     fn set_erosion_table(&mut self, vals: PackedFloat32Array) {
         self.world.set_erosion_table(&vals.to_vec());
     }
+
+    // --- per-Region base height + gradient + rotation (seed the terrain trunk; apply on `build`) ---
+
+    /// Region `id`'s base height (normalized elevation).
+    #[func]
+    fn region_base_height_of(&self, id: i64) -> f64 {
+        self.world.region_base_height_of(id.max(0) as usize)
+    }
+    /// Set region `id`'s base height (normalized). Regenerate to apply.
+    #[func]
+    fn set_region_base_height(&mut self, id: i64, value: f64) {
+        self.world.set_region_base_height(id.max(0) as usize, value);
+    }
+    #[func]
+    fn region_base_height_export(&self) -> PackedFloat32Array {
+        PackedFloat32Array::from(self.world.region_base_height_export().as_slice())
+    }
+    #[func]
+    fn set_region_base_height_table(&mut self, vals: PackedFloat32Array) {
+        self.world.set_region_base_height_table(&vals.to_vec());
+    }
+    /// Region `id`'s gradient (normalized total rise across the region, low→high edge).
+    #[func]
+    fn region_gradient_of(&self, id: i64) -> f64 {
+        self.world.region_gradient_of(id.max(0) as usize)
+    }
+    /// Set region `id`'s gradient (normalized total rise). Regenerate to apply.
+    #[func]
+    fn set_region_gradient(&mut self, id: i64, value: f64) {
+        self.world.set_region_gradient(id.max(0) as usize, value);
+    }
+    #[func]
+    fn region_gradient_export(&self) -> PackedFloat32Array {
+        PackedFloat32Array::from(self.world.region_gradient_export().as_slice())
+    }
+    #[func]
+    fn set_region_gradient_table(&mut self, vals: PackedFloat32Array) {
+        self.world.set_region_gradient_table(&vals.to_vec());
+    }
+    /// Region `id`'s gradient rotation (degrees, 0° = North, clockwise).
+    #[func]
+    fn region_gradient_rotation_of(&self, id: i64) -> f64 {
+        self.world.region_gradient_rotation_of(id.max(0) as usize)
+    }
+    /// Set region `id`'s gradient rotation (degrees). Regenerate to apply.
+    #[func]
+    fn set_region_gradient_rotation(&mut self, id: i64, deg: f64) {
+        self.world.set_region_gradient_rotation(id.max(0) as usize, deg);
+    }
+    #[func]
+    fn region_gradient_rotation_export(&self) -> PackedFloat32Array {
+        PackedFloat32Array::from(self.world.region_gradient_rotation_export().as_slice())
+    }
+    #[func]
+    fn set_region_gradient_rotation_table(&mut self, vals: PackedFloat32Array) {
+        self.world.set_region_gradient_rotation_table(&vals.to_vec());
+    }
+    /// Region `id`'s gradient anchor (normalized pivot height); NaN = follow the base height.
+    #[func]
+    fn region_gradient_anchor_of(&self, id: i64) -> f64 {
+        self.world.region_gradient_anchor_of(id.max(0) as usize)
+    }
+    /// Set region `id`'s gradient anchor (normalized); pass NaN to clear (follow the base height). Regen to apply.
+    #[func]
+    fn set_region_gradient_anchor(&mut self, id: i64, value: f64) {
+        self.world.set_region_gradient_anchor(id.max(0) as usize, value);
+    }
+    #[func]
+    fn region_gradient_anchor_export(&self) -> PackedFloat32Array {
+        PackedFloat32Array::from(self.world.region_gradient_anchor_export().as_slice())
+    }
+    #[func]
+    fn set_region_gradient_anchor_table(&mut self, vals: PackedFloat32Array) {
+        self.world.set_region_gradient_anchor_table(&vals.to_vec());
+    }
+
     /// Grow trunk rivers automatically from the whole-map (moisture-weighted) drainage, gated by the
     /// per-region thresholds. `depth_gain` scales channel depth with flow. Nulls the liquid caches.
     #[func]
@@ -726,11 +810,18 @@ impl DhceEngine {
     fn height_at(&self, x: f64, y: f64) -> f64 {
         self.world.height_at(x, y).unwrap_or(f64::NAN)
     }
-    /// Top-down minimap as an `n×n` RGBA byte buffer (biome colour + hill-shade + contours +
-    /// liquid). C#: `Image.CreateFromData(n, n, false, Image.Format.Rgba8, bytes)`.
+    /// Top-down minimap as an `n × minimap_height(n)` RGBA byte buffer (biome colour + hill-shade +
+    /// contours + liquid), rendered at the world's true aspect (4:3 isn't squashed into a square).
+    /// C#: `Image.CreateFromData(n, minimap_height(n), false, Image.Format.Rgba8, bytes)`.
     #[func]
     fn minimap(&self, n: i64, light_x: f64, light_y: f64) -> PackedByteArray {
         PackedByteArray::from(self.world.minimap(n.max(1) as usize, light_x, light_y).as_slice())
+    }
+    /// Pixel height of [`minimap`] for width `n` — the world's aspect (`round(n·height/width)`).
+    /// Front-ends size the minimap texture `n × minimap_height(n)`.
+    #[func]
+    fn minimap_height(&self, n: i64) -> i64 {
+        self.world.minimap_height(n.max(1) as usize) as i64
     }
     #[func]
     fn biome_at(&self, region: i64) -> i64 {
@@ -754,6 +845,77 @@ impl DhceEngine {
         let xs: Vec<f64> = xs.to_vec().iter().map(|&v| v as f64).collect();
         let ys: Vec<f64> = ys.to_vec().iter().map(|&v| v as f64).collect();
         u32_to_packed(&self.world.regions_in_polygon(&xs, &ys))
+    }
+
+    // --- Zone Edit tool: smart selection + whole-zone operations -------------------------------
+
+    /// Smart "magic-wand" select from `start_cell`: grows across smooth terrain, stopping where the
+    /// per-edge elevation step exceeds `edge_tolerance` (snaps to cliffs/shorelines/rims).
+    #[func]
+    fn select_by_elevation(&self, start_cell: i64, edge_tolerance: f64) -> PackedInt32Array {
+        u32_to_packed(&self.world.select_by_elevation(start_cell.max(0) as usize, edge_tolerance))
+    }
+    /// Select the whole connected body of standing water (lake/ocean) touching `start_cell`.
+    #[func]
+    fn select_water_body(&self, start_cell: i64) -> PackedInt32Array {
+        u32_to_packed(&self.world.select_water_body(start_cell.max(0) as usize))
+    }
+    /// Mean normalized elevation across `cells` (the target for "Level to mean").
+    #[func]
+    fn zone_mean_elevation(&self, cells: PackedInt32Array) -> f64 {
+        self.world.zone_mean_elevation(&packed_to_u32(&cells))
+    }
+    /// Offset every selected cell by `delta` (normalized) — drop/raise the zone as a unit.
+    #[func]
+    fn zone_offset(&mut self, cells: PackedInt32Array, delta: f64) -> PackedInt32Array {
+        u32_to_packed(&self.world.zone_offset(&packed_to_u32(&cells), delta))
+    }
+    /// Ease selected cells toward `target` height by `weight` (0..1) — level a plateau.
+    #[func]
+    fn zone_level(&mut self, cells: PackedInt32Array, target: f64, weight: f64) -> PackedInt32Array {
+        u32_to_packed(&self.world.zone_level(&packed_to_u32(&cells), target, weight))
+    }
+    /// Relax the selection toward its neighbour-mean for `iterations` passes at `weight` (0..1).
+    #[func]
+    fn zone_smooth(&mut self, cells: PackedInt32Array, iterations: i64, weight: f64) -> PackedInt32Array {
+        u32_to_packed(&self.world.zone_smooth(&packed_to_u32(&cells), iterations, weight))
+    }
+    /// Feather just the zone's edges: relax cells weighted by ring-distance from the border (full at
+    /// the rim, fading to none `width_m` inward), `iterations` passes at `weight`.
+    #[func]
+    fn zone_feather_edges(&mut self, cells: PackedInt32Array, width_m: f64, weight: f64, iterations: i64) -> PackedInt32Array {
+        u32_to_packed(&self.world.zone_feather_edges(&packed_to_u32(&cells), width_m, weight, iterations))
+    }
+    /// Linear elevation ramp across the selection from `(lx, ly)`@`lh` to `(hx, hy)`@`hh` (normalized
+    /// heights) — "add a grade". Front-end picks the two points by raycast.
+    #[func]
+    fn zone_grade(&mut self, cells: PackedInt32Array, lx: f64, ly: f64, lh: f64, hx: f64, hy: f64, hh: f64) -> PackedInt32Array {
+        u32_to_packed(&self.world.zone_grade(&packed_to_u32(&cells), lx, ly, lh, hx, hy, hh))
+    }
+    /// The spill level of the selection (lowest exterior-border elevation); `NaN` if it has no border.
+    #[func]
+    fn zone_rim_level(&self, cells: PackedInt32Array) -> f64 {
+        self.world.zone_rim_level(&packed_to_u32(&cells))
+    }
+    /// Fill the selection with standing liquid to `target_surface` (normalized), `kind` 0 water/1 lava.
+    /// Static fill (no sim wake); flag liquid chunks → rebuild via `take_dirty_liquid_chunks`.
+    #[func]
+    fn zone_fill_liquid(&mut self, cells: PackedInt32Array, target_surface: f64, kind: i64) -> PackedInt32Array {
+        u32_to_packed(&self.world.zone_fill_liquid(&packed_to_u32(&cells), target_surface, kind.max(0) as u8))
+    }
+    /// Pack the compact selection-highlight surface for `cells` into the cache; read it via
+    /// `selection_surface_positions` / `selection_surface_indices`.
+    #[func]
+    fn tessellate_selection(&mut self, cells: PackedInt32Array, exaggeration: f64) {
+        self.selection_cache = self.world.selection_surface(&packed_to_u32(&cells), exaggeration);
+    }
+    #[func]
+    fn selection_surface_positions(&self) -> PackedVector3Array {
+        self.selection_cache.as_ref().map(|s| to_vec3_yup(&s.positions)).unwrap_or_default()
+    }
+    #[func]
+    fn selection_surface_indices(&self) -> PackedInt32Array {
+        self.selection_cache.as_ref().map(|s| u32_to_packed(&s.indices)).unwrap_or_default()
     }
 
     // --- save / load (authored state) ---
@@ -822,6 +984,26 @@ impl DhceEngine {
     #[func]
     fn clear_region_layout(&mut self) {
         self.world.clear_region_layout();
+    }
+    /// Inject a liquid-paint overlay: a row-major kind grid (`cols × rows`, row 0 = north) where each
+    /// byte is `0` (no liquid) or `kind + 1` (1 water, 2 lava, 3 marsh, 4 ice), resolved by the
+    /// front-end from the 4 liquid colours painted into the region PNG. Applied by `apply_liquid_layout`
+    /// as the last generation step. An empty/ill-sized grid clears the overlay.
+    #[func]
+    fn set_liquid_layout(&mut self, kinds: PackedByteArray, cols: i64, rows: i64) {
+        self.world.set_liquid_layout(&kinds.to_vec(), cols.max(0) as usize, rows.max(0) as usize);
+    }
+    /// Drop any imported liquid-paint overlay.
+    #[func]
+    fn clear_liquid_layout(&mut self) {
+        self.world.clear_liquid_layout();
+    }
+    /// Stamp the liquid-paint overlay onto the built world: each painted cell pools a static body of its
+    /// kind at `pool_depth` (normalized — pass ~10 m / exaggeration). Call *after* `reshape_and_reflow`
+    /// so the hydrology passes don't wipe the pools. No-op when nothing is painted.
+    #[func]
+    fn apply_liquid_layout(&mut self, pool_depth: f64) {
+        self.world.apply_liquid_layout(pool_depth);
     }
     /// Export per-cell trait field `trait_id` (as in `paint_trait`) as f32, for save/load.
     #[func]
@@ -926,6 +1108,11 @@ fn parse_rules(flat: &PackedFloat32Array) -> Vec<ScatterRule> {
 fn u32_to_packed(v: &[u32]) -> PackedInt32Array {
     let s: Vec<i32> = v.iter().map(|&i| i as i32).collect();
     PackedInt32Array::from(s.as_slice())
+}
+
+/// Unpack a Godot `PackedInt32Array` of cell ids into `u32`s (negatives clamp to 0).
+fn packed_to_u32(a: &PackedInt32Array) -> Vec<u32> {
+    a.to_vec().iter().map(|&i| i.max(0) as u32).collect()
 }
 
 /// Pack a flat `[x, y, z, ...]` f32 buffer (core z-up) into Godot `Vector3`s, remapped

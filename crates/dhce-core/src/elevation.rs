@@ -14,21 +14,44 @@ const DOMAIN: f64 = 4.0;
 const FALLOFF: f64 = 0.6;
 
 // --- canon-map elevation tuning -----------------------------------------------------------------
-/// Deep open-ocean floor the rim + ocean cells pull toward (normalized, well below sea level).
-const OCEAN_FLOOR: f64 = -1.0;
+/// Deep open-ocean floor the rim + ocean cells pull toward — the **max water depth**: −1 km below the
+/// `0` sea level (normalized −1000/(14000/3) ≈ −0.214 at the 14 km terrain scale; ±1.5 ≈ ±7 km). Water
+/// spans `0 → −1 km`; land `0 → +7 km`.
+const OCEAN_FLOOR: f64 = -0.2143;
 /// Normalized radius (the `d = 2·|p−center|/extent` measure) where the ocean rim *starts* biting…
-const RIM_INNER: f64 = 0.80;
-/// …and where it reaches full open ocean. Only the outer band is pulled — interior regions near the
-/// edge keep their land elevation.
-const RIM_OUTER: f64 = 1.15;
+/// Pushed out so the rim only drowns the extreme corners: the canon region grid
+/// ([`crate::regionmap::canon_region_at`]) now defines the coastline (ocean = region 0), so the old
+/// aggressive radial rim is no longer wanted — it would re-round the traced silhouette into a disc.
+const RIM_INNER: f64 = 1.12;
+/// …and where it reaches full open ocean. Only the very corner band is pulled now.
+const RIM_OUTER: f64 = 1.48;
 /// Low-frequency texture repeats across the canon map (macro relief only; fine detail is `shape_terrain`).
 const DOMAIN_CANON: f64 = 3.5;
+/// Continental west→east tilt: the canon base map's **west** is near sea level and the land rises
+/// inland (per the user's steer). The trunk of every cell west of [`TILT_PIVOT`] is lowered
+/// proportionally to how far west it sits — the east is left alone, so coastal/western regions sink
+/// toward the sea (the far-west Lost Isles break into isles) while tall regions keep their *relief*
+/// (Frozen Reaches still spikes into icy peaks above the lowered base).
+/// Kept mild: the canon map's west holds tall *ice mountains* (Frozen Reaches), so a strong
+/// west-lowering tilt would fight them. A gentle coastal dip only.
+const CONTINENTAL_TILT: f64 = 0.07;
+/// East of this normalized x the tilt is zero; west of it the drop grows linearly to the coast.
+const TILT_PIVOT: f64 = 0.45;
 /// Box-blur passes over the coarse base-trunk grid (runs on the tiny coarse grid, not the mesh — cheap).
 const BASE_BLUR_PASSES: usize = 3;
 /// Region base-elevation below which a cell is a genuine **water basin** (ocean / Great Lake): the
 /// smooth grade may *raise* land freely, but a basin is pulled back down so it still floods — its
 /// submerged step is hidden by water; only the visible land rise has to be gentle. See `grade_base_trunk`.
 const BASIN_CUTOFF: f64 = -0.05;
+/// The Great Lake region id — shaped as a **bowl** (open water in the centre, shore rising to its base
+/// height + gradient at the rim), not a tilted plane, so it reads as a lake with sloping shores.
+const LAKE_REGION: usize = 3;
+/// Bowl floor (normalized, below the `0` waterline) — the open-water bed (~−400 m at the 14 km scale);
+/// `sea_fill` floods it to the `0` waterline.
+const LAKE_FLOOR: f64 = -0.0857;
+/// Inner fraction of the lake region's radius held flat at the floor (open water); beyond it the shore
+/// rises to the rim (base height + gradient).
+const LAKE_FLAT_FRAC: f64 = 0.45;
 
 /// Smooth Hermite step in `[0,1]` (polynomial — determinism-safe).
 fn smoothstep(edge0: f64, edge1: f64, x: f64) -> f64 {
@@ -51,6 +74,11 @@ fn smoothstep(edge0: f64, edge1: f64, x: f64) -> f64 {
 /// `transition_m` sets the border-grading width (front-end `BaseBlendM`). `neighbors` is unused now the
 /// grade is a coarse-grid blur (kept in the signature for call-site stability). Deterministic: serial
 /// bucket-mean + box blur + `par_map` (index-pure) bilinear + `fbm2`.
+/// `base_height`/`gradient`/`rotation_deg`/`anchor` are the editable per-Region tables (indexed by region
+/// id, normalized except rotation in degrees): the base trunk level, an optional linear tilt (total rise
+/// across the region, low→high along `rotation_deg`, pivoting about the region centroid — at the base
+/// height, or at `anchor` when finite), the tilt direction (0° = North, clockwise), and the optional
+/// pivot override.
 #[allow(clippy::too_many_arguments)]
 pub fn assign_region_elevation_canon(
     mesh: &Mesh,
@@ -59,20 +87,95 @@ pub fn assign_region_elevation_canon(
     seed: u64,
     octaves: u32,
     region_ids: &[u8],
-    _neighbors: &[Vec<u32>],
     transition_m: f64,
+    base_height: &[f64],
+    gradient: &[f64],
+    rotation_deg: &[f64],
+    anchor: &[f64],
 ) -> Vec<f64> {
     let nr = mesh.num_regions();
-    // Per-cell base target from the region role (boundary frame = deep ocean).
+    let nreg = base_height.len();
+    // Per-region centroid + per-direction projection span, for the gradient tilt. Computed serially so
+    // the result is deterministic regardless of thread count (the cross-target contract). `sin_cos` runs
+    // only 14× (once per region) — negligible, and pure (thread-invariant).
+    let mut cx = vec![0.0f64; nreg];
+    let mut cy = vec![0.0f64; nreg];
+    let mut cnt = vec![0.0f64; nreg];
+    for r in 0..nr {
+        if mesh.is_boundary_r(r) {
+            continue;
+        }
+        let g = region_ids.get(r).copied().unwrap_or(0) as usize;
+        if g < nreg {
+            let p = mesh.pos_of_r(r);
+            cx[g] += p[0];
+            cy[g] += p[1];
+            cnt[g] += 1.0;
+        }
+    }
+    let mut dirx = vec![0.0f64; nreg];
+    let mut diry = vec![0.0f64; nreg];
+    for g in 0..nreg {
+        if cnt[g] > 0.0 {
+            cx[g] /= cnt[g];
+            cy[g] /= cnt[g];
+        }
+        // 0° = North (−y, map-up), clockwise → d = (sin θ, −cos θ).
+        let (s, c) = rotation_deg.get(g).copied().unwrap_or(0.0).to_radians().sin_cos();
+        dirx[g] = s;
+        diry[g] = -c;
+    }
+    let mut pmin = vec![f64::INFINITY; nreg];
+    let mut pmax = vec![f64::NEG_INFINITY; nreg];
+    let mut rmax = vec![0.0f64; nreg]; // max radial distance from centroid (for the lake bowl)
+    for r in 0..nr {
+        if mesh.is_boundary_r(r) {
+            continue;
+        }
+        let g = region_ids.get(r).copied().unwrap_or(0) as usize;
+        if g < nreg {
+            let p = mesh.pos_of_r(r);
+            let proj = (p[0] - cx[g]) * dirx[g] + (p[1] - cy[g]) * diry[g];
+            if proj < pmin[g] {
+                pmin[g] = proj;
+            }
+            if proj > pmax[g] {
+                pmax[g] = proj;
+            }
+            let rd = ((p[0] - cx[g]).powi(2) + (p[1] - cy[g]).powi(2)).sqrt();
+            if rd > rmax[g] {
+                rmax[g] = rd;
+            }
+        }
+    }
+    // Per-cell base target: the region's base height (or the anchor when set), plus the gradient tilt —
+    // a linear ramp pivoting about the region centroid so the total rise low→high edge equals `gradient`.
+    // The Great Lake is the exception: a bowl (flat open water in the centre, shore rising to the rim).
     let base_target: Vec<f64> = crate::util::par_map(nr, |r| {
         if mesh.is_boundary_r(r) {
             return OCEAN_FLOOR;
         }
-        regions::base_elevation_for(region_ids.get(r).copied().unwrap_or(0))
+        let g = region_ids.get(r).copied().unwrap_or(0) as usize;
+        if g >= nreg {
+            return OCEAN_FLOOR;
+        }
+        let p = mesh.pos_of_r(r);
+        let grad = gradient.get(g).copied().unwrap_or(0.0);
+        let span = pmax[g] - pmin[g];
+        let offset = if grad != 0.0 && span > 1e-6 {
+            grad * ((p[0] - cx[g]) * dirx[g] + (p[1] - cy[g]) * diry[g]) / span
+        } else {
+            0.0
+        };
+        // The Great Lake's surface target is a normal region (base + tilt) so it grades smoothly into
+        // its neighbours; the bowl depression is carved below the graded field in the final pass.
+        let a = anchor.get(g).copied().unwrap_or(f64::NAN);
+        let pivot = if a.is_finite() { a } else { base_height[g] };
+        (pivot + offset).clamp(-1.5, 1.5)
     });
     // Grade the trunk into a smooth macro field whose borders span ~transition_m regardless of mesh
     // density — the cliff fix (a Jacobi diffuser's band only grows as √iters, far too narrow in practice).
-    let graded = grade_base_trunk(mesh, &base_target, width, height, transition_m);
+    let graded = grade_base_trunk(mesh, &base_target, region_ids, width, height, transition_m);
 
     // Add low-freq texture (relief-scaled) and the banded ocean rim.
     crate::util::par_map(nr, |r| {
@@ -89,9 +192,26 @@ pub fn assign_region_elevation_canon(
         let tex = noise::fbm2(u * DOMAIN_CANON, v * DOMAIN_CANON, seed, octaves.min(3)) * amp;
         // Water basins (ocean, Great Lake) keep their depth so they still flood — only the smooth grade
         // could have raised them; land takes the grade so the visible rise has no cliffs.
+        let g = region_ids.get(r).copied().unwrap_or(0) as usize;
         let target = base_target[r];
-        let trunk = if target < BASIN_CUTOFF { target.min(graded[r]) } else { graded[r] };
+        // The Great Lake is a bowl carved BELOW the smooth graded land surface: the rim equals `graded`
+        // (so the shore meets its neighbours with no cliff), the centre is LAKE_FLOOR (open water at the
+        // 0 waterline). cx/cy/rmax are the region centroid + radius from the aggregation above (cx/cy are
+        // shadowed by the rim's locals further down, so they still index the centroid vecs here). Other
+        // basins are pulled to min(target, graded) so they still flood; land takes the grade.
+        let trunk = if g == LAKE_REGION {
+            let dist = ((p[0] - cx[g]).powi(2) + (p[1] - cy[g]).powi(2)).sqrt();
+            let t = (dist / rmax[g].max(1e-6)).clamp(0.0, 1.0);
+            let s = if t <= LAKE_FLAT_FRAC { 0.0 } else { (t - LAKE_FLAT_FRAC) / (1.0 - LAKE_FLAT_FRAC) };
+            LAKE_FLOOR + (graded[r] - LAKE_FLOOR) * s
+        } else if target < BASIN_CUTOFF {
+            target.min(graded[r])
+        } else {
+            graded[r]
+        };
         let mut h = trunk + tex;
+        // Continental tilt: lower the western half toward sea level (east unchanged).
+        h -= CONTINENTAL_TILT * (TILT_PIVOT - u).max(0.0);
         // Banded radial ocean rim: pull only the outer band toward the ocean floor (never raises).
         let cx = u - 0.5;
         let cy = v - 0.5;
@@ -113,7 +233,7 @@ pub fn assign_region_elevation_canon(
 ///
 /// Deterministic across targets/threads: serial bucket-mean + serial separable box blur + index-pure
 /// `par_map` bilinear (no transcendentals) — the cross-target contract.
-fn grade_base_trunk(mesh: &Mesh, base_target: &[f64], width: f64, height: f64, blend_m: f64) -> Vec<f64> {
+fn grade_base_trunk(mesh: &Mesh, base_target: &[f64], _region_ids: &[u8], width: f64, height: f64, blend_m: f64) -> Vec<f64> {
     let nr = mesh.num_regions();
     // Coarse cell ≈ half the blend width (so a few blur taps cover the full transition), bounded so a
     // tiny or huge blend can't make a degenerate grid.
@@ -123,8 +243,14 @@ fn grade_base_trunk(mesh: &Mesh, base_target: &[f64], width: f64, height: f64, b
     let mut sum = vec![0.0f64; cols * rows];
     let mut cnt = vec![0.0f64; cols * rows];
     for r in 0..nr {
-        if mesh.is_boundary_r(r) {
-            continue; // ocean frame handled by the rim, not the land trunk
+        // Exclude every water basin (the boundary frame, interior sea/bays, AND the Great Lake) from the
+        // land blur — anything below `BASIN_CUTOFF`. Two reasons: (1) folding the −1.0 sea into the land
+        // blur would wash small coastal regions (e.g. the Volcanic Scape) below sea level; (2) including
+        // the Great Lake (−0.15) would average its floor *up* toward the surrounding land AND drag the
+        // neighbouring mountains *down* toward the lake, the exact "lake dry / peaks sunken" bug. Land
+        // grades over land only; the coast→water drop is left to `grade_shorelines` + the basin handling.
+        if mesh.is_boundary_r(r) || base_target[r] < BASIN_CUTOFF {
+            continue;
         }
         let p = mesh.pos_of_r(r);
         let gx = ((p[0] / cell) as usize).min(cols - 1);

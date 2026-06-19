@@ -10,6 +10,8 @@
 pub enum LiquidType {
     Water = 0,
     Lava = 1,
+    Marsh = 2, // murky marsh/bog water
+    Ice = 3,   // frozen water / ice
 }
 
 /// Physical + visual properties for one liquid type.
@@ -32,6 +34,8 @@ impl LiquidType {
     pub fn from_u8(id: u8) -> LiquidType {
         match id {
             1 => LiquidType::Lava,
+            2 => LiquidType::Marsh,
+            3 => LiquidType::Ice,
             _ => LiquidType::Water,
         }
     }
@@ -51,6 +55,22 @@ impl LiquidType {
                 viscosity: 0.12,
                 color: [0.85, 0.22, 0.06],
                 emissive: 1.0,
+                evaporation: 0.0,
+            },
+            // Murky bog water — sluggish, dark olive; colour matches the render/minimap (sRGB #3D4D2E).
+            LiquidType::Marsh => LiquidProps {
+                density: 1.0,
+                viscosity: 0.6,
+                color: [0.239, 0.302, 0.180],
+                emissive: 0.0,
+                evaporation: 0.001,
+            },
+            // Frozen water / ice — doesn't flow; pale blue-white (sRGB #C6E2EE).
+            LiquidType::Ice => LiquidProps {
+                density: 0.92,
+                viscosity: 0.0,
+                color: [0.776, 0.886, 0.933],
+                emissive: 0.0,
                 evaporation: 0.0,
             },
         }

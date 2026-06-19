@@ -15,11 +15,12 @@ namespace DesolateHaven.Cartography;
 [GlobalClass]
 public partial class DhceWorld : Node3D
 {
-    [Export] public float WorldSizeKm = 30f;   // requested size; snapped to a whole number of chunks
-    [Export] public float SpacingM = 10f;      // metres between regions (~3.6M @ 30 km / 10 m)
+    [Export] public float WorldSizeKm = 40f;   // requested WIDTH km (E–W); snapped to a whole number of chunks
+    [Export] public float WorldHeightKm = 30f; // requested HEIGHT km (N–S); the canon map is 4:3 (40×30)
+    [Export] public float SpacingM = 10f;      // metres between regions (~4.8M @ 40×30 km / 10 m)
     [Export] public int Seed = 12345;
     [Export] public int Octaves = 6;
-    [Export] public float TerrainHeightKm = 5.0f;
+    [Export] public float TerrainHeightKm = 14.0f; // full ±1.5 span = 14 km → land peaks to +7 km, water to −1 km
     [Export] public float ChunkSizeM = 256f;   // fixed chunk edge (m); smaller ⇒ finer, lighter streaming
     [Export] public int RenderDistance = 8;    // chunk tiles (Chebyshev) kept meshed around the focus
     [Export] public int ChunksPerFrame = 8;    // chunks tessellated per streaming tick
@@ -37,6 +38,8 @@ public partial class DhceWorld : Node3D
     [Export] public float RiverDepthGain = 0.015f;    // river EROSION strength: hydraulic stream-power incision
                                                       // carves valleys along the drainage (×3 internally). Higher ⇒ deeper valleys.
     [Export] public float BaseBlendM = 1800f;         // width (m) regions' base-elevation trunk blends — softer steps between places
+    [Export] public bool FlatBase = true;             // flat authoring base: one-level plate draped with the canon art (sea level == plate);
+                                                       // skips auto relief/rivers — sculpt all terrain, indent + paint water where needed
 
     /// Normalized-elevation span the core clamps to (ELEV_MAX − ELEV_MIN in world.rs).
     private const float ElevSpan = 3.0f;
@@ -49,6 +52,12 @@ public partial class DhceWorld : Node3D
     private bool[] _built;
     private int[] _chunkLod; // per built chunk: 0 = full TIN, 1 = coarse LOD
     private ShaderMaterial _mat, _dataMat, _liquidMat;
+    private ImageTexture _canonTex; // the full 4K canon base map, draped on the terrain as a GPU texture
+    private float _canonMixFull;    // canon_mix when the drape is fully on (1 if the image loaded, else 0)
+    private MeshInstance3D _selOverlay; // ephemeral translucent fill over the Zone Edit selection
+    private float[] _zoneUndoElev;   // single-level zone-edit undo snapshot (terrain)
+    private float[] _zoneUndoDepth;  //   …and liquid depth (only for ops that move water)
+    private byte[] _zoneUndoKind;
     private int _viewMode;
     private int _cols, _rows;
     private float _sx, _sy;             // chunk tile size in metres
@@ -64,8 +73,19 @@ public partial class DhceWorld : Node3D
     private Node3D _renderRoot;                 // ephemeral parent for all preview geometry, offset so
                                                 // the world centres on the origin (the editor camera's focus)
 
-    private static readonly Color WaterColor = new Color(0.20f, 0.45f, 0.75f, 0.6f);
+    private static readonly Color WaterColor = new Color(0.22f, 0.52f, 0.55f, 0.6f);  // teal, matches canon ocean
     private static readonly Color LavaColor = new Color(0.95f, 0.35f, 0.10f, 0.9f);
+    private static readonly Color MarshColor = new Color(0.239f, 0.302f, 0.180f, 0.8f); // murky bog water (#3D4D2E)
+    private static readonly Color IceColor = new Color(0.776f, 0.886f, 0.933f, 0.9f);   // frozen water / ice (#C6E2EE)
+
+    /// Map a per-vertex liquid-kind id (0 water, 1 lava, 2 marsh, 3 ice) to its surface colour.
+    private static Color LiquidColor(float kind) => Mathf.RoundToInt(kind) switch
+    {
+        1 => LavaColor,
+        2 => MarshColor,
+        3 => IceColor,
+        _ => WaterColor,
+    };
 
     /// Region-map import key — 14 DISTINCT flat colours (index = region id) + ocean at [0]. Distinct
     /// because several regions SHARE a `--mk-*` accent (Sacred/Great Lake, Underdeep/Scattered,
@@ -87,7 +107,20 @@ public partial class DhceWorld : Node3D
         "d6883a", // 11 Volcanic Scape     (orange)
         "3a2e4a", // 12 Blight Ruins       (dark violet)
         "c77fa8", // 13 Scattered Isles    (pink)
-        "6e7a4b", // 14 Marsh & Bog        (olive)
+        "8a857c", // 14 Marsh & Bog        (stone grey — distinct from the olive marsh-liquid #3d4d2e)
+    };
+
+    /// Liquid-paint import key — paint any of these 4 colours into the region PNG to pool a body of that
+    /// kind *anywhere* (an overlay on the terrain, not a region). Index = liquid kind (0 water, 1 lava,
+    /// 2 marsh, 3 ice); colours match the rendered surface/minimap so what you paint is what you see.
+    /// Note: painted water (#38858c) is intentionally close to the Lost Isles accent (#2e8c8c) — paint
+    /// pools as deliberate blobs and the nearest-match still resolves correctly.
+    private static readonly string[] LiquidKeyHex =
+    {
+        "2c94a3", // 0  Water  (azure — the painted lake/channel colour; render stays teal #38858c)
+        "f2591a", // 1  Lava   (orange-red)
+        "3d4d2e", // 2  Marsh  (murky olive)
+        "c6e2ee", // 3  Ice    (pale blue)
     };
 
     public GodotObject Engine => _engine;
@@ -146,9 +179,20 @@ public partial class DhceWorld : Node3D
             "      float rim = smoothstep(0.88, 0.97, nd) * (1.0 - smoothstep(0.97, 1.0, nd));\n" + // bright edge
             "      ALBEDO = mix(ALBEDO, vec3(1.0, 0.92, 0.30), clamp(fill + rim * 0.85, 0.0, 1.0));\n" +
             "    }\n  }\n";
-        _mat = VertexColorShaderMat( // Natural view: lit terrain (relief shows through the lighting)
-            "shader_type spatial;\nrender_mode cull_disabled;\n" + brushUniforms +
-            "void fragment() { ALBEDO = COLOR.rgb; ROUGHNESS = 1.0; METALLIC = 0.0;\n" + brushOverlay + "}");
+        // Natural view drapes the canon base map as a GPU TEXTURE (UV = world XZ position), so it stays
+        // pixel-for-pixel crisp at any zoom / LOD — unlike per-vertex colour, which the streamed coarse
+        // LOD chunks smear at whole-world zoom. `canon_mix` blends texture↔vertex-colour (1 = pure canon;
+        // 0 = vertex colour fallback when the image is missing). world_min/world_size map XZ→[0,1] UV.
+        const string canonUniforms =
+            "uniform sampler2D canon_tex : source_color, filter_linear_mipmap;\n" +
+            "uniform vec2 world_min;\nuniform vec2 world_size;\nuniform float canon_mix;\n";
+        _mat = VertexColorShaderMat( // Natural view: canon texture draped over the lit terrain
+            "shader_type spatial;\nrender_mode cull_disabled;\n" + canonUniforms + brushUniforms +
+            "void fragment() {\n" +
+            "  vec2 cuv = (v_world.xz - world_min) / max(world_size, vec2(1.0));\n" +
+            "  vec3 canon = texture(canon_tex, cuv).rgb;\n" +
+            "  ALBEDO = mix(COLOR.rgb, canon, canon_mix); ROUGHNESS = 1.0; METALLIC = 0.0;\n" +
+            brushOverlay + "}");
         _dataMat = VertexColorShaderMat( // data views: UNSHADED so the raw field reads true, lighting-independent
             "shader_type spatial;\nrender_mode cull_disabled, unshaded;\n" + brushUniforms +
             "void fragment() { ALBEDO = COLOR.rgb;\n" + brushOverlay + "}");
@@ -162,6 +206,24 @@ public partial class DhceWorld : Node3D
     private static ShaderMaterial VertexColorShaderMat(string code) =>
         new ShaderMaterial { Shader = new Shader { Code = code } };
 
+    /// The canon drape (`assets/canon-map-regions.jpg`, the **icon-less** de-iconed map — same source the
+    /// region classification reads, so drape + regions stay in sync) loaded once as a mip-mapped texture
+    /// for the terrain shader's `canon_tex`. Loaded from the repo's `assets/` (outside the Godot project)
+    /// by globalizing `res://` and walking up one level, so no res:// import is needed. Returns null
+    /// (→ vertex-colour fallback) if the file is missing.
+    private ImageTexture CanonTexture()
+    {
+        if (_canonTex != null) return _canonTex;
+        string baseDir = ProjectSettings.GlobalizePath("res://"); // …/tool/
+        string path = System.IO.Path.GetFullPath(System.IO.Path.Combine(baseDir, "..", "assets", "canon-map-regions.jpg"));
+        if (!System.IO.File.Exists(path)) { GD.PushWarning($"[DHCE] canon drape map not found: {path}"); return null; }
+        var img = Image.LoadFromFile(path);
+        if (img == null) { GD.PushWarning($"[DHCE] failed to load canon drape map: {path}"); return null; }
+        img.GenerateMipmaps(); // smooth minification when the whole 40×30 km world is on screen
+        _canonTex = ImageTexture.CreateFromImage(img);
+        return _canonTex;
+    }
+
     /// Build the world from the current params (blocks ~seconds at full density) and create empty
     /// chunk nodes; streaming fills them in around the focus. Discards any previous world.
     public void Generate()
@@ -171,19 +233,30 @@ public partial class DhceWorld : Node3D
         ClearChunks();
         _exaggeration = TerrainHeightKm * 1000f / ElevSpan;
 
-        // Fixed-size chunks: snap the world to a whole number of ChunkSizeM tiles (so the requested
-        // 20 km becomes e.g. 19.968 km at 256 m), giving even tiles and no thin partial edge.
+        // Fixed-size chunks: snap each axis to a whole number of ChunkSizeM tiles (so the requested
+        // 40×30 km becomes even tiles with no thin partial edge). Width and height are independent —
+        // the world adopts the canon map's 4:3 aspect (the Rust core has always taken separate dims).
         float chunk = Mathf.Max(ChunkSizeM, 32f);
-        int perSide = Mathf.Max(1, Mathf.RoundToInt(WorldSizeKm * 1000f / chunk));
-        _widthM = _heightM = perSide * chunk;
+        int perCols = Mathf.Max(1, Mathf.RoundToInt(WorldSizeKm * 1000f / chunk));
+        int perRows = Mathf.Max(1, Mathf.RoundToInt(WorldHeightKm * 1000f / chunk));
+        _widthM = perCols * chunk;
+        _heightM = perRows * chunk;
         _engine.Call("set_chunk_size_m", (double)chunk);
         _engine.Call("set_base_blend_m", (double)BaseBlendM); // softer per-region base-elevation steps
+        _engine.Call("set_flat_base", FlatBase); // flat plate to sculpt (canon art draped) vs auto canon relief
 
         // Centre the world on the origin: the core generates in [0, size] (origin at a corner), but the
         // editor camera looks at the origin — so shift the preview by -WorldCenter to put the world's
         // middle under the camera. Without this, Generate succeeds but the terrain sits ~10 km off-screen.
         EnsureRenderRoot();
         _renderRoot.Position = new Vector3(-_widthM * 0.5f, 0f, -_heightM * 0.5f);
+        // Drape the canon base map as a GPU texture (UV = world XZ → [0,1]); crisp at any zoom/LOD.
+        var canon = CanonTexture();
+        _mat.SetShaderParameter("world_min", new Vector2(-_widthM * 0.5f, -_heightM * 0.5f));
+        _mat.SetShaderParameter("world_size", new Vector2(_widthM, _heightM));
+        _canonMixFull = canon != null ? 1f : 0f; // remembered so the zone-selection dim can restore it
+        if (canon != null) { _mat.SetShaderParameter("canon_tex", canon); _mat.SetShaderParameter("canon_mix", 1f); }
+        else _mat.SetShaderParameter("canon_mix", 0f); // image missing → fall back to per-vertex colour
 
         // Region layout: inject the imported region-coloured PNG (if any) so the canon pipeline
         // samples it; otherwise the built-in canon anchors are used.
@@ -197,48 +270,135 @@ public partial class DhceWorld : Node3D
         OnGenDone(sw.Elapsed.TotalMilliseconds);
     }
 
-    /// Resolve the assigned region-map PNG (if any) into a region-id grid and inject it before build;
-    /// clears the override (→ built-in canon anchors) when none is set. Each pixel is matched to the
-    /// nearest of the 14 region accents (`biome_color_of`) or ocean — paint each region in its accent
-    /// colour; anything else (or transparent) reads as ocean. Image row 0 is north (north-up).
+    /// Resolve the assigned region-map image (if any) into a region-id grid AND a liquid-paint overlay,
+    /// and inject both before build; clears the overrides (→ built-in canon anchors, no overlay) when
+    /// none is set. Robust to a *hand-painted* map: fuzzy brush edges, internal shading, and the
+    /// elevation-contour lines some tools draw inside water. It works by majority VOTE, not point
+    /// sampling — every source pixel is classified to the nearest of the 14 region accents + ocean and
+    /// the 4 liquid colours, then each output cell takes the dominant class over a window. So a thin
+    /// cyan contour line inside a marsh can't flip that cell to ice, and a fuzzy border resolves to
+    /// whichever region fills the cell. A cell whose window is mostly liquid pools that kind on top of
+    /// the surrounding region's terrain (the "water body anywhere" overlay). Image row 0 is north.
     private void ApplyRegionMap()
     {
         if (_engine == null) return;
-        if (RegionMap == null) { _engine.Call("clear_region_layout"); return; }
+        if (RegionMap == null) { _engine.Call("clear_region_layout"); _engine.Call("clear_liquid_layout"); return; }
         Image img = RegionMap.GetImage();
-        if (img == null) { _engine.Call("clear_region_layout"); return; }
+        if (img == null) { _engine.Call("clear_region_layout"); _engine.Call("clear_liquid_layout"); return; }
         if (img.IsCompressed()) img.Decompress();
         if (img.GetFormat() != Image.Format.Rgba8) img.Convert(Image.Format.Rgba8);
+        // Hand-painted maps can be huge (e.g. 4096²) — slow to classify per pixel on every Generate.
+        // Downsample to a working resolution first; the area-blur also softens fine brush noise. (GetImage
+        // returns a snapshot, so resizing here doesn't touch the texture used for the drape.)
+        const int MaxEdge = 1280;
+        int longEdge = Mathf.Max(img.GetWidth(), img.GetHeight());
+        if (longEdge > MaxEdge)
+        {
+            float s = (float)MaxEdge / longEdge;
+            img.Resize(Mathf.RoundToInt(img.GetWidth() * s), Mathf.RoundToInt(img.GetHeight() * s), Image.Interpolation.Bilinear);
+        }
 
-        const int RegionCount = 14;
-        var refs = new Color[RegionCount + 1];
-        for (int id = 0; id <= RegionCount; id++) refs[id] = new Color(RegionKeyHex[id]);
+        const int RegionCount = 14;       // region ids 0 (ocean) .. 14
+        const int LiquidCount = 4;        // liquid kinds 0 (water) .. 3 (ice)
+        float[] regR = new float[RegionCount + 1], regG = new float[RegionCount + 1], regB = new float[RegionCount + 1];
+        for (int id = 0; id <= RegionCount; id++) { var c = new Color(RegionKeyHex[id]); regR[id] = c.R; regG[id] = c.G; regB[id] = c.B; }
+        float[] liqR = new float[LiquidCount], liqG = new float[LiquidCount], liqB = new float[LiquidCount];
+        for (int k = 0; k < LiquidCount; k++) { var c = new Color(LiquidKeyHex[k]); liqR[k] = c.R; liqG[k] = c.G; liqB[k] = c.B; }
 
         int imgW = img.GetWidth(), imgH = img.GetHeight();
+        if (imgW < 1 || imgH < 1) { _engine.Call("clear_region_layout"); _engine.Call("clear_liquid_layout"); return; }
+        byte[] data = img.GetData(); // RGBA8, row-major, row 0 = north
+
+        // Pass 1 — classify every source pixel: nearest region (always, for the terrain underneath) and
+        // whether it's closer to a liquid colour than to any region (→ a painted-liquid pixel + its kind).
+        int n = imgW * imgH;
+        var regCls = new byte[n];   // nearest region id 0..14
+        var isLiq = new bool[n];    // closer to a liquid colour than any region
+        var liqCls = new byte[n];   // nearest liquid kind 0..3 (valid when isLiq)
+        for (int i = 0; i < n; i++)
+        {
+            int o = i * 4;
+            float a = data[o + 3] * (1f / 255f);
+            if (a < 0.5f) { regCls[i] = 0; isLiq[i] = false; continue; } // transparent → ocean, no liquid
+            float r = data[o] * (1f / 255f), g = data[o + 1] * (1f / 255f), b = data[o + 2] * (1f / 255f);
+            byte bestReg = 0; float bestRegD = float.MaxValue;
+            for (int id = 0; id <= RegionCount; id++)
+            {
+                float dr = r - regR[id], dg = g - regG[id], db = b - regB[id];
+                float d = dr * dr + dg * dg + db * db;
+                if (d < bestRegD) { bestRegD = d; bestReg = (byte)id; }
+            }
+            byte bestLiq = 0; float bestLiqD = float.MaxValue;
+            for (int k = 0; k < LiquidCount; k++)
+            {
+                float dr = r - liqR[k], dg = g - liqG[k], db = b - liqB[k];
+                float d = dr * dr + dg * dg + db * db;
+                if (d < bestLiqD) { bestLiqD = d; bestLiq = (byte)k; }
+            }
+            regCls[i] = bestReg;
+            if (bestLiqD < bestRegD) { isLiq[i] = true; liqCls[i] = bestLiq; }
+        }
+
+        // Pass 2 — downsample by majority vote over a window (≥ ~9 px, so thin contour lines lose).
         int cols = Mathf.Min(imgW, 256), rows = Mathf.Min(imgH, 256);
-        if (cols < 1 || rows < 1) { _engine.Call("clear_region_layout"); return; }
+        int half = Mathf.Max(4, (int)Mathf.Round(Mathf.Max((float)imgW / cols, (float)imgH / rows)));
         var ids = new byte[cols * rows];
+        var liquids = new byte[cols * rows];
+        int liquidCells = 0;
+        var regVotes = new int[RegionCount + 1];
+        var liqVotes = new int[LiquidCount];
         for (int gy = 0; gy < rows; gy++)
         {
-            int py = Mathf.Clamp((int)((gy + 0.5f) * imgH / rows), 0, imgH - 1);
+            int cy = Mathf.Clamp((int)((gy + 0.5f) * imgH / rows), 0, imgH - 1);
+            int wy0 = Mathf.Max(cy - half, 0), wy1 = Mathf.Min(cy + half, imgH - 1);
             for (int gx = 0; gx < cols; gx++)
             {
-                int px = Mathf.Clamp((int)((gx + 0.5f) * imgW / cols), 0, imgW - 1);
-                Color p = img.GetPixel(px, py);
-                byte best = 0;
-                float bestD = float.MaxValue;
-                for (int id = 0; id <= RegionCount; id++)
+                int cx = Mathf.Clamp((int)((gx + 0.5f) * imgW / cols), 0, imgW - 1);
+                int wx0 = Mathf.Max(cx - half, 0), wx1 = Mathf.Min(cx + half, imgW - 1);
+
+                System.Array.Clear(regVotes, 0, regVotes.Length);
+                System.Array.Clear(liqVotes, 0, liqVotes.Length);
+                int nTot = 0, nLiq = 0, nLand = 0;
+                for (int wy = wy0; wy <= wy1; wy++)
                 {
-                    float dr = p.R - refs[id].R, dg = p.G - refs[id].G, db = p.B - refs[id].B;
-                    float d = dr * dr + dg * dg + db * db;
-                    if (d < bestD) { bestD = d; best = (byte)id; }
+                    int row = wy * imgW;
+                    for (int wx = wx0; wx <= wx1; wx++)
+                    {
+                        int idx = row + wx;
+                        nTot++;
+                        if (isLiq[idx]) { nLiq++; liqVotes[liqCls[idx]]++; }
+                        else { nLand++; regVotes[regCls[idx]]++; }
+                    }
                 }
-                if (p.A < 0.5f) best = 0; // transparent → ocean
-                ids[gy * cols + gx] = best;
+
+                int cell = gy * cols + gx;
+                if (nLiq * 2 >= nTot && nTot > 0)
+                {
+                    // Liquid-dominated cell: pool the most-voted liquid kind. Terrain underneath = the
+                    // most-voted *land* region in the window (so a channel inherits the land it cuts
+                    // through); fall back to this pixel's nearest region for an all-liquid window.
+                    int topLiq = 0; for (int k = 1; k < LiquidCount; k++) if (liqVotes[k] > liqVotes[topLiq]) topLiq = k;
+                    liquids[cell] = (byte)(topLiq + 1);
+                    if (nLand > 0)
+                    {
+                        int topReg = 0; for (int id = 1; id <= RegionCount; id++) if (regVotes[id] > regVotes[topReg]) topReg = id;
+                        ids[cell] = (byte)topReg;
+                    }
+                    else ids[cell] = regCls[cy * imgW + cx];
+                    liquidCells++;
+                }
+                else
+                {
+                    // Land cell: the most-voted region accent (ocean = 0).
+                    int topReg = 0; for (int id = 1; id <= RegionCount; id++) if (regVotes[id] > regVotes[topReg]) topReg = id;
+                    ids[cell] = (byte)topReg;
+                }
             }
         }
         _engine.Call("set_region_layout", ids, cols, rows);
-        GD.Print($"[DHCE] region map applied: {cols}x{rows} from {imgW}x{imgH} PNG");
+        if (liquidCells > 0) _engine.Call("set_liquid_layout", liquids, cols, rows);
+        else _engine.Call("clear_liquid_layout");
+        GD.Print($"[DHCE] region map applied: {cols}x{rows} vote (±{half}px) from {imgW}x{imgH} ({liquidCells} liquid cells)");
     }
 
     /// Push the climate params (lapse rate, orographic strength, wind) into the engine. Wind is sent
@@ -269,7 +429,7 @@ public partial class DhceWorld : Node3D
         _rows = grid.Y;
         _sx = _sy = (float)_engine.Call("chunk_size_m").As<double>(); // fixed tile size
         int n = _engine.Call("chunk_count").As<int>();
-        GD.Print($"[DHCE] gen world={WorldSizeKm}km render={RenderDistance} cpf={ChunksPerFrame} regions={_engine.Call("region_count")} chunks={n} grid={_cols}x{_rows} tile={_sx:0}m {genMs:0}ms");
+        GD.Print($"[DHCE] gen world={WorldSizeKm}x{WorldHeightKm}km render={RenderDistance} cpf={ChunksPerFrame} regions={_engine.Call("region_count")} chunks={n} grid={_cols}x{_rows} tile={_sx:0}m {genMs:0}ms");
 
         // Lazy nodes: only the in-range ring is instantiated (in BuildChunk), so the live node count
         // tracks the visible area, not the whole map — a 20 km world at 256 m is ~6 000 tile *slots*
@@ -288,12 +448,29 @@ public partial class DhceWorld : Node3D
             // is 1 km in normalized elevation. Perched LAKES/ponds are filled separately (fill_lakes) —
             // held in highland basins above the ocean, like Lake Tahoe. (Load() restores both instead.)
             float minElev = (float)_engine.Call("min_elevation").As<double>();
-            SeaLevelNorm = minElev + 1000f / _exaggeration;
-            _engine.Call("set_sea_level", (double)SeaLevelNorm);
-            // Unified relief + hydrology pass: bake the per-region landform (mountains/hills), then carve
-            // rivers, pond perched lakes behind their carved outlets, and connect each lake's outflow —
-            // one coherent watershed on shaped terrain. (Load() restores the baked result instead.)
-            _engine.Call("reshape_and_reflow", (double)ShapeStrength, (double)RiverDepthGain);
+            if (FlatBase)
+            {
+                // Flat base: the plate sits at one level; set the sea level EQUAL to it (minElev) so it
+                // reads as dry land right at the waterline. Indent a cell below this → water; raise →
+                // relief. No auto relief/rivers/lakes — the author sculpts everything and paints water.
+                SeaLevelNorm = minElev;
+                _engine.Call("set_sea_level", (double)SeaLevelNorm);
+            }
+            else
+            {
+                // Canon water model: sea level is the 0 waterline — land is positive (up to +7 km),
+                // water negative (down to the −1 km ocean floor). The Great Lake bowl + ocean sit below 0.
+                _ = minElev; // (no longer derived from the lowest basin)
+                SeaLevelNorm = 0f;
+                _engine.Call("set_sea_level", (double)SeaLevelNorm);
+                // Unified relief + hydrology pass: bake the per-region landform (mountains/hills), then
+                // carve rivers, pond perched lakes behind their outlets, connect each lake's outflow.
+                _engine.Call("reshape_and_reflow", (double)ShapeStrength, (double)RiverDepthGain);
+            }
+            // Liquid-paint overlay: stamp any pools painted into the region map LAST, after the
+            // hydrology passes — a shallow ~10 m "pooled" body of the painted kind, perched on the local
+            // terrain. _exaggeration is metres per normalized unit, so 10/_exaggeration is 10 m of depth.
+            _engine.Call("apply_liquid_layout", 10.0 / (double)_exaggeration);
         }
         // Iteration-sized worlds: build every chunk up-front so the 3D view shows the *whole* authored
         // world (like the minimap) and never depends on per-frame streaming — which a C# hot-reload can
@@ -428,7 +605,7 @@ public partial class DhceWorld : Node3D
         var indices = _engine.Call("liquid_chunk_indices").As<int[]>();
         var colors = new Color[positions.Length];
         for (int k = 0; k < positions.Length; k++)
-            colors[k] = (k < types.Length && types[k] > 0.5f) ? LavaColor : WaterColor;
+            colors[k] = k < types.Length ? LiquidColor(types[k]) : WaterColor;
         var arrays = new Godot.Collections.Array();
         arrays.Resize((int)Mesh.ArrayType.Max);
         arrays[(int)Mesh.ArrayType.Vertex] = positions;
@@ -523,6 +700,98 @@ public partial class DhceWorld : Node3D
         _dataMat.SetShaderParameter("brush_radius", radius);
     }
 
+    // --- Zone Edit: selection visualization (canon dim + translucent overlay) + one-level undo ---
+
+    /// Blend the canon drape on the terrain (1 = pure canon art, 0 = vertex colour). 0 if no image.
+    public void SetCanonMix(float mix)
+    {
+        _mat?.SetShaderParameter("canon_mix", Mathf.Clamp(mix, 0f, 1f));
+    }
+
+    /// Dim the canon drape while a zone is selected so the selection overlay reads clearly; restore on
+    /// deselect. (The overlay is also drawn on top, so the selection is visible either way — this just
+    /// makes it pop.) No-op when the canon image is absent.
+    public void DimCanonForSelection(bool dim) => SetCanonMix(dim ? _canonMixFull * 0.4f : _canonMixFull);
+
+    /// Build/refresh the translucent highlight over the Zone Edit selection `cells` — a compact filled
+    /// mesh (from the core) drawn over the terrain. Empty `cells` clears it.
+    public void BuildSelectionOverlay(int[] cells)
+    {
+        if (_engine == null) return;
+        if (cells == null || cells.Length == 0) { ClearSelectionOverlay(); return; }
+        EnsureRenderRoot();
+        _engine.Call("tessellate_selection", cells, (double)_exaggeration);
+        var verts = _engine.Call("selection_surface_positions").As<Vector3[]>();
+        var idx = _engine.Call("selection_surface_indices").As<int[]>();
+        if (verts.Length == 0 || idx.Length == 0) { ClearSelectionOverlay(); return; }
+        var arrays = new Godot.Collections.Array();
+        arrays.Resize((int)Mesh.ArrayType.Max);
+        arrays[(int)Mesh.ArrayType.Vertex] = verts;
+        arrays[(int)Mesh.ArrayType.Index] = idx;
+        var mesh = new ArrayMesh();
+        mesh.AddSurfaceFromArrays(Mesh.PrimitiveType.Triangles, arrays);
+        if (_selOverlay == null || !GodotObject.IsInstanceValid(_selOverlay) || _selOverlay.GetParent() != _renderRoot)
+        {
+            ClearSelectionOverlay();
+            _selOverlay = new MeshInstance3D
+            {
+                Name = "DhceZoneSelection",
+                CastShadow = GeometryInstance3D.ShadowCastingSetting.Off,
+                MaterialOverride = new StandardMaterial3D
+                {
+                    ShadingMode = BaseMaterial3D.ShadingModeEnum.Unshaded,
+                    AlbedoColor = new Color(0.20f, 0.85f, 1.0f, 0.32f),
+                    Transparency = BaseMaterial3D.TransparencyEnum.Alpha,
+                    CullMode = BaseMaterial3D.CullModeEnum.Disabled,
+                    NoDepthTest = true, // float over the terrain so the zone reads even under the canon drape
+                },
+            };
+            _renderRoot.AddChild(_selOverlay); // owner left null → ephemeral, never serialized
+        }
+        _selOverlay.Mesh = mesh;
+    }
+
+    public void ClearSelectionOverlay()
+    {
+        if (_selOverlay != null && GodotObject.IsInstanceValid(_selOverlay)) _selOverlay.QueueFree();
+        _selOverlay = null;
+    }
+
+    /// Show/hide the selection overlay without rebuilding it — the selection persists across tool
+    /// switches (so you can return to it), but its highlight + canon dim only show on the Zone tool.
+    public void SetSelectionOverlayVisible(bool visible)
+    {
+        if (_selOverlay != null && GodotObject.IsInstanceValid(_selOverlay)) _selOverlay.Visible = visible;
+    }
+
+    /// True once a zone op has stashed a snapshot that [`UndoZone`] can restore.
+    public bool HasZoneUndo => _zoneUndoElev != null;
+
+    /// Snapshot terrain (and optionally liquid) before a destructive zone op — single-level undo.
+    public void SnapshotForZone(bool includeLiquid)
+    {
+        if (_engine == null) return;
+        _zoneUndoElev = _engine.Call("elevation_export").As<float[]>();
+        if (includeLiquid)
+        {
+            _zoneUndoDepth = _engine.Call("liquid_depth_export").As<float[]>();
+            _zoneUndoKind = _engine.Call("liquid_kind_export").As<byte[]>();
+        }
+        else { _zoneUndoDepth = null; _zoneUndoKind = null; }
+    }
+
+    /// Restore the last zone snapshot (consumed) and refresh the render.
+    public void UndoZone()
+    {
+        if (_engine == null || _zoneUndoElev == null) return;
+        _engine.Call("set_elevation", _zoneUndoElev);
+        if (_zoneUndoDepth != null) _engine.Call("set_liquid", _zoneUndoDepth, _zoneUndoKind);
+        _engine.Call("refresh_colors"); // recolour + flag every chunk dirty so the restore shows
+        RepaintDirtyTerrain();
+        RebuildLiquid();
+        _zoneUndoElev = null; _zoneUndoDepth = null; _zoneUndoKind = null;
+    }
+
     /// Switch the colour view (0 Natural … 4 Biome); data views use the unshaded material.
     public void SetViewMode(int mode)
     {
@@ -612,8 +881,8 @@ public partial class DhceWorld : Node3D
         float[] T(int id) => _engine.Call("trait_field_export", id).As<float[]>();
         return new DhceWorldState
         {
-            Seed = Seed, WorldSizeKm = WorldSizeKm, SpacingM = SpacingM, Octaves = Octaves,
-            TerrainHeightKm = TerrainHeightKm, ChunkSizeM = ChunkSizeM, BaseBlendM = BaseBlendM, SeaLevel = SeaLevelNorm,
+            Seed = Seed, WorldSizeKm = WorldSizeKm, WorldHeightKm = WorldHeightKm, SpacingM = SpacingM, Octaves = Octaves,
+            TerrainHeightKm = TerrainHeightKm, ChunkSizeM = ChunkSizeM, BaseBlendM = BaseBlendM, FlatBase = FlatBase, SeaLevel = SeaLevelNorm,
             LapseRate = LapseRate, OrographicStrength = OrographicStrength, WindDeg = WindDeg,
             Elevation = _engine.Call("elevation_export").As<float[]>(),
             Biome = _engine.Call("biome_export").As<byte[]>(),
@@ -629,6 +898,10 @@ public partial class DhceWorld : Node3D
             RegionLakeDepth = _engine.Call("region_lake_depth_export").As<float[]>(),
             RegionRiverThreshold = _engine.Call("river_threshold_export").As<float[]>(),
             RegionErosion = _engine.Call("erosion_export").As<float[]>(),
+            RegionBaseHeight = _engine.Call("region_base_height_export").As<float[]>(),
+            RegionGradient = _engine.Call("region_gradient_export").As<float[]>(),
+            RegionGradientRot = _engine.Call("region_gradient_rotation_export").As<float[]>(),
+            RegionGradientAnchor = _engine.Call("region_gradient_anchor_export").As<float[]>(),
         };
     }
 
@@ -636,8 +909,8 @@ public partial class DhceWorld : Node3D
     public void Load(DhceWorldState s)
     {
         if (s == null) return;
-        Seed = s.Seed; WorldSizeKm = s.WorldSizeKm; SpacingM = s.SpacingM; Octaves = s.Octaves;
-        TerrainHeightKm = s.TerrainHeightKm; ChunkSizeM = s.ChunkSizeM; BaseBlendM = s.BaseBlendM;
+        Seed = s.Seed; WorldSizeKm = s.WorldSizeKm; WorldHeightKm = s.WorldHeightKm; SpacingM = s.SpacingM; Octaves = s.Octaves;
+        TerrainHeightKm = s.TerrainHeightKm; ChunkSizeM = s.ChunkSizeM; BaseBlendM = s.BaseBlendM; FlatBase = s.FlatBase;
         LapseRate = s.LapseRate; OrographicStrength = s.OrographicStrength; WindDeg = s.WindDeg;
         _loadingState = true;
         Generate(); // deterministic mesh + chunk slots from the params (skips the default sea level)
@@ -666,6 +939,12 @@ public partial class DhceWorld : Node3D
         SetF("set_region_lake_depth_table", s.RegionLakeDepth); // per-Region lake thresholds (saved liquid already holds the lakes)
         SetF("set_river_threshold_table", s.RegionRiverThreshold); // per-Region river thresholds (saved liquid already holds the rivers)
         SetF("set_erosion_table", s.RegionErosion); // per-Region erosion strength
+        // Per-Region base-terrain knobs (the saved elevation above already reflects them; restored so the
+        // dock shows them and a future Generate re-applies them).
+        SetF("set_region_base_height_table", s.RegionBaseHeight);
+        SetF("set_region_gradient_table", s.RegionGradient);
+        SetF("set_region_gradient_rotation_table", s.RegionGradientRot);
+        SetF("set_region_gradient_anchor_table", s.RegionGradientAnchor);
         _engine.Call("refresh_colors");
         for (int i = 0; i < _built.Length; i++) if (_built[i]) BuildChunk(i, _chunkLod[i] == 1); // re-tessellate the meshed ring
     }
