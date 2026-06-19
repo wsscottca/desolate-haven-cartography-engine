@@ -1,3 +1,15 @@
+> # ⚠️ DEPRECATED — archived 2026-06-19
+>
+> DHCE (Godot 4.6 + Rust core) is **retired and no longer maintained**. World
+> generation has moved to **[Gaea](https://quadspinner.com/)** and the engine to
+> **Unreal Engine 5**. This repository is kept only as a historical archive of the
+> Godot/Rust authoring tool.
+>
+> Full history is preserved on this remote. Notable branches:
+> - `n3a-tool-shell` — the N3 in-editor tool shell (minimap, world sun, water-drain).
+> - `feat/dhce-cursor-and-sculpt-tools` — the last active work (surface-conforming
+>   brush cursor, sculpt tools, hydraulic erosion, canon region import).
+
 # Desolate Haven Cartography Engine (DHCE)
 
 A clean-room, true-3D world-authoring tool with real liquid physics. The generation
